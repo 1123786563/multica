@@ -56,30 +56,6 @@ type planNodeSpec struct {
 	OutputContract []byte
 }
 
-type AgentResultArtifact struct {
-	Type     string          `json:"type"`
-	URI      string          `json:"uri,omitempty"`
-	Content  json.RawMessage `json:"content,omitempty"`
-	Metadata json.RawMessage `json:"metadata,omitempty"`
-}
-
-type AgentStructuredResult struct {
-	Status           string                `json:"status"`
-	Summary          string                `json:"summary"`
-	Artifacts        []AgentResultArtifact `json:"artifacts"`
-	ChangedFiles     []string              `json:"changed_files"`
-	TestResult       json.RawMessage       `json:"test_result"`
-	Claims           []string              `json:"claims"`
-	CriteriaEvidence []any                 `json:"criteria_evidence"`
-	Risks            []string              `json:"risks"`
-	NextActions      []string              `json:"next_actions"`
-	Confidence       float64               `json:"confidence"`
-}
-
-type legacyTaskPayload struct {
-	Output string `json:"output"`
-}
-
 func NewOrchestrator(q *db.Queries, tx TxStarter, taskSvc *TaskService) *Orchestrator {
 	return &Orchestrator{Queries: q, TxStarter: tx, TaskSvc: taskSvc, Logger: slog.Default()}
 }
@@ -420,9 +396,13 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 	if err != nil {
 		return err
 	}
-	result := parseAgentResult(rawResult)
-	pass, reason := hardCheckNodeResult(node, result)
-	waitHuman := !pass && shouldWaitForHuman(result)
+	validation := ParseAgentResultPayload(rawResult, ResultParseOptions{AllowLegacyCompatibility: true})
+	result := validation.Result
+	pass, reason := false, "invalid_result_payload"
+	if validation.Valid {
+		pass, reason = hardCheckNodeResult(node, result)
+	}
+	waitHuman := validation.Valid && !pass && shouldWaitForHuman(result)
 
 	o.Logger.Info("orchestration: task completed, evaluating",
 		"task_id", util.UUIDToString(task.ID),
@@ -443,32 +423,39 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 		if err := qtx.MarkOrchestrationNodeEvaluating(ctx, nodeID); err != nil {
 			return err
 		}
-		for _, artifact := range normalizedArtifacts(result) {
-			content := artifact.Content
-			if len(content) == 0 {
-				content = []byte(`{}`)
-			}
-			metadata := artifact.Metadata
-			if len(metadata) == 0 {
-				metadata = []byte(`{}`)
-			}
-			if _, err := qtx.CreateOrchestrationArtifact(ctx, db.CreateOrchestrationArtifactParams{
-				PlanID:   planID,
-				NodeID:   nodeID,
-				TaskID:   task.ID,
-				Type:     artifact.Type,
-				Uri:      pgtype.Text{String: artifact.URI, Valid: artifact.URI != ""},
-				Content:  content,
-				Metadata: metadata,
-			}); err != nil {
-				return err
+		if validation.Valid {
+			for _, artifact := range NormalizeArtifacts(result) {
+				content := artifact.Content
+				if len(content) == 0 {
+					content = []byte(`{}`)
+				}
+				metadata := artifact.Metadata
+				if len(metadata) == 0 {
+					metadata = []byte(`{}`)
+				}
+				if _, err := qtx.CreateOrchestrationArtifact(ctx, db.CreateOrchestrationArtifactParams{
+					PlanID:   planID,
+					NodeID:   nodeID,
+					TaskID:   task.ID,
+					Type:     artifact.Type,
+					Uri:      pgtype.Text{String: artifact.URI, Valid: artifact.URI != ""},
+					Content:  content,
+					Metadata: metadata,
+				}); err != nil {
+					return err
+				}
 			}
 		}
-		payload := mustJSON(map[string]any{
+		eventPayload := map[string]any{
 			"pass":    pass,
 			"reason":  reason,
 			"summary": result.Summary,
-		})
+		}
+		if !validation.Valid {
+			eventPayload["validation_errors"] = validation.Errors
+			eventPayload["compatibility_mode"] = validation.CompatibilityMode
+		}
+		payload := mustJSON(eventPayload)
 		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
 			PlanID:    planID,
 			NodeID:    nodeID,
@@ -862,22 +849,6 @@ func (o *Orchestrator) runInTx(ctx context.Context, fn func(*db.Queries) error) 
 	return tx.Commit(ctx)
 }
 
-func parseAgentResult(raw []byte) AgentStructuredResult {
-	var result AgentStructuredResult
-	if len(raw) == 0 {
-		return result
-	}
-	if err := json.Unmarshal(raw, &result); err == nil && (result.Summary != "" || len(result.Artifacts) > 0 || result.Status != "") {
-		return result
-	}
-	var legacy legacyTaskPayload
-	if err := json.Unmarshal(raw, &legacy); err == nil {
-		result.Status = "completed"
-		result.Summary = strings.TrimSpace(legacy.Output)
-	}
-	return result
-}
-
 func hardCheckNodeResult(node db.OrchestrationNode, result AgentStructuredResult) (bool, string) {
 	if result.Status == "failed" {
 		return false, "agent_reported_failed"
@@ -894,65 +865,19 @@ func hardCheckNodeResult(node db.OrchestrationNode, result AgentStructuredResult
 	if testResultFailed(result.TestResult) {
 		return false, "test_result_failed"
 	}
-	if len(result.CriteriaEvidence) == 0 {
+	for _, artifact := range result.Artifacts {
+		if artifact.Type == "test_result" && testResultFailed(artifact.Content) {
+			return false, "test_result_failed"
+		}
+	}
+	if !criteriaEvidenceValid(result.CriteriaEvidence) {
 		return false, "missing_criteria_evidence"
 	}
 	return true, "hard_check_passed"
 }
 
-func hasArtifactType(artifacts []AgentResultArtifact, artifactType string) bool {
-	for _, artifact := range artifacts {
-		if artifact.Type == artifactType {
-			return true
-		}
-	}
-	return false
-}
-
-func testResultFailed(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var result struct {
-		Status  string `json:"status"`
-		Passed  *bool  `json:"passed"`
-		Success *bool  `json:"success"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return false
-	}
-	if strings.EqualFold(result.Status, "failed") || strings.EqualFold(result.Status, "failure") {
-		return true
-	}
-	if result.Passed != nil && !*result.Passed {
-		return true
-	}
-	return result.Success != nil && !*result.Success
-}
-
 func shouldWaitForHuman(result AgentStructuredResult) bool {
 	return result.Confidence > 0 && result.Confidence < 0.5
-}
-
-func normalizedArtifacts(result AgentStructuredResult) []AgentResultArtifact {
-	artifacts := result.Artifacts
-	if len(result.ChangedFiles) > 0 {
-		content, _ := json.Marshal(map[string]any{"changed_files": result.ChangedFiles})
-		artifacts = append(artifacts, AgentResultArtifact{Type: "diff", Content: content})
-	}
-	if len(result.TestResult) > 0 {
-		artifacts = append(artifacts, AgentResultArtifact{Type: "test_result", Content: result.TestResult})
-	}
-	if strings.TrimSpace(result.Summary) != "" {
-		content, _ := json.Marshal(map[string]string{"summary": result.Summary})
-		artifacts = append(artifacts, AgentResultArtifact{Type: "summary", Content: content})
-	}
-	for i := range artifacts {
-		if artifacts[i].Type == "" {
-			artifacts[i].Type = "summary"
-		}
-	}
-	return artifacts
 }
 
 func mustJSON(v any) []byte {
