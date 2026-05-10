@@ -6,7 +6,7 @@ export default defineConfig({
   timeout: 30000,
   retries: 0,
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? process.env.FRONTEND_ORIGIN ?? "http://localhost:3000",
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? process.env.FRONTEND_ORIGIN ?? "http://localhost:3300",
     headless: true,
   },
   projects: [

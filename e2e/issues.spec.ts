@@ -5,9 +5,9 @@ import type { TestApiClient } from "./fixtures";
 test.describe("Issues", () => {
   let api: TestApiClient;
 
-  test.beforeEach(async ({ page }) => {
-    api = await createTestApi();
-    await loginAsDefault(page);
+  test.beforeEach(async ({ page }, testInfo) => {
+    api = await createTestApi(testInfo);
+    await loginAsDefault(page, testInfo);
   });
 
   test.afterEach(async () => {
@@ -41,6 +41,7 @@ test.describe("Issues", () => {
     const newIssueButton = page.getByRole("button", { name: "New Issue" });
     await expect(newIssueButton).toBeVisible();
     await newIssueButton.click();
+    await page.getByRole("button", { name: "Switch to Manual" }).click();
 
     const title = "E2E Created " + Date.now();
     const titleInput = page.getByRole("textbox", { name: "Issue title" });
@@ -84,6 +85,7 @@ test.describe("Issues", () => {
 
   test("can dismiss issue creation", async ({ page }) => {
     await page.getByRole("button", { name: "New Issue" }).click();
+    await page.getByRole("button", { name: "Switch to Manual" }).click();
 
     const titleInput = page.getByRole("textbox", { name: "Issue title" });
     await expect(titleInput).toBeVisible();

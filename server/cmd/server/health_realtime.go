@@ -69,7 +69,7 @@ func hasBearerToken(r *http.Request, want string) bool {
 
 func isDirectLoopbackRequest(r *http.Request) bool {
 	// Any indication that the request was relayed by a proxy disqualifies
-	// the loopback shortcut: behind Caddy/Nginx -> localhost:8080, public
+	// the loopback shortcut: behind Caddy/Nginx -> localhost:8280, public
 	// callers would otherwise appear as 127.0.0.1 here. We deliberately do
 	// NOT trust these headers to identify the real client — we only use
 	// their presence as a "this is proxied, fail closed" signal.

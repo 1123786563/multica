@@ -339,9 +339,10 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
   const workspace = useCurrentWorkspace();
   const p = useWorkspacePaths();
   const { data: workspaces = EMPTY_WORKSPACES } = useQuery(workspaceListOptions());
+  const currentWorkspace = workspaces.find((ws) => ws.id === workspace?.id) ?? workspace;
   const { data: myInvitations = EMPTY_INVITATIONS } = useQuery(myInvitationListOptions());
 
-  const wsId = workspace?.id;
+  const wsId = currentWorkspace?.id;
   const { data: inboxItems = EMPTY_INBOX } = useQuery({
     queryKey: wsId ? inboxKeys.list(wsId) : ["inbox", "disabled"],
     queryFn: () => api.listInbox(),
@@ -464,13 +465,13 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
                   render={
                     <SidebarMenuButton>
                       <span className="relative">
-                        <WorkspaceAvatar name={workspace?.name ?? "M"} size="sm" />
+                        <WorkspaceAvatar name={currentWorkspace?.name ?? "M"} size="sm" />
                         {myInvitations.length > 0 && (
                           <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-brand ring-1 ring-sidebar" />
                         )}
                       </span>
                       <span className="flex-1 truncate font-medium">
-                        {workspace?.name ?? "Multica"}
+                        {currentWorkspace?.name ?? "Multica"}
                       </span>
                       <ChevronDown className="size-3 text-muted-foreground" />
                     </SidebarMenuButton>
@@ -512,7 +513,7 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
                       >
                         <WorkspaceAvatar name={ws.name} size="sm" />
                         <span className="flex-1 truncate">{ws.name}</span>
-                        {ws.id === workspace?.id && (
+                        {ws.id === currentWorkspace?.id && (
                           <Check className="h-3.5 w-3.5 text-primary" />
                         )}
                       </DropdownMenuItem>

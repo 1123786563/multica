@@ -81,6 +81,7 @@ import type {
   ListAutopilotRunsResponse,
   NotificationPreferenceResponse,
   NotificationPreferences,
+  IssueOrchestration,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -90,8 +91,10 @@ import { parseWithFallback } from "./schema";
 import {
   ChildIssuesResponseSchema,
   CommentsListSchema,
+  EMPTY_ISSUE_ORCHESTRATION,
   EMPTY_LIST_ISSUES_RESPONSE,
   EMPTY_TIMELINE_ENTRIES,
+  IssueOrchestrationSchema,
   ListIssuesResponseSchema,
   SubscribersListSchema,
   TimelineEntriesSchema,
@@ -781,6 +784,25 @@ export class ApiClient {
 
   async listTasksByIssue(issueId: string): Promise<AgentTask[]> {
     return this.fetch(`/api/issues/${issueId}/task-runs`);
+  }
+
+  async getIssueOrchestration(issueId: string): Promise<IssueOrchestration> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/orchestration`);
+    return parseWithFallback(raw, IssueOrchestrationSchema, EMPTY_ISSUE_ORCHESTRATION, {
+      endpoint: "GET /api/issues/:id/orchestration",
+    });
+  }
+
+  async approveOrchestrationNode(nodeId: string): Promise<void> {
+    await this.fetch(`/api/orchestration/nodes/${nodeId}/approve`, { method: "POST" });
+  }
+
+  async retryOrchestrationNode(nodeId: string): Promise<AgentTask> {
+    return this.fetch(`/api/orchestration/nodes/${nodeId}/retry`, { method: "POST" });
+  }
+
+  async cancelOrchestrationPlan(planId: string): Promise<void> {
+    await this.fetch(`/api/orchestration/plans/${planId}/cancel`, { method: "POST" });
   }
 
   async getIssueUsage(issueId: string): Promise<IssueUsageSummary> {

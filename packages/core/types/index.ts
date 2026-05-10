@@ -37,6 +37,11 @@ export type {
   RuntimeLocalSkillsResult,
   RuntimeLocalSkillImportResult,
   IssueUsageSummary,
+  OrchestrationPlan,
+  OrchestrationNode,
+  OrchestrationEvent,
+  OrchestrationArtifact,
+  IssueOrchestration,
 } from "./agent";
 export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser, Invitation } from "./workspace";
 export type { InboxItem, InboxSeverity, InboxItemType } from "./inbox";

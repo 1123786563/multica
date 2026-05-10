@@ -46,7 +46,7 @@ describe("runtime config", () => {
   });
 
   it("derives ws for http api URLs", () => {
-    expect(deriveWsUrl("http://localhost:8080")).toBe("ws://localhost:8080/ws");
+    expect(deriveWsUrl("http://localhost:8280")).toBe("ws://localhost:8280/ws");
   });
 
   it("accepts explicit appUrl and wsUrl", () => {
@@ -98,24 +98,24 @@ describe("runtime config", () => {
   it("preserves electron-vite dev env precedence", () => {
     expect(
       runtimeConfigFromDevEnv({
-        apiUrl: "http://dev-api.example.test:8080/",
-        wsUrl: "ws://dev-api.example.test:8080/ws/",
-        appUrl: "http://dev-app.example.test:3000/",
+        apiUrl: "http://dev-api.example.test:8280/",
+        wsUrl: "ws://dev-api.example.test:8280/ws/",
+        appUrl: "http://dev-app.example.test:3300/",
       }),
     ).toEqual({
       schemaVersion: 1,
-      apiUrl: "http://dev-api.example.test:8080",
-      wsUrl: "ws://dev-api.example.test:8080/ws",
-      appUrl: "http://dev-app.example.test:3000",
+      apiUrl: "http://dev-api.example.test:8280",
+      wsUrl: "ws://dev-api.example.test:8280/ws",
+      appUrl: "http://dev-app.example.test:3300",
     });
   });
 
   it("falls back to local web URL when dev apiUrl is localhost", () => {
-    expect(runtimeConfigFromDevEnv({ apiUrl: "http://localhost:8080" })).toEqual({
+    expect(runtimeConfigFromDevEnv({ apiUrl: "http://localhost:8280" })).toEqual({
       schemaVersion: 1,
-      apiUrl: "http://localhost:8080",
-      wsUrl: "ws://localhost:8080/ws",
-      appUrl: "http://localhost:3000",
+      apiUrl: "http://localhost:8280",
+      wsUrl: "ws://localhost:8280/ws",
+      appUrl: "http://localhost:3300",
     });
   });
 

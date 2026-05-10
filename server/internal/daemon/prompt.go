@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,9 @@ import (
 // Keep this minimal — detailed instructions live in CLAUDE.md / AGENTS.md
 // injected by execenv.InjectRuntimeConfig.
 func BuildPrompt(task Task) string {
+	if task.Orchestration != nil {
+		return buildOrchestrationNodePrompt(task)
+	}
 	if task.ChatSessionID != "" {
 		return buildChatPrompt(task)
 	}
@@ -29,6 +33,67 @@ func BuildPrompt(task Task) string {
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
 	fmt.Fprintf(&b, "If you need comment history, `multica issue comment list %s --output json` returns all comments for the issue (server caps at 2000). Pass `--since <RFC3339>` to fetch only comments newer than a known cursor.\n", task.IssueID)
 	return b.String()
+}
+
+func buildOrchestrationNodePrompt(task Task) string {
+	ctx := task.Orchestration
+	var b strings.Builder
+	b.WriteString("You are executing one orchestration node in a Multica workspace.\n\n")
+	b.WriteString("You are NOT responsible for the entire issue. You are responsible ONLY for the current node.\n\n")
+	fmt.Fprintf(&b, "Plan ID: %s\n", ctx.OrchestrationPlanID)
+	fmt.Fprintf(&b, "Node ID: %s\n", ctx.OrchestrationNodeID)
+	fmt.Fprintf(&b, "Node Type: %s\n\n", ctx.NodeType)
+	b.WriteString("Overall Objective:\n")
+	b.WriteString(ctx.Objective)
+	b.WriteString("\n\nCurrent Node:\n")
+	b.WriteString(ctx.NodeTitle)
+	if strings.TrimSpace(ctx.NodeDescription) != "" {
+		b.WriteString("\n")
+		b.WriteString(ctx.NodeDescription)
+	}
+	b.WriteString("\n\nInput Contract:\n")
+	b.WriteString(formatRawJSON(ctx.InputContract))
+	b.WriteString("\n\nOutput Contract:\n")
+	b.WriteString(formatRawJSON(ctx.OutputContract))
+	b.WriteString("\n\nAcceptance Criteria:\n")
+	b.WriteString(formatRawJSON(ctx.AcceptanceCriteria))
+	b.WriteString("\n\nContext Refs:\n")
+	b.WriteString(formatRawJSON(ctx.ContextRefs))
+	b.WriteString("\n\nExecution Rules:\n")
+	b.WriteString("1. Execute only this node.\n")
+	b.WriteString("2. Do not mark the issue as done.\n")
+	b.WriteString("3. Do not create downstream tasks or trigger other agents.\n")
+	b.WriteString("4. Do not claim completion without evidence.\n")
+	b.WriteString("5. Return a final structured JSON object in your normal task output.\n\n")
+	b.WriteString("Required final JSON shape:\n")
+	b.WriteString(`{
+  "status": "completed",
+  "summary": "What you did.",
+  "artifacts": [{"type": "diff|file|log|test_result|decision|command_output|summary", "uri": "", "content": {}, "metadata": {}}],
+  "changed_files": ["path/to/file"],
+  "claims": ["Concrete claim"],
+  "criteria_evidence": [{"criterion": "criterion text", "evidence": "evidence text"}],
+  "risks": [],
+  "next_actions": [],
+  "confidence": 0.8
+}`)
+	b.WriteString("\n")
+	return b.String()
+}
+
+func formatRawJSON(raw json.RawMessage) string {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "" {
+		return "{}"
+	}
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	return string(out)
 }
 
 // buildQuickCreatePrompt constructs a prompt for quick-create tasks. The

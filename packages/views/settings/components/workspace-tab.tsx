@@ -7,6 +7,7 @@ import { Textarea } from "@multica/ui/components/ui/textarea";
 import { Label } from "@multica/ui/components/ui/label";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
+import { Switch } from "@multica/ui/components/ui/switch";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -118,6 +119,8 @@ export function WorkspaceTab() {
   const ownerCount = members.filter((m) => m.role === "owner").length;
   const isSoleOwner = isOwner && ownerCount <= 1;
   const isSoleMember = members.length <= 1;
+  const orchestrationEnabled =
+    (workspace?.settings as Record<string, unknown> | undefined)?.orchestration_enabled === true;
 
   useEffect(() => {
     setName(workspace?.name ?? "");
@@ -134,10 +137,32 @@ export function WorkspaceTab() {
         description,
         context,
       });
-      qc.setQueryData(workspaceKeys.list(), (old: Workspace[] | undefined) =>
+      qc.setQueriesData({ queryKey: workspaceKeys.list() }, (old: Workspace[] | undefined) =>
         old?.map((ws) => (ws.id === updated.id ? updated : ws)),
       );
+      await qc.invalidateQueries({ queryKey: workspaceKeys.list() });
       toast.success(t(($) => $.workspace.toast_saved));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t(($) => $.workspace.toast_save_failed));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleOrchestrationToggle = async (checked: boolean) => {
+    if (!workspace || !canManageWorkspace) return;
+    setSaving(true);
+    try {
+      const updated = await api.updateWorkspace(workspace.id, {
+        settings: {
+          ...((workspace.settings as Record<string, unknown>) ?? {}),
+          orchestration_enabled: checked,
+        },
+      });
+      qc.setQueriesData({ queryKey: workspaceKeys.list() }, (old: Workspace[] | undefined) =>
+        old?.map((ws) => (ws.id === updated.id ? updated : ws)),
+      );
+      await qc.invalidateQueries({ queryKey: workspaceKeys.list() });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t(($) => $.workspace.toast_save_failed));
     } finally {
@@ -224,6 +249,27 @@ export function WorkspaceTab() {
                 className="mt-1 resize-none"
                 placeholder={t(($) => $.workspace.context_placeholder)}
               />
+            </div>
+            <div>
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-0.5 pr-4">
+                  <Label
+                    htmlFor="orchestration-enabled"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {t(($) => $.workspace.orchestration_label)}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t(($) => $.workspace.orchestration_description)}
+                  </p>
+                </div>
+                <Switch
+                  id="orchestration-enabled"
+                  checked={orchestrationEnabled}
+                  onCheckedChange={handleOrchestrationToggle}
+                  disabled={!canManageWorkspace || saving}
+                />
+              </div>
             </div>
             <div>
               <Label className="text-xs text-muted-foreground">{t(($) => $.workspace.slug_label)}</Label>

@@ -94,7 +94,7 @@ export class WSClient {
 
     this.ws.onclose = () => {
       this.logger.warn("disconnected, reconnecting in 3s");
-      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
+      this.reconnectTimer = setTimeout(() => this.connect(), 3300);
     };
 
     this.ws.onerror = () => {

@@ -83,7 +83,7 @@ make db-down          # Stop the shared PostgreSQL container
 
 # Frontend (all commands go through Turborepo)
 pnpm install
-pnpm dev:web          # Next.js dev server (port 3000)
+pnpm dev:web          # Next.js dev server (port 3300)
 pnpm dev:desktop      # Electron dev (electron-vite, HMR)
 pnpm build            # Build all frontend apps
 pnpm typecheck        # TypeScript check (all packages + apps via turbo)
@@ -91,7 +91,7 @@ pnpm lint             # ESLint
 pnpm test             # TS tests (Vitest, all packages + apps via turbo)
 
 # Backend (Go)
-make server           # Run Go server only (port 8080)
+make server           # Run Go server only (port 8280)
 make daemon           # Run local daemon
 make build            # Build server + CLI binaries to server/bin/
 make cli ARGS="..."   # Run multica CLI (e.g. make cli ARGS="config")

@@ -100,6 +100,7 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
           size="icon-sm"
           disabled={isEmpty || submitting}
           onClick={handleSubmit}
+          aria-label={t(($) => $.comment.submit_action)}
         >
           {submitting ? (
             <Loader2 className="animate-spin" />

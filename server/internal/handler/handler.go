@@ -100,6 +100,8 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
+	orchestrator := service.NewOrchestrator(queries, txStarter, taskSvc)
+	taskSvc.Orchestrator = orchestrator
 	return &Handler{
 		Queries:               queries,
 		DB:                    executor,

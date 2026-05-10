@@ -10,7 +10,7 @@ import { isSafeExternalHttpUrl, openExternalSafely } from "./external-url";
 describe("isSafeExternalHttpUrl", () => {
   it("allows http and https URLs", () => {
     expect(isSafeExternalHttpUrl("https://multica.ai")).toBe(true);
-    expect(isSafeExternalHttpUrl("http://localhost:3000/auth")).toBe(true);
+    expect(isSafeExternalHttpUrl("http://localhost:3300/auth")).toBe(true);
   });
 
   it("allows https URLs with embedded credentials", () => {

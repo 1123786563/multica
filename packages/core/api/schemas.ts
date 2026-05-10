@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ListIssuesResponse, TimelineEntry } from "../types";
+import type { IssueOrchestration, ListIssuesResponse, TimelineEntry } from "../types";
 
 // ---------------------------------------------------------------------------
 // Schemas for the highest-risk API endpoints — those whose responses drive
@@ -135,3 +135,78 @@ export const SubscribersListSchema = z.array(SubscriberSchema);
 export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
 }).loose();
+
+const OrchestrationPlanSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  source_type: z.string(),
+  source_id: z.string(),
+  objective: z.string(),
+  status: z.string(),
+  policy: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  created_by_type: z.string().nullable(),
+  created_by_id: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+const OrchestrationNodeSchema = z.object({
+  id: z.string(),
+  plan_id: z.string(),
+  type: z.string(),
+  title: z.string(),
+  description: z.string().nullable(),
+  status: z.string(),
+  assignee_agent_id: z.string().nullable(),
+  input_contract: z.record(z.string(), z.unknown()).default({}),
+  output_contract: z.record(z.string(), z.unknown()).default({}),
+  evaluator_policy: z.record(z.string(), z.unknown()).default({}),
+  retry_policy: z.record(z.string(), z.unknown()).default({}),
+  runtime_constraints: z.record(z.string(), z.unknown()).default({}),
+  attempt_count: z.number().default(0),
+  max_attempts: z.number().default(0),
+  started_at: z.string().nullable(),
+  completed_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+const OrchestrationEventSchema = z.object({
+  id: z.string(),
+  plan_id: z.string(),
+  node_id: z.string().nullable(),
+  task_id: z.string().nullable(),
+  event_type: z.string(),
+  actor_type: z.string(),
+  actor_id: z.string().nullable(),
+  payload: z.record(z.string(), z.unknown()).default({}),
+  created_at: z.string(),
+}).loose();
+
+const OrchestrationArtifactSchema = z.object({
+  id: z.string(),
+  plan_id: z.string(),
+  node_id: z.string().nullable(),
+  task_id: z.string().nullable(),
+  type: z.string(),
+  uri: z.string().nullable(),
+  content: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  content_hash: z.string().nullable(),
+  created_at: z.string(),
+}).loose();
+
+export const IssueOrchestrationSchema = z.object({
+  plans: z.array(OrchestrationPlanSchema).default([]),
+  nodes: z.array(OrchestrationNodeSchema).default([]),
+  events: z.array(OrchestrationEventSchema).default([]),
+  artifacts: z.array(OrchestrationArtifactSchema).default([]),
+}).loose();
+
+export const EMPTY_ISSUE_ORCHESTRATION: IssueOrchestration = {
+  plans: [],
+  nodes: [],
+  events: [],
+  artifacts: [],
+};

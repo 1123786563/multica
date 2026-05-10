@@ -24,12 +24,13 @@ import (
 )
 
 type TaskService struct {
-	Queries   *db.Queries
-	TxStarter TxStarter
-	Hub       *realtime.Hub
-	Bus       *events.Bus
-	Analytics analytics.Client
-	Wakeup    TaskWakeupNotifier
+	Queries      *db.Queries
+	TxStarter    TxStarter
+	Hub          *realtime.Hub
+	Bus          *events.Bus
+	Analytics    analytics.Client
+	Wakeup       TaskWakeupNotifier
+	Orchestrator *Orchestrator
 	// EmptyClaim caches "this runtime has no queued task" so the daemon
 	// poll path can skip a Postgres scan on the steady-state empty case.
 	// Optional — a nil cache disables the fast path and every claim
@@ -869,6 +870,9 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.Ag
 
 	slog.Info("task started", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskStarted(ctx, task)
+	if s.Orchestrator != nil {
+		s.Orchestrator.OnTaskStarted(ctx, task)
+	}
 	return &task, nil
 }
 
@@ -948,6 +952,15 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 
 	slog.Info("task completed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskCompleted(ctx, task)
+	isOrchestrationTask := false
+	if _, ok := ParseOrchestrationTaskContext(task.Context); ok {
+		isOrchestrationTask = true
+		if s.Orchestrator != nil {
+			if err := s.Orchestrator.OnTaskCompleted(ctx, task, result); err != nil {
+				slog.Warn("orchestration completion failed", "task_id", util.UUIDToString(task.ID), "error", err)
+			}
+		}
+	}
 
 	// Invariant: every completed issue task must have at least one agent
 	// comment on the issue, so the user always sees something when a run
@@ -957,7 +970,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	// tasks, TriggerCommentID threads the fallback under the original comment;
 	// for assignment-triggered tasks it is NULL and the fallback is top-level.
 	// Chat tasks have no IssueID and are handled separately below.
-	if task.IssueID.Valid {
+	if task.IssueID.Valid && !isOrchestrationTask {
 		agentCommented, _ := s.Queries.HasAgentCommentedSince(ctx, db.HasAgentCommentedSinceParams{
 			IssueID:  task.IssueID,
 			AuthorID: task.AgentID,

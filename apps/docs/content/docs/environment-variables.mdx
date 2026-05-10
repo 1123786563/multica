@@ -14,7 +14,7 @@ These are the core variables you must think about before deploying — some have
 | Variable | Default | Required in production? |
 |---|---|---|
 | `DATABASE_URL` | `postgres://multica:multica@localhost:5432/multica?sslmode=disable` | **Yes** |
-| `PORT` | `8080` | No (unless you change the port) |
+| `PORT` | `8280` | No (unless you change the port) |
 | `JWT_SECRET` | `multica-dev-secret-change-in-production` | **Yes** (the default is unsafe) |
 | `APP_ENV` | empty | **Yes** (must be `production`) |
 | `FRONTEND_ORIGIN` | empty | **Yes** (self-host must set its own domain) |
@@ -52,7 +52,7 @@ Optional. Leave unset for email + verification code only; configure it to add "S
 |---|---|---|
 | `GOOGLE_CLIENT_ID` | empty | Google Cloud OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | empty | Google Cloud OAuth secret |
-| `GOOGLE_REDIRECT_URI` | `http://localhost:3000/auth/callback` | OAuth callback URL (self-host: replace with your frontend domain) |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:3300/auth/callback` | OAuth callback URL (self-host: replace with your frontend domain) |
 
 **Takes effect at runtime**: the frontend reads these settings via `/api/config` at runtime, so **changing them requires no frontend rebuild or redeploy** — restart the server and they apply.
 
@@ -120,7 +120,7 @@ The daemon runs on the user's local machine, and its config is read from local e
 
 | Variable | Default | Description |
 |---|---|---|
-| `MULTICA_SERVER_URL` | `ws://localhost:8080/ws` | Server address (self-host: replace with your domain) |
+| `MULTICA_SERVER_URL` | `ws://localhost:8280/ws` | Server address (self-host: replace with your domain) |
 | `MULTICA_DAEMON_HEARTBEAT_INTERVAL` | `15s` | Heartbeat interval |
 | `MULTICA_DAEMON_POLL_INTERVAL` | `3s` | Task polling interval |
 | `MULTICA_DAEMON_MAX_CONCURRENT_TASKS` | `20` | Max concurrent tasks |
@@ -135,10 +135,10 @@ For a full explanation of how each parameter affects daemon behavior, see [Daemo
 |---|---|---|
 | `FRONTEND_ORIGIN` | empty | Frontend address. Invite email links, the CORS allowlist, and the cookie domain are all derived from this. When unset, invite email links fall back to the hosted domain `https://app.multica.ai` — self-host must set this explicitly |
 | `CORS_ALLOWED_ORIGINS` | empty | Additional allowed CORS origins (comma-separated) |
-| `ALLOWED_ORIGINS` | empty | WebSocket-specific origin allowlist (comma-separated); when unset, fallback order is `CORS_ALLOWED_ORIGINS` → `FRONTEND_ORIGIN` → `localhost:3000/5173/5174` |
+| `ALLOWED_ORIGINS` | empty | WebSocket-specific origin allowlist (comma-separated); when unset, fallback order is `CORS_ALLOWED_ORIGINS` → `FRONTEND_ORIGIN` → `localhost:3300/5173/5174` |
 
 <Callout type="warning">
-**Leaving `FRONTEND_ORIGIN` unset creates two silent failures**: (1) invite email links point at `https://app.multica.ai` (the hosted domain), and clicking them doesn't bring users back to your self-hosted instance; (2) WebSocket Origin checks fall back to `localhost:3000 / 5173 / 5174`, so every WebSocket connection in a production deployment is rejected and the frontend appears to "lose real-time updates."
+**Leaving `FRONTEND_ORIGIN` unset creates two silent failures**: (1) invite email links point at `https://app.multica.ai` (the hosted domain), and clicking them doesn't bring users back to your self-hosted instance; (2) WebSocket Origin checks fall back to `localhost:3300 / 5173 / 5174`, so every WebSocket connection in a production deployment is rejected and the frontend appears to "lose real-time updates."
 </Callout>
 
 ## Usage analytics

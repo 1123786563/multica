@@ -235,6 +235,10 @@ function useTriggerText(task: AgentTask): string {
       ? t(($) => $.execution_log.trigger_retry_attempt, { attempt: task.attempt })
       : t(($) => $.execution_log.trigger_retry);
   }
+  if (task.kind === "orchestration") {
+    const nodeTitle = task.orchestration?.node_title?.trim();
+    return retryPrefix + (nodeTitle || t(($) => $.execution_log.trigger_orchestration));
+  }
   if (task.autopilot_run_id) return t(($) => $.execution_log.trigger_autopilot);
   if (task.trigger_comment_id) return t(($) => $.execution_log.trigger_comment);
   return t(($) => $.execution_log.trigger_initial);

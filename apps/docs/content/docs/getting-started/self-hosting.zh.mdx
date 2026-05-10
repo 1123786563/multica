@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/ins
 multica setup self-host
 ```
 
-This installs the CLI, checks out the latest self-host assets, pulls the official Multica images from GHCR, and configures everything for localhost. Then open http://localhost:3000 and pick a login method: configure `RESEND_API_KEY` in `.env` for email-based codes (recommended), or leave Resend unset and copy the generated code from backend logs. See [Step 2 — Log In](#step-2--log-in) for details.
+This installs the CLI, checks out the latest self-host assets, pulls the official Multica images from GHCR, and configures everything for localhost. Then open http://localhost:3300 and pick a login method: configure `RESEND_API_KEY` in `.env` for email-based codes (recommended), or leave Resend unset and copy the generated code from backend logs. See [Step 2 — Log In](#step-2--log-in) for details.
 
 <Callout>
 If the self-host server is already running and you only need the CLI on a macOS/Linux machine, install it with Homebrew: `brew install multica-ai/tap/multica`.
@@ -59,8 +59,8 @@ If the selected GHCR tag has not been published yet, `make selfhost` now tells y
 
 Once ready:
 
-- **Frontend:** http://localhost:3000
-- **Backend API:** http://localhost:8080
+- **Frontend:** http://localhost:3300
+- **Backend API:** http://localhost:8280
 
 <Callout>
 If you prefer running the Docker Compose steps manually: `cp .env.example .env`, edit `JWT_SECRET`, then `docker compose -f docker-compose.selfhost.yml pull && docker compose -f docker-compose.selfhost.yml up -d`.
@@ -68,7 +68,7 @@ If you prefer running the Docker Compose steps manually: `cp .env.example .env`,
 
 ### Step 2 — Log In
 
-Open http://localhost:3000. The Docker self-host stack defaults to `APP_ENV=production` (set in `docker-compose.selfhost.yml`), and there is no fixed verification code by default. Pick one of the following to log in:
+Open http://localhost:3300. The Docker self-host stack defaults to `APP_ENV=production` (set in `docker-compose.selfhost.yml`), and there is no fixed verification code by default. Pick one of the following to log in:
 
 - **Recommended (production):** configure `RESEND_API_KEY` in `.env`, then restart the backend. Real verification codes will be sent to the email address you enter. See [Configuration](#configuration) below.
 - **Without email configured:** the verification code is generated server-side and printed to the backend container logs (look for `[DEV] Verification code for ...:`). Useful for one-off testing on a single machine.
@@ -123,12 +123,12 @@ multica daemon status
 ```
 
 <Callout>
-Alternatively, configure step by step: `multica config set server_url http://localhost:8080 && multica config set app_url http://localhost:3000 && multica login && multica daemon start`
+Alternatively, configure step by step: `multica config set server_url http://localhost:8280 && multica config set app_url http://localhost:3300 && multica login && multica daemon start`
 </Callout>
 
 ### Step 4 — Verify & Start Using
 
-1. Open your workspace at http://localhost:3000
+1. Open your workspace at http://localhost:3300
 2. Navigate to **Settings → Runtimes** — you should see your machine listed
 3. Go to **Settings → Agents** and create a new agent
 4. Create an issue and assign it to your agent
@@ -236,8 +236,8 @@ The `Secure` flag on session cookies is derived automatically from the scheme of
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8080` | Backend server port |
-| `FRONTEND_PORT` | `3000` | Frontend port |
+| `PORT` | `8280` | Backend server port |
+| `FRONTEND_PORT` | `3300` | Frontend port |
 | `CORS_ALLOWED_ORIGINS` | Value of `FRONTEND_ORIGIN` | Comma-separated list of allowed origins |
 | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
@@ -247,8 +247,8 @@ These are configured on each user's machine, not on the server:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MULTICA_SERVER_URL` | `ws://localhost:8080/ws` | WebSocket URL for daemon → server connection |
-| `MULTICA_APP_URL` | `http://localhost:3000` | Frontend URL for CLI login flow |
+| `MULTICA_SERVER_URL` | `ws://localhost:8280/ws` | WebSocket URL for daemon → server connection |
+| `MULTICA_APP_URL` | `http://localhost:3300` | Frontend URL for CLI login flow |
 | `MULTICA_DAEMON_POLL_INTERVAL` | `3s` | How often the daemon polls for tasks |
 | `MULTICA_DAEMON_HEARTBEAT_INTERVAL` | `15s` | Heartbeat frequency |
 
@@ -317,7 +317,7 @@ make build
 DATABASE_URL="your-database-url" ./server/bin/migrate up
 
 # Start the backend server
-DATABASE_URL="your-database-url" PORT=8080 JWT_SECRET="your-secret" ./server/bin/server
+DATABASE_URL="your-database-url" PORT=8280 JWT_SECRET="your-secret" ./server/bin/server
 ```
 
 For the frontend:
@@ -328,7 +328,7 @@ pnpm build
 
 # Start the frontend (production mode)
 cd apps/web
-REMOTE_API_URL=http://localhost:8080 pnpm start
+REMOTE_API_URL=http://localhost:8280 pnpm start
 ```
 
 ## Reverse Proxy
@@ -339,11 +339,11 @@ In production, put a reverse proxy in front of both the backend and frontend to 
 
 ```
 app.example.com {
-    reverse_proxy localhost:3000
+    reverse_proxy localhost:3300
 }
 
 api.example.com {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:8280
 }
 ```
 
@@ -359,7 +359,7 @@ server {
     ssl_certificate_key /path/to/key.pem;
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://localhost:3300;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -376,7 +376,7 @@ server {
     ssl_certificate_key /path/to/key.pem;
 
     location / {
-        proxy_pass http://localhost:8080;
+        proxy_pass http://localhost:8280;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -385,7 +385,7 @@ server {
 
     # WebSocket support
     location /ws {
-        proxy_pass http://localhost:8080;
+        proxy_pass http://localhost:8280;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

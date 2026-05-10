@@ -1401,10 +1401,11 @@ func (h *Handler) ReportTaskProgress(w http.ResponseWriter, r *http.Request) {
 
 // CompleteTask marks a running task as completed.
 type TaskCompleteRequest struct {
-	PRURL     string `json:"pr_url"`
-	Output    string `json:"output"`
-	SessionID string `json:"session_id"` // Claude session ID for future resumption
-	WorkDir   string `json:"work_dir"`   // working directory used during execution
+	PRURL     string          `json:"pr_url"`
+	Output    string          `json:"output"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	SessionID string          `json:"session_id"` // Claude session ID for future resumption
+	WorkDir   string          `json:"work_dir"`   // working directory used during execution
 }
 
 func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
@@ -1422,6 +1423,9 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, _ := json.Marshal(req)
+	if len(req.Result) > 0 {
+		result = req.Result
+	}
 	task, err := h.TaskService.CompleteTask(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir)
 	if err != nil {
 		slog.Warn("complete task failed", "task_id", taskID, "error", err)

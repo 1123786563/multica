@@ -114,6 +114,8 @@
     "description_placeholder": "这个工作区主要做什么？",
     "context_label": "上下文",
     "context_placeholder": "供工作区中的智能体参考的背景信息和上下文",
+    "orchestration_label": "启用编排",
+    "orchestration_description": "允许内核为分配给智能体的 issue 创建并管理编排计划。",
     "slug_label": "Slug",
     "save": "保存",
     "saving": "保存中...",

@@ -22,9 +22,9 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = Object.freeze({
 
 const LOCAL_DEV_RUNTIME_CONFIG: RuntimeConfig = Object.freeze({
   schemaVersion: 1,
-  apiUrl: "http://localhost:8080",
-  wsUrl: "ws://localhost:8080/ws",
-  appUrl: "http://localhost:3000",
+  apiUrl: "http://localhost:8280",
+  wsUrl: "ws://localhost:8280/ws",
+  appUrl: "http://localhost:3300",
 });
 
 export interface RuntimeConfigEnv {
@@ -110,8 +110,8 @@ export function deriveAppUrl(apiUrl: string): string {
   return trimTrailingSlash(url.toString());
 }
 
-// Dev variant: when the api host is the local backend (`localhost:8080` /
-// `127.0.0.1:8080`), the renderer is served from a different port (3000),
+// Dev variant: when the api host is the local backend (`localhost:8280` /
+// `127.0.0.1:8280`), the renderer is served from a different port (3300),
 // so deriving by host alone is wrong. Fall back to the local dev web URL
 // in that case; for any non-local host (e.g. a remote test environment),
 // trust the production-style derivation so `apiUrl=https://api.test.x`

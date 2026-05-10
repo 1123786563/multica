@@ -58,8 +58,8 @@ By default, `.env` points to:
 POSTGRES_DB=multica
 POSTGRES_PORT=5432
 DATABASE_URL=postgres://multica:multica@localhost:5432/multica?sslmode=disable
-PORT=8080
-FRONTEND_PORT=3000
+PORT=8280
+FRONTEND_PORT=3300
 ```
 
 ### Worktree
@@ -184,8 +184,8 @@ Example:
 
 - main checkout
   - database: `multica`
-  - backend: `8080`
-  - frontend: `3000`
+  - backend: `8280`
+  - frontend: `3300`
 - worktree checkout
   - database: `multica_my_feature_702`
   - backend: generated worktree port such as `18782`
@@ -362,7 +362,7 @@ Wait for the backend to be healthy:
 
 ```bash
 PORT=$(grep '^PORT=' .env.worktree 2>/dev/null || grep '^PORT=' .env | head -1 | cut -d= -f2)
-PORT=${PORT:-8080}
+PORT=${PORT:-8280}
 SERVER="http://localhost:${PORT}"
 
 for i in $(seq 1 30); do
@@ -411,7 +411,7 @@ OFFSET=$((HASH % 1000))
 PROFILE="dev-${SLUG}-${OFFSET}"
 
 FRONTEND_PORT=$(grep '^FRONTEND_PORT=' .env.worktree 2>/dev/null || grep '^FRONTEND_PORT=' .env | head -1 | cut -d= -f2)
-FRONTEND_PORT=${FRONTEND_PORT:-3000}
+FRONTEND_PORT=${FRONTEND_PORT:-3300}
 
 CONFIG_DIR="$HOME/.multica/profiles/$PROFILE"
 mkdir -p "$CONFIG_DIR"

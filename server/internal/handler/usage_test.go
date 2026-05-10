@@ -70,7 +70,7 @@ func TestWorkspaceUsage_BucketsByUsageTime(t *testing.T) {
 		})
 	}
 
-	insertTaskWithUsage(yesterdayLate, todayEarly, 1000)         // cross-midnight
+	insertTaskWithUsage(yesterdayLate, todayEarly, 1000)          // cross-midnight
 	insertTaskWithUsage(yesterdayMorning, yesterdayMorning, 2000) // full-day yesterday
 
 	// /api/usage/daily — daily breakdown.
@@ -129,8 +129,8 @@ func TestWorkspaceUsage_BucketsByUsageTime(t *testing.T) {
 			totalTasks += r.TaskCount
 		}
 	}
-	if totalInput < 3000 {
-		t.Errorf("summary: claude-3-5-sonnet input tokens expected >=3000 (1000 + 2000), got %d (full resp: %v)", totalInput, summaryResp)
+	if totalInput < 3300 {
+		t.Errorf("summary: claude-3-5-sonnet input tokens expected >=3300 (1000 + 2000), got %d (full resp: %v)", totalInput, summaryResp)
 	}
 	if totalTasks < 2 {
 		t.Errorf("summary: claude-3-5-sonnet task_count expected >=2, got %d (full resp: %v)", totalTasks, summaryResp)

@@ -10,7 +10,7 @@ import pg from "pg";
 // `||` (not `??`) so an empty `NEXT_PUBLIC_API_URL=` in .env still falls
 // back to localhost. dotenv sets unset-vs-empty both as "" — treating them
 // the same matches user intent.
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || `http://localhost:${process.env.PORT || "8080"}`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || `http://localhost:${process.env.PORT || "8280"}`;
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://multica:multica@localhost:5432/multica?sslmode=disable";
 
 interface TestWorkspace {
@@ -110,6 +110,7 @@ export class TestApiClient {
     if (res.ok) {
       const created = (await res.json()) as TestWorkspace;
       this.workspaceId = created.id;
+      this.workspaceSlug = created.slug;
       return created;
     }
 
@@ -117,6 +118,7 @@ export class TestApiClient {
     const created = refreshed.find((item) => item.slug === slug) ?? refreshed[0];
     if (created) {
       this.workspaceId = created.id;
+      this.workspaceSlug = created.slug;
       return created;
     }
 
@@ -135,6 +137,13 @@ export class TestApiClient {
 
   async deleteIssue(id: string) {
     await this.authedFetch(`/api/issues/${id}`, { method: "DELETE" });
+  }
+
+  async dismissStarterContent() {
+    await this.authedFetch("/api/me/starter-content/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ workspace_id: this.workspaceId }),
+    });
   }
 
   /** Clean up all issues created during this test. */

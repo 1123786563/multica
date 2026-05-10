@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -74,5 +75,43 @@ func TestBuildQuickCreatePromptProjectPinning(t *testing.T) {
 	}
 	if strings.Contains(plain, "--project") {
 		t.Errorf("buildQuickCreatePrompt without project must NOT mention --project, got:\n%s", plain)
+	}
+}
+
+func TestBuildOrchestrationNodePrompt(t *testing.T) {
+	task := Task{
+		ID:      "task-1",
+		IssueID: "issue-1",
+		Orchestration: &OrchestrationContext{
+			OrchestrationPlanID: "plan-1",
+			OrchestrationNodeID: "node-1",
+			NodeType:            "implement",
+			Objective:           "Implement orchestration kernel",
+			NodeTitle:           "Implement single node kernel",
+			OutputContract:      json.RawMessage(`{"required":["summary","artifacts"]}`),
+			AcceptanceCriteria:  json.RawMessage(`["Kernel owns completion"]`),
+		},
+	}
+
+	out := BuildPrompt(task)
+	mustContain := []string{
+		"You are executing one orchestration node",
+		"responsible ONLY for the current node",
+		"Plan ID: plan-1",
+		"Node ID: node-1",
+		"Node Type: implement",
+		"Do not mark the issue as done",
+		"Do not create downstream tasks",
+		"Do not claim completion without evidence",
+		`"changed_files"`,
+		`"criteria_evidence"`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Fatalf("orchestration prompt missing %q\n--- output ---\n%s", s, out)
+		}
+	}
+	if strings.Contains(out, "Start by running `multica issue get") {
+		t.Fatalf("orchestration prompt must not fall back to issue-oriented prompt:\n%s", out)
 	}
 }

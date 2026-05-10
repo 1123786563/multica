@@ -114,7 +114,7 @@ func TestRealtimeMetricsHandler_NoToken_LoopbackOnly(t *testing.T) {
 	})
 
 	// MUL-1342 review: when the server is behind a reverse proxy on
-	// localhost (Caddy / Nginx -> 127.0.0.1:8080), public callers reach
+	// localhost (Caddy / Nginx -> 127.0.0.1:8280), public callers reach
 	// the handler with RemoteAddr=127.0.0.1. The presence of forwarding
 	// headers must disqualify the loopback shortcut, otherwise the
 	// metrics surface is fully exposed in self-hosted deployments.

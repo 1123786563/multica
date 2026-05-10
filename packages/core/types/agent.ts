@@ -94,12 +94,89 @@ export interface AgentTask {
    * tasks that have no linked issue (so e.g. quick-create tasks render
    * with a meaningful title instead of falling through to "Untracked").
    */
-  kind?: "comment" | "autopilot" | "chat" | "quick_create" | "direct";
+  kind?: "comment" | "autopilot" | "chat" | "quick_create" | "orchestration" | "direct";
+  orchestration?: {
+    orchestration_plan_id?: string;
+    orchestration_node_id?: string;
+    orchestration_run_id?: string;
+    node_type?: string;
+    objective?: string;
+    node_title?: string;
+    node_description?: string;
+  } | null;
   /**
    * Local working directory pinned for this task by the daemon. Empty until
    * the daemon reports a work_dir (typically once execution starts).
    */
   work_dir?: string;
+}
+
+export interface OrchestrationPlan {
+  id: string;
+  workspace_id: string;
+  source_type: string;
+  source_id: string;
+  objective: string;
+  status: "planning" | "ready" | "running" | "waiting_human" | "completed" | "failed" | "cancelled";
+  policy: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_by_type: string | null;
+  created_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrchestrationNode {
+  id: string;
+  plan_id: string;
+  type: string;
+  title: string;
+  description: string | null;
+  status: "pending" | "ready" | "dispatched" | "running" | "evaluating" | "completed" | "failed" | "blocked" | "waiting_human" | "skipped" | "cancelled";
+  assignee_agent_id: string | null;
+  input_contract: Record<string, unknown>;
+  output_contract: Record<string, unknown>;
+  evaluator_policy: Record<string, unknown>;
+  retry_policy: Record<string, unknown>;
+  runtime_constraints: Record<string, unknown>;
+  attempt_count: number;
+  max_attempts: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrchestrationEvent {
+  id: string;
+  plan_id: string;
+  node_id: string | null;
+  task_id: string | null;
+  event_type: string;
+  actor_type: string;
+  actor_id: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface OrchestrationArtifact {
+  id: string;
+  plan_id: string;
+  node_id: string | null;
+  task_id: string | null;
+  type: string;
+  uri: string | null;
+  content: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  content_hash: string | null;
+  created_at: string;
+}
+
+export interface IssueOrchestration {
+  plans: OrchestrationPlan[];
+  nodes: OrchestrationNode[];
+  events: OrchestrationEvent[];
+  artifacts: OrchestrationArtifact[];
 }
 
 export interface Agent {

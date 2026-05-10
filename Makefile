@@ -12,8 +12,8 @@ POSTGRES_DB ?= multica
 POSTGRES_USER ?= multica
 POSTGRES_PASSWORD ?= multica
 POSTGRES_PORT ?= 5432
-PORT ?= 8080
-FRONTEND_PORT ?= 3000
+PORT ?= 8280
+FRONTEND_PORT ?= 3300
 FRONTEND_ORIGIN ?= http://localhost:$(FRONTEND_PORT)
 MULTICA_APP_URL ?= $(FRONTEND_ORIGIN)
 DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=disable
@@ -76,16 +76,16 @@ selfhost: ## Create .env if needed, then pull and start the official self-hosted
 	docker compose -f docker-compose.selfhost.yml up -d
 	@echo "==> Waiting for backend to be ready..."
 	@for i in $$(seq 1 30); do \
-		if curl -sf http://localhost:$${PORT:-8080}/health > /dev/null 2>&1; then \
+		if curl -sf http://localhost:$${PORT:-8280}/health > /dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done
-	@if curl -sf http://localhost:$${PORT:-8080}/health > /dev/null 2>&1; then \
+	@if curl -sf http://localhost:$${PORT:-8280}/health > /dev/null 2>&1; then \
 		echo ""; \
 		echo "✓ Multica is running!"; \
-		echo "  Frontend: http://localhost:$${FRONTEND_PORT:-3000}"; \
-		echo "  Backend:  http://localhost:$${PORT:-8080}"; \
+		echo "  Frontend: http://localhost:$${FRONTEND_PORT:-3300}"; \
+		echo "  Backend:  http://localhost:$${PORT:-8280}"; \
 		echo ""; \
 		echo "Images: $${MULTICA_BACKEND_IMAGE:-ghcr.io/multica-ai/multica-backend}:$${MULTICA_IMAGE_TAG:-latest}"; \
 		echo "        $${MULTICA_WEB_IMAGE:-ghcr.io/multica-ai/multica-web}:$${MULTICA_IMAGE_TAG:-latest}"; \
@@ -118,16 +118,16 @@ selfhost-build: ## Build backend/web from the current checkout and start the sel
 	docker compose -f docker-compose.selfhost.yml -f docker-compose.selfhost.build.yml up -d --build
 	@echo "==> Waiting for backend to be ready..."
 	@for i in $$(seq 1 30); do \
-		if curl -sf http://localhost:$${PORT:-8080}/health > /dev/null 2>&1; then \
+		if curl -sf http://localhost:$${PORT:-8280}/health > /dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done
-	@if curl -sf http://localhost:$${PORT:-8080}/health > /dev/null 2>&1; then \
+	@if curl -sf http://localhost:$${PORT:-8280}/health > /dev/null 2>&1; then \
 		echo ""; \
 		echo "✓ Multica is running!"; \
-		echo "  Frontend: http://localhost:$${FRONTEND_PORT:-3000}"; \
-		echo "  Backend:  http://localhost:$${PORT:-8080}"; \
+		echo "  Frontend: http://localhost:$${FRONTEND_PORT:-3300}"; \
+		echo "  Backend:  http://localhost:$${PORT:-8280}"; \
 		echo ""; \
 		echo "Log in: configure RESEND_API_KEY in .env for email codes,"; \
 		echo "        or read the generated code from backend logs when Resend is unset."; \

@@ -102,7 +102,7 @@ describe("LoginPage", () => {
     // Reset window.location for tests that change it
     Object.defineProperty(window, "location", {
       writable: true,
-      value: { href: "http://localhost:3000" },
+      value: { href: "http://localhost:3300" },
     });
   });
 
@@ -692,7 +692,7 @@ describe("validateCliCallback", () => {
   });
 
   it("accepts http://127.0.0.1", () => {
-    expect(validateCliCallback("http://127.0.0.1:8080/cb")).toBe(true);
+    expect(validateCliCallback("http://127.0.0.1:8280/cb")).toBe(true);
   });
 
   it("accepts 10.x.x.x private IPs", () => {
@@ -712,7 +712,7 @@ describe("validateCliCallback", () => {
 
   it("accepts 192.168.x.x private IPs", () => {
     expect(validateCliCallback("http://192.168.1.131:41117/callback")).toBe(true);
-    expect(validateCliCallback("http://192.168.0.1:8080/cb")).toBe(true);
+    expect(validateCliCallback("http://192.168.0.1:8280/cb")).toBe(true);
   });
 
   it("rejects https:// URLs", () => {

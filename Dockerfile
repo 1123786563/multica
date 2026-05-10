@@ -33,6 +33,6 @@ COPY server/migrations/ ./migrations/
 COPY docker/entrypoint.sh .
 RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
-EXPOSE 8080
+EXPOSE 8280
 
 ENTRYPOINT ["./entrypoint.sh"]

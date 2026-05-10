@@ -114,6 +114,8 @@
     "description_placeholder": "What does this workspace focus on?",
     "context_label": "Context",
     "context_placeholder": "Background information and context for AI agents working in this workspace",
+    "orchestration_label": "Enable orchestration",
+    "orchestration_description": "Let the kernel create and manage orchestration plans for agent-assigned issues.",
     "slug_label": "Slug",
     "save": "Save",
     "saving": "Saving...",

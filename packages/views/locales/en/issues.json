@@ -162,6 +162,7 @@
     "cancel_action": "Cancel",
     "edit_placeholder": "Edit comment...",
     "save_action": "Save",
+    "submit_action": "Submit comment",
     "cancel_edit": "Cancel",
     "copy_action": "Copy",
     "copied_toast": "Copied",
@@ -219,6 +220,7 @@
     "trigger_retry_attempt": "Retry #{{attempt}}",
     "trigger_retry_attempt_prefix": "Retry #{{attempt}} · ",
     "trigger_retry_prefix": "Retry · ",
+    "trigger_orchestration": "Orchestration node",
     "trigger_autopilot": "Autopilot run",
     "trigger_comment": "Comment trigger",
     "trigger_initial": "Initial run",
@@ -228,6 +230,18 @@
     "status_completed": "Completed",
     "status_failed": "Failed",
     "status_cancelled": "Cancelled"
+  },
+  "orchestration": {
+    "section": "Orchestration",
+    "status": "Status",
+    "current_node": "Node",
+    "attempts": "Attempts",
+    "artifacts": "Artifacts",
+    "evaluator": "Evaluator",
+    "latest_event": "Latest event",
+    "approve": "Approve",
+    "retry": "Retry",
+    "cancel": "Cancel"
   },
   "batch": {
     "selected": "{{count}} selected",

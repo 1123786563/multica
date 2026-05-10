@@ -714,6 +714,283 @@ func TestCreateIssueAcceptsValidMemberAssignee(t *testing.T) {
 	testHandler.DeleteIssue(httptest.NewRecorder(), cleanupReq)
 }
 
+func TestCreateIssueWithOrchestrationEnabledUsesKernelCompletion(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	agentID := createHandlerTestAgent(t, "Orchestration Test Agent", []byte(`{}`))
+
+	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{"orchestration_enabled": true}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
+		t.Fatalf("enable orchestration setting: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID)
+	})
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Exercise orchestration kernel from issue create",
+		"description":   "The runtime must not be allowed to decide the issue is complete.",
+		"status":        "todo",
+		"priority":      "urgent",
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+		"acceptance_criteria": []map[string]any{
+			{"text": "Kernel evaluates structured evidence before closing the issue"},
+		},
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var created IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created issue: %v", err)
+	}
+	issueID := parseUUID(created.ID)
+
+	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
+	})
+	if err != nil {
+		t.Fatalf("list orchestration plans: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
+	}
+	if plans[0].Status != "running" {
+		t.Fatalf("expected running plan after issue create, got %q", plans[0].Status)
+	}
+
+	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("list orchestration nodes: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("expected inspect/implement/test nodes, got %d", len(nodes))
+	}
+	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
+		t.Helper()
+		for _, node := range nodes {
+			if node.Type == nodeType {
+				return node
+			}
+		}
+		t.Fatalf("missing %s node", nodeType)
+		return db.OrchestrationNode{}
+	}
+	inspectNode := nodeByType(nodes, "inspect")
+	implementNode := nodeByType(nodes, "implement")
+	testNode := nodeByType(nodes, "test")
+	if inspectNode.Status != "dispatched" || inspectNode.AttemptCount != 1 {
+		t.Fatalf("expected dispatched inspect node with one attempt, got status=%q attempts=%d", inspectNode.Status, inspectNode.AttemptCount)
+	}
+	if implementNode.Status != "pending" || testNode.Status != "pending" {
+		t.Fatalf("downstream nodes should wait on graph dependencies, got %q/%q", implementNode.Status, testNode.Status)
+	}
+
+	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("list issue tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one orchestration task, got %d", len(tasks))
+	}
+	taskCtx, ok := service.ParseOrchestrationTaskContext(tasks[0].Context)
+	if !ok {
+		t.Fatalf("queued task does not carry orchestration context: %s", string(tasks[0].Context))
+	}
+	if taskCtx.OrchestrationPlanID != uuidToString(plans[0].ID) || taskCtx.OrchestrationNodeID != uuidToString(inspectNode.ID) {
+		t.Fatalf("task context does not point to created plan/node: %#v", taskCtx)
+	}
+
+	claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, tasks[0].RuntimeID)
+	if err != nil {
+		t.Fatalf("claim orchestration task: %v", err)
+	}
+	if claimed == nil || uuidToString(claimed.ID) != uuidToString(tasks[0].ID) {
+		t.Fatalf("claim orchestration task: expected %s, got %#v", uuidToString(tasks[0].ID), claimed)
+	}
+	started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("start orchestration task: %v", err)
+	}
+	if _, err := testHandler.TaskService.CompleteTask(ctx, started.ID, []byte(`{"output":"I completed the whole issue."}`), "", ""); err != nil {
+		t.Fatalf("complete orchestration task after legacy output: %v", err)
+	}
+
+	issueAfterLegacyOutput, err := testHandler.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("reload issue after legacy output: %v", err)
+	}
+	if issueAfterLegacyOutput.Status == "done" {
+		t.Fatal("legacy runtime output must not close the issue without evaluator evidence")
+	}
+
+	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload orchestration nodes: %v", err)
+	}
+	inspectNode = nodeByType(nodes, "inspect")
+	if inspectNode.Status != "dispatched" || inspectNode.AttemptCount != 2 {
+		t.Fatalf("failed evaluation should schedule retry, got status=%q attempts=%d", inspectNode.Status, inspectNode.AttemptCount)
+	}
+	plansAfterRetry, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
+	})
+	if err != nil {
+		t.Fatalf("reload orchestration plans: %v", err)
+	}
+	if plansAfterRetry[0].Status != "running" {
+		t.Fatalf("plan should remain running after retry scheduling, got %q", plansAfterRetry[0].Status)
+	}
+
+	tasks, err = testHandler.Queries.ListTasksByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("list issue tasks after retry: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected retry task after evaluator rejection, got %d tasks", len(tasks))
+	}
+
+	var retryTask db.AgentTaskQueue
+	for _, task := range tasks {
+		if task.Status == "queued" {
+			retryTask = task
+		}
+	}
+	if !retryTask.ID.Valid {
+		t.Fatal("expected queued retry task")
+	}
+	claimedRetry, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, retryTask.RuntimeID)
+	if err != nil {
+		t.Fatalf("claim retry task: %v", err)
+	}
+	if claimedRetry == nil || uuidToString(claimedRetry.ID) != uuidToString(retryTask.ID) {
+		t.Fatalf("claim retry task: expected %s, got %#v", uuidToString(retryTask.ID), claimedRetry)
+	}
+	startedRetry, err := testHandler.TaskService.StartTask(ctx, claimedRetry.ID)
+	if err != nil {
+		t.Fatalf("start retry task: %v", err)
+	}
+	inspectResult := []byte(`{
+		"status": "completed",
+		"summary": "Inspected the issue context and identified the implementation path.",
+		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Structured result includes changed files and passing tests"}],
+		"confidence": 0.82
+	}`)
+	if _, err := testHandler.TaskService.CompleteTask(ctx, startedRetry.ID, inspectResult, "", ""); err != nil {
+		t.Fatalf("complete orchestration task after structured result: %v", err)
+	}
+
+	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload nodes after inspect completion: %v", err)
+	}
+	inspectNode = nodeByType(nodes, "inspect")
+	implementNode = nodeByType(nodes, "implement")
+	testNode = nodeByType(nodes, "test")
+	if inspectNode.Status != "completed" || implementNode.Status != "dispatched" || testNode.Status != "pending" {
+		t.Fatalf("inspect completion should dispatch implement only, got %q/%q/%q", inspectNode.Status, implementNode.Status, testNode.Status)
+	}
+	issueAfterInspect, err := testHandler.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("reload issue after inspect: %v", err)
+	}
+	if issueAfterInspect.Status == "done" {
+		t.Fatal("issue must stay open until all plan nodes pass evaluation")
+	}
+
+	completeQueuedNode := func(node db.OrchestrationNode, result []byte) {
+		t.Helper()
+		tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
+		if err != nil {
+			t.Fatalf("list tasks for node %s: %v", node.Type, err)
+		}
+		var queued db.AgentTaskQueue
+		for _, task := range tasks {
+			taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
+			if task.Status == "queued" && ok && taskCtx.OrchestrationNodeID == uuidToString(node.ID) {
+				queued = task
+				break
+			}
+		}
+		if !queued.ID.Valid {
+			t.Fatalf("expected queued task for %s node", node.Type)
+		}
+		claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, queued.RuntimeID)
+		if err != nil {
+			t.Fatalf("claim %s task: %v", node.Type, err)
+		}
+		if claimed == nil || uuidToString(claimed.ID) != uuidToString(queued.ID) {
+			t.Fatalf("claim %s task: expected %s, got %#v", node.Type, uuidToString(queued.ID), claimed)
+		}
+		started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
+		if err != nil {
+			t.Fatalf("start %s task: %v", node.Type, err)
+		}
+		if _, err := testHandler.TaskService.CompleteTask(ctx, started.ID, result, "", ""); err != nil {
+			t.Fatalf("complete %s task: %v", node.Type, err)
+		}
+	}
+
+	implementResult := []byte(`{
+		"status": "completed",
+		"summary": "Implemented the requested orchestration behavior.",
+		"changed_files": ["server/internal/service/orchestrator.go"],
+		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Implementation result includes changed files"}],
+		"confidence": 0.82
+	}`)
+	completeQueuedNode(implementNode, implementResult)
+	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload nodes after implement completion: %v", err)
+	}
+	implementNode = nodeByType(nodes, "implement")
+	testNode = nodeByType(nodes, "test")
+	if implementNode.Status != "completed" || testNode.Status != "dispatched" {
+		t.Fatalf("implement completion should dispatch test, got implement=%q test=%q", implementNode.Status, testNode.Status)
+	}
+
+	testResult := []byte(`{
+		"status": "completed",
+		"summary": "Verified the implementation against the acceptance criteria.",
+		"test_result": {"status": "passed", "passed": true},
+		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Test node reports passing test evidence"}],
+		"confidence": 0.82
+	}`)
+	completeQueuedNode(testNode, testResult)
+
+	finalPlan, err := testHandler.Queries.GetOrchestrationPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload final plan: %v", err)
+	}
+	if finalPlan.Status != "completed" {
+		t.Fatalf("expected evaluator-approved plan completion, got %q", finalPlan.Status)
+	}
+	finalNodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload final nodes: %v", err)
+	}
+	for _, node := range finalNodes {
+		if node.Status != "completed" {
+			t.Fatalf("expected evaluator-approved node completion for %s, got %q", node.Type, node.Status)
+		}
+	}
+	finalIssue, err := testHandler.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("reload final issue: %v", err)
+	}
+	if finalIssue.Status != "done" {
+		t.Fatalf("expected kernel to close issue after evaluator approval, got %q", finalIssue.Status)
+	}
+}
+
 // TestCreateIssueRejectsMalformedAssigneeID covers the case where parseUUID
 // silently produces an invalid pgtype.UUID and the validator would otherwise
 // treat (no type + unparseable id) as "no assignee" and accept the request.

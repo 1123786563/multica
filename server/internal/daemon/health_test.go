@@ -21,7 +21,7 @@ func TestHealthHandlerReportsCLIVersionAndActiveTaskCount(t *testing.T) {
 			CLIVersion:    "v9.9.9",
 			DaemonID:      "daemon-test",
 			DeviceName:    "dev",
-			ServerBaseURL: "http://localhost:8080",
+			ServerBaseURL: "http://localhost:8280",
 		},
 		workspaces: map[string]*workspaceState{},
 		logger:     slog.Default(),

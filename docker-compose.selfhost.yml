@@ -5,8 +5,8 @@
 #   # Edit .env — change JWT_SECRET at minimum
 #   docker compose -f docker-compose.selfhost.yml up -d
 #
-# Frontend: http://localhost:3000
-# Backend:  http://localhost:8080 (also used by CLI/daemon)
+# Frontend: http://localhost:3300
+# Backend:  http://localhost:8280 (also used by CLI/daemon)
 
 name: multica
 
@@ -34,21 +34,21 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${PORT:-8080}:8080"
+      - "${PORT:-8280}:8280"
     volumes:
       - backend_uploads:/app/data/uploads
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable
-      PORT: "8080"
+      PORT: "8280"
       METRICS_ADDR: ${METRICS_ADDR:-}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3300}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-noreply@multica.ai}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:3000/auth/callback}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:3300/auth/callback}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-us-west-2}
       CLOUDFRONT_DOMAIN: ${CLOUDFRONT_DOMAIN:-}
@@ -57,7 +57,7 @@ services:
       COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
       APP_ENV: ${APP_ENV:-production}
       MULTICA_DEV_VERIFICATION_CODE: ${MULTICA_DEV_VERIFICATION_CODE:-}
-      MULTICA_APP_URL: ${MULTICA_APP_URL:-http://localhost:3000}
+      MULTICA_APP_URL: ${MULTICA_APP_URL:-http://localhost:3300}
       ALLOW_SIGNUP: ${ALLOW_SIGNUP:-true}                                     
       ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}                                     
       ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-} 
@@ -68,7 +68,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3300}:3300"
     environment:
       HOSTNAME: "0.0.0.0"
     restart: unless-stopped

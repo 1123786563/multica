@@ -149,6 +149,7 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
         <Button
           variant="ghost"
           size="xs"
+          nativeButton={false}
           render={<AppLink href={paths.runtimes()} />}
         >
           <ArrowLeft className="h-3 w-3" />

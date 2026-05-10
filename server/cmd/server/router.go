@@ -29,7 +29,7 @@ import (
 )
 
 var defaultOrigins = []string{
-	"http://localhost:3000", // Next.js dev
+	"http://localhost:3300", // Next.js dev
 	"http://localhost:5173", // electron-vite dev
 	"http://localhost:5174", // electron-vite dev (fallback port)
 }
@@ -333,6 +333,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/subscribe", h.SubscribeToIssue)
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
 					r.Get("/active-task", h.GetActiveTaskForIssue)
+					r.Get("/orchestration", h.GetIssueOrchestration)
 					r.Post("/tasks/{taskId}/cancel", h.CancelTask)
 					r.Post("/rerun", h.RerunIssue)
 					r.Get("/task-runs", h.ListTasksByIssue)
@@ -487,6 +488,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Workspace-wide 30-day run counts per agent for the Agents-list RUNS column.
 			r.Get("/api/agent-run-counts", h.GetWorkspaceAgentRunCounts)
+
+			r.Route("/api/orchestration", func(r chi.Router) {
+				r.Post("/nodes/{nodeId}/approve", h.ApproveOrchestrationNode)
+				r.Post("/nodes/{nodeId}/retry", h.RetryOrchestrationNode)
+				r.Post("/plans/{planId}/cancel", h.CancelOrchestrationPlan)
+			})
 
 			r.Route("/api/chat/sessions", func(r chi.Router) {
 				r.Post("/", h.CreateChatSession)

@@ -173,6 +173,7 @@ type AgentTaskResponse struct {
 	AutopilotSource         string                `json:"autopilot_source,omitempty"`          // manual, schedule, webhook, or api
 	AutopilotTriggerPayload json.RawMessage       `json:"autopilot_trigger_payload,omitempty"` // optional trigger payload for webhook/api runs
 	QuickCreatePrompt       string                `json:"quick_create_prompt,omitempty"`       // user's natural-language input for quick-create tasks
+	Orchestration           any                   `json:"orchestration,omitempty"`             // orchestration node execution context
 	Kind                    string                `json:"kind"`                                // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "direct" — used by the activity row to label tasks that have no linked issue
 }
 
@@ -227,8 +228,17 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 		// with issue_id = "" once a task has no linked issue.
 		ChatSessionID:  uuidToString(t.ChatSessionID),
 		AutopilotRunID: uuidToString(t.AutopilotRunID),
+		Orchestration:  orchestrationContextForResponse(t.Context),
 		Kind:           computeTaskKind(t),
 	}
+}
+
+func orchestrationContextForResponse(raw []byte) any {
+	ctx, ok := service.ParseOrchestrationTaskContext(raw)
+	if !ok {
+		return nil
+	}
+	return ctx
 }
 
 // computeTaskKind picks the source-discriminator string the activity UI uses
@@ -243,6 +253,9 @@ func computeTaskKind(t db.AgentTaskQueue) string {
 	}
 	if uuidToString(t.AutopilotRunID) != "" {
 		return "autopilot"
+	}
+	if _, ok := service.ParseOrchestrationTaskContext(t.Context); ok {
+		return "orchestration"
 	}
 	if uuidToString(t.IssueID) == "" {
 		return "quick_create"

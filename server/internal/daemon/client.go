@@ -162,6 +162,10 @@ func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages
 
 func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, sessionID, workDir string) error {
 	body := map[string]any{"output": output}
+	var structured json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(output)), &structured) == nil && len(structured) > 0 {
+		body["result"] = structured
+	}
 	if branchName != "" {
 		body["branch_name"] = branchName
 	}

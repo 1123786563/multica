@@ -11,11 +11,14 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheck,
+  GitBranch,
   MoreHorizontal,
   PanelRight,
   Pin,
   PinOff,
   Plus,
+  RotateCcw,
+  XCircle,
   Users,
 } from "lucide-react";
 import { PageHeader } from "../../layout/page-header";
@@ -48,12 +51,12 @@ import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { collectThreadReplies } from "./thread-utils";
 import { AgentLiveCard } from "./agent-live-card";
 import { ExecutionLogSection } from "./execution-log-section";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions } from "@multica/core/issues/queries";
+import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueOrchestrationOptions } from "@multica/core/issues/queries";
 import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
 import { useRecentIssuesStore } from "@multica/core/issues/stores";
 import { useIssueTimeline } from "../hooks/use-issue-timeline";
@@ -90,6 +93,112 @@ function priorityLabel(priority: string, t: ActivityT): string {
     return t(($) => $.priority[priority as IssuePriority]);
   }
   return priority;
+}
+
+function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { t } = useT("issues");
+  const queryClient = useQueryClient();
+  const { data } = useQuery(issueOrchestrationOptions(issueId));
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: issueOrchestrationOptions(issueId).queryKey });
+  };
+  const approveNode = useMutation({
+    mutationFn: (nodeId: string) => api.approveOrchestrationNode(nodeId),
+    onSuccess: refresh,
+  });
+  const retryNode = useMutation({
+    mutationFn: (nodeId: string) => api.retryOrchestrationNode(nodeId),
+    onSuccess: refresh,
+  });
+  const cancelPlan = useMutation({
+    mutationFn: (planId: string) => api.cancelOrchestrationPlan(planId),
+    onSuccess: refresh,
+  });
+  const plan = data?.plans[0];
+  if (!plan) return null;
+  const nodes = data?.nodes.filter((node) => node.plan_id === plan.id) ?? [];
+  const currentNode =
+    nodes.find((node) => !["completed", "skipped", "cancelled"].includes(node.status)) ??
+    nodes[nodes.length - 1];
+  const artifacts = data?.artifacts.filter((artifact) => artifact.plan_id === plan.id) ?? [];
+  const events = data?.events.filter((event) => event.plan_id === plan.id) ?? [];
+  const latestEvent = [...events].pop();
+  const latestEvaluatorEvent = [...events].reverse().find((event) => event.event_type === "task.completed");
+  const latestEvaluatorReason =
+    typeof latestEvaluatorEvent?.payload.reason === "string"
+      ? latestEvaluatorEvent.payload.reason
+      : null;
+  const artifactSummary = artifacts.map((artifact) => artifact.type).slice(0, 3).join(", ");
+  const canApprove = currentNode?.status === "waiting_human";
+  const canRetry = currentNode && ["failed", "waiting_human"].includes(currentNode.status);
+  const canCancel = !["completed", "failed", "cancelled"].includes(plan.status);
+
+  return (
+    <div>
+      <button
+        className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${open ? "" : "text-muted-foreground hover:text-foreground"}`}
+        onClick={() => onOpenChange(!open)}
+      >
+        <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
+        {t(($) => $.orchestration.section)}
+        <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`} />
+      </button>
+      {open && (
+        <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pl-2">
+          <PropRow label={t(($) => $.orchestration.status)}>
+            <span className="text-muted-foreground">{plan.status}</span>
+          </PropRow>
+          {currentNode && (
+            <>
+              <PropRow label={t(($) => $.orchestration.current_node)}>
+                <span className="truncate text-muted-foreground">{currentNode.title}</span>
+              </PropRow>
+              <PropRow label={t(($) => $.orchestration.attempts)}>
+                <span className="text-muted-foreground">{currentNode.attempt_count}/{currentNode.max_attempts}</span>
+              </PropRow>
+            </>
+          )}
+          <PropRow label={t(($) => $.orchestration.artifacts)}>
+            <span className="truncate text-muted-foreground">
+              {artifacts.length > 0 ? `${artifacts.length} · ${artifactSummary}` : "0"}
+            </span>
+          </PropRow>
+          {latestEvaluatorReason && (
+            <PropRow label={t(($) => $.orchestration.evaluator)}>
+              <span className="truncate text-muted-foreground">{latestEvaluatorReason}</span>
+            </PropRow>
+          )}
+          {latestEvent && (
+            <PropRow label={t(($) => $.orchestration.latest_event)}>
+              <span className="truncate text-muted-foreground">{latestEvent.event_type}</span>
+            </PropRow>
+          )}
+          {(canApprove || canRetry || canCancel) && (
+            <div className="col-span-2 mt-2 flex flex-wrap gap-1.5">
+              {canApprove && currentNode && (
+                <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => approveNode.mutate(currentNode.id)} disabled={approveNode.isPending}>
+                  <CircleCheck className="h-3.5 w-3.5" />
+                  {t(($) => $.orchestration.approve)}
+                </Button>
+              )}
+              {canRetry && currentNode && (
+                <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => retryNode.mutate(currentNode.id)} disabled={retryNode.isPending}>
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  {t(($) => $.orchestration.retry)}
+                </Button>
+              )}
+              {canCancel && (
+                <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs text-muted-foreground" onClick={() => cancelPlan.mutate(plan.id)} disabled={cancelPlan.isPending}>
+                  <XCircle className="h-3.5 w-3.5" />
+                  {t(($) => $.orchestration.cancel)}
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function formatActivity(
@@ -245,6 +354,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [parentIssueOpen, setParentIssueOpen] = useState(true);
+  const [orchestrationOpen, setOrchestrationOpen] = useState(true);
   const [tokenUsageOpen, setTokenUsageOpen] = useState(true);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
@@ -642,6 +752,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           owns its own collapse state and WS subscriptions. Hides itself
           when there are no runs to show. */}
       <ExecutionLogSection issueId={id} />
+
+      <OrchestrationSection issueId={id} open={orchestrationOpen} onOpenChange={setOrchestrationOpen} />
 
       {/* Token usage */}
       {usage && usage.task_count > 0 && (

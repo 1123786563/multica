@@ -38,7 +38,7 @@ var (
 // daemon`) report this shape; tagged releases are bare semver. Treating dev-
 // described daemons as OK keeps `make daemon` unblocked without weakening the
 // gate for staging or production users running stale stable releases.
-var devDescribeRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+`)
+var devDescribeRe = regexp.MustCompile(`^(v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+|[0-9a-fA-F]{7,})`)
 
 // CheckMinCLIVersion returns nil when `detected` parses as ≥ minimum. Returns
 // ErrCLIVersionMissing for empty or unparsable input, and ErrCLIVersionTooOld
