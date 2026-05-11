@@ -139,6 +139,15 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
       ? latestEvaluatorEvent.payload.reason
       : null;
   const artifactSummary = artifacts.map((artifact) => artifact.type).slice(0, 3).join(", ");
+  const formatTimestamp = (value: string | null | undefined) => {
+    if (!value) return "—";
+    return new Date(value).toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  };
   const canApprove = currentNode?.status === "waiting_human";
   const canRetry = currentNode && ["failed", "waiting_human"].includes(currentNode.status);
   const canCancel = !["completed", "failed", "cancelled"].includes(plan.status);
@@ -182,6 +191,78 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
             <PropRow label={t(($) => $.orchestration.latest_event)}>
               <span className="truncate text-muted-foreground">{latestEvent.event_type}</span>
             </PropRow>
+          )}
+          {nodes.length > 0 && (
+            <div className="col-span-2 mt-3 space-y-1.5">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t(($) => $.orchestration.nodes)}
+              </div>
+              <div className="space-y-1.5">
+                {nodes.map((node) => (
+                  <div key={node.id} className="rounded-md border border-border/60 px-2.5 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium text-foreground">{node.title}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {node.type} · {node.status}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-[11px] text-muted-foreground">
+                        {node.attempt_count}/{node.max_attempts}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {events.length > 0 && (
+            <div className="col-span-2 mt-3 space-y-1.5">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t(($) => $.orchestration.events)}
+              </div>
+              <div className="space-y-1.5">
+                {events.map((event) => (
+                  <div key={event.id} className="rounded-md border border-border/60 px-2.5 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium text-foreground">{event.event_type}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {event.node_id ? `${t(($) => $.orchestration.node_ref)} ${event.node_id}` : t(($) => $.orchestration.plan_scope)}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-[11px] text-muted-foreground">
+                        {formatTimestamp(event.created_at)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {artifacts.length > 0 && (
+            <div className="col-span-2 mt-3 space-y-1.5">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t(($) => $.orchestration.artifact_list)}
+              </div>
+              <div className="space-y-1.5">
+                {artifacts.map((artifact) => (
+                  <div key={artifact.id} className="rounded-md border border-border/60 px-2.5 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium text-foreground">{artifact.type}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {artifact.node_id ? `${t(($) => $.orchestration.node_ref)} ${artifact.node_id}` : t(($) => $.orchestration.plan_scope)}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-[11px] text-muted-foreground">
+                        {formatTimestamp(artifact.created_at)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
           {(canApprove || canRetry || canCancel) && (
             <div className="col-span-2 mt-2 flex flex-wrap gap-1.5">

@@ -237,8 +237,13 @@
     "current_node": "Node",
     "attempts": "Attempts",
     "artifacts": "Artifacts",
+    "artifact_list": "Artifacts",
     "evaluator": "Evaluator",
     "latest_event": "Latest event",
+    "nodes": "Nodes",
+    "events": "Events",
+    "node_ref": "Node",
+    "plan_scope": "Plan",
     "approve": "Approve",
     "retry": "Retry",
     "cancel": "Cancel"

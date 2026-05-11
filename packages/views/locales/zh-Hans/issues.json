@@ -232,8 +232,13 @@
     "current_node": "节点",
     "attempts": "尝试次数",
     "artifacts": "产物",
+    "artifact_list": "产物列表",
     "evaluator": "评估",
     "latest_event": "最新事件",
+    "nodes": "节点",
+    "events": "事件",
+    "node_ref": "节点",
+    "plan_scope": "计划",
     "approve": "批准",
     "retry": "重试",
     "cancel": "取消"

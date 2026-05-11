@@ -596,4 +596,119 @@ describe("IssueDetail (shared)", () => {
 
     expect(screen.getByText("missing_summary")).toBeInTheDocument();
   });
+
+  it("renders orchestration process details for nodes, events, and artifacts", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          workspace_id: "ws-1",
+          source_type: "issue",
+          source_id: "issue-1",
+          objective: "Implement authentication",
+          status: "running",
+          policy: {},
+          metadata: {},
+          created_by_type: "member",
+          created_by_id: "user-1",
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      nodes: [
+        {
+          id: "node-1",
+          plan_id: "plan-1",
+          parent_node_id: null,
+          type: "inspect",
+          title: "Inspect current auth flow",
+          description: null,
+          status: "completed",
+          assignee_agent_id: "agent-1",
+          input_contract: {},
+          output_contract: {},
+          attempt_count: 1,
+          max_attempts: 2,
+          position_x: null,
+          position_y: null,
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:01:00Z",
+        },
+        {
+          id: "node-2",
+          plan_id: "plan-1",
+          parent_node_id: null,
+          type: "implement",
+          title: "Implement JWT auth",
+          description: null,
+          status: "waiting_human",
+          assignee_agent_id: "agent-1",
+          input_contract: {},
+          output_contract: {},
+          attempt_count: 2,
+          max_attempts: 2,
+          position_x: null,
+          position_y: null,
+          created_at: "2026-05-11T00:01:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      events: [
+        {
+          id: "event-1",
+          plan_id: "plan-1",
+          node_id: "node-1",
+          task_id: "task-1",
+          event_type: "node.dispatched",
+          actor_type: "kernel",
+          actor_id: null,
+          payload: { attempt_count: 1 },
+          created_at: "2026-05-11T00:00:10Z",
+        },
+        {
+          id: "event-2",
+          plan_id: "plan-1",
+          node_id: "node-2",
+          task_id: "task-2",
+          event_type: "evaluation.waiting_human",
+          actor_type: "kernel",
+          actor_id: null,
+          payload: { reason: "need_human_review" },
+          created_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      artifacts: [
+        {
+          id: "artifact-1",
+          plan_id: "plan-1",
+          node_id: "node-2",
+          task_id: "task-2",
+          type: "changed_files",
+          uri: null,
+          content: {},
+          metadata: { count: 3 },
+          content_hash: null,
+          created_at: "2026-05-11T00:02:30Z",
+        },
+      ],
+    });
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getByText("Orchestration")).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Nodes")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Inspect current auth flow")).toBeInTheDocument();
+    expect(screen.getAllByText("Implement JWT auth")).toHaveLength(2);
+    expect(screen.getByText("Events")).toBeInTheDocument();
+    expect(screen.getByText("node.dispatched")).toBeInTheDocument();
+    expect(screen.getAllByText("evaluation.waiting_human")).toHaveLength(2);
+    expect(screen.getAllByText("Artifacts")).toHaveLength(2);
+    expect(screen.getByText("changed_files")).toBeInTheDocument();
+  });
 });
