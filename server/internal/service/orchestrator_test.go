@@ -218,3 +218,19 @@ func TestParseAgentResultLegacyAndStructured(t *testing.T) {
 		t.Fatalf("legacy result not normalized: %#v", legacy)
 	}
 }
+
+func TestNodeDispatchedEventPayloadIncludesAttemptMetadata(t *testing.T) {
+	payload := nodeDispatchedPayload("task-1", "run-1", 1, 2)
+	if payload["task_id"] != "task-1" {
+		t.Fatalf("missing task_id: %#v", payload)
+	}
+	if payload["run_id"] != "run-1" {
+		t.Fatalf("missing run_id: %#v", payload)
+	}
+	if payload["attempt_count"] != int32(1) {
+		t.Fatalf("missing attempt_count: %#v", payload)
+	}
+	if payload["max_attempts"] != int32(2) {
+		t.Fatalf("missing max_attempts: %#v", payload)
+	}
+}

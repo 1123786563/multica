@@ -808,6 +808,23 @@ func TestCreateIssueWithOrchestrationEnabledUsesKernelCompletion(t *testing.T) {
 		t.Fatalf("task context does not point to created plan/node: %#v", taskCtx)
 	}
 
+	assertOrchestrationEvents := func(required []string) {
+		t.Helper()
+		events, err := testHandler.Queries.ListOrchestrationEventsByPlan(ctx, plans[0].ID)
+		if err != nil {
+			t.Fatalf("list orchestration events: %v", err)
+		}
+		eventTypes := map[string]bool{}
+		for _, event := range events {
+			eventTypes[event.EventType] = true
+		}
+		for _, required := range required {
+			if !eventTypes[required] {
+				t.Fatalf("missing orchestration event %q; got %#v", required, eventTypes)
+			}
+		}
+	}
+
 	claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, tasks[0].RuntimeID)
 	if err != nil {
 		t.Fatalf("claim orchestration task: %v", err)
@@ -857,6 +874,16 @@ func TestCreateIssueWithOrchestrationEnabledUsesKernelCompletion(t *testing.T) {
 	if len(tasks) != 2 {
 		t.Fatalf("expected retry task after evaluator rejection, got %d tasks", len(tasks))
 	}
+	assertOrchestrationEvents([]string{
+		"plan.created",
+		"node.created",
+		"node.dispatched",
+		"node.running",
+		"node.evaluating",
+		"task.completed",
+		"evaluation.failed",
+		"node.retry_scheduled",
+	})
 
 	var retryTask db.AgentTaskQueue
 	for _, task := range tasks {
@@ -989,6 +1016,11 @@ func TestCreateIssueWithOrchestrationEnabledUsesKernelCompletion(t *testing.T) {
 	if finalIssue.Status != "done" {
 		t.Fatalf("expected kernel to close issue after evaluator approval, got %q", finalIssue.Status)
 	}
+	assertOrchestrationEvents([]string{
+		"evaluation.passed",
+		"node.completed",
+		"plan.completed",
+	})
 }
 
 // TestCreateIssueRejectsMalformedAssigneeID covers the case where parseUUID
