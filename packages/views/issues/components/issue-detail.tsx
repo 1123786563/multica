@@ -123,7 +123,17 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
   const artifacts = data?.artifacts.filter((artifact) => artifact.plan_id === plan.id) ?? [];
   const events = data?.events.filter((event) => event.plan_id === plan.id) ?? [];
   const latestEvent = [...events].pop();
-  const latestEvaluatorEvent = [...events].reverse().find((event) => event.event_type === "task.completed");
+  const latestEvaluatorEvent = [...events]
+    .reverse()
+    .find((event) =>
+      [
+        "evaluation.invalid_result",
+        "evaluation.failed",
+        "evaluation.waiting_human",
+        "evaluation.passed",
+        "task.completed",
+      ].includes(event.event_type),
+    );
   const latestEvaluatorReason =
     typeof latestEvaluatorEvent?.payload.reason === "string"
       ? latestEvaluatorEvent.payload.reason

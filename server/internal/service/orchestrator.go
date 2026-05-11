@@ -275,6 +275,135 @@ func (o *Orchestrator) OnTaskStartedTx(ctx context.Context, qtx *db.Queries, tas
 	return err
 }
 
+func (o *Orchestrator) OnTaskFailed(ctx context.Context, task db.AgentTaskQueue, failureReason string) error {
+	var queuedTasks []db.AgentTaskQueue
+	if err := o.runInTx(ctx, func(qtx *db.Queries) error {
+		var err error
+		queuedTasks, err = o.OnTaskFailedTx(ctx, qtx, task, failureReason)
+		return err
+	}); err != nil {
+		return err
+	}
+	for _, task := range queuedTasks {
+		o.notifyTaskQueued(ctx, task)
+	}
+	return nil
+}
+
+func (o *Orchestrator) OnTaskFailedTx(ctx context.Context, qtx *db.Queries, task db.AgentTaskQueue, failureReason string) ([]db.AgentTaskQueue, error) {
+	taskCtx, ok := ParseOrchestrationTaskContext(task.Context)
+	if !ok {
+		return nil, nil
+	}
+	planID, err := util.ParseUUID(taskCtx.OrchestrationPlanID)
+	if err != nil {
+		return nil, err
+	}
+	nodeID, err := util.ParseUUID(taskCtx.OrchestrationNodeID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := qtx.GetOrchestrationPlan(ctx, planID)
+	if err != nil {
+		return nil, err
+	}
+	node, err := qtx.GetOrchestrationNode(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := mustJSON(map[string]any{
+		"reason":         failureReason,
+		"task_id":        util.UUIDToString(task.ID),
+		"attempt":        node.AttemptCount,
+		"max_attempts":   node.MaxAttempts,
+		"failure_reason": failureReason,
+	})
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "task.failed",
+		ActorType: "agent",
+		ActorID:   task.AgentID,
+		Payload:   payload,
+	}); err != nil {
+		return nil, err
+	}
+
+	o.Logger.Warn("orchestration: task failed",
+		"task_id", util.UUIDToString(task.ID),
+		"plan_id", util.UUIDToString(planID),
+		"node_id", util.UUIDToString(nodeID),
+		"attempt", node.AttemptCount,
+		"max_attempts", node.MaxAttempts,
+		"failure_reason", failureReason,
+		"component", "orchestrator",
+	)
+
+	if node.AttemptCount < node.MaxAttempts {
+		if err := qtx.ReadyOrchestrationNode(ctx, nodeID); err != nil {
+			return nil, err
+		}
+		agent := db.Agent{ID: task.AgentID, RuntimeID: task.RuntimeID}
+		next, err := o.dispatchNodeTask(ctx, qtx, dispatchNodeInput{
+			Plan:               plan,
+			Node:               node,
+			Agent:              agent,
+			IssueID:            task.IssueID,
+			Priority:           task.Priority,
+			AcceptanceCriteria: taskCtx.AcceptanceCriteria,
+			ContextRefs:        taskCtx.ContextRefs,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+			PlanID:    planID,
+			NodeID:    nodeID,
+			TaskID:    next.ID,
+			EventType: "node.retry_scheduled",
+			ActorType: "kernel",
+			Payload: mustJSON(map[string]any{
+				"reason":           failureReason,
+				"previous_task_id": util.UUIDToString(task.ID),
+				"next_task_id":     util.UUIDToString(next.ID),
+			}),
+		}); err != nil {
+			return nil, err
+		}
+		return []db.AgentTaskQueue{next}, nil
+	}
+
+	if err := qtx.FailOrchestrationNode(ctx, nodeID); err != nil {
+		return nil, err
+	}
+	if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "failed"}); err != nil {
+		return nil, err
+	}
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "node.failed",
+		ActorType: "kernel",
+		Payload:   payload,
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "plan.failed",
+		ActorType: "kernel",
+		Payload:   payload,
+	}); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 func (o *Orchestrator) RetryNode(ctx context.Context, nodeID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	node, err := o.Queries.GetOrchestrationNode(ctx, nodeID)
 	if err != nil {

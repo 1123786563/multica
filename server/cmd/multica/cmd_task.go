@@ -41,10 +41,14 @@ func runTaskComplete(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read result: %w", err)
 	}
-	var raw json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var payload any
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("result must be valid JSON: %w", err)
 	}
+	if _, ok := payload.(map[string]any); !ok {
+		return fmt.Errorf("result must be a JSON object")
+	}
+	raw := json.RawMessage(data)
 	client, err := newAPIClient(cmd)
 	if err != nil {
 		return err

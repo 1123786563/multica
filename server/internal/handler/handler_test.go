@@ -1023,6 +1023,351 @@ func TestCreateIssueWithOrchestrationEnabledUsesKernelCompletion(t *testing.T) {
 	})
 }
 
+func TestIssueAssignedToAgent_OrchestrationFlagOffUsesLegacyTaskPath(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	agentID := createHandlerTestAgent(t, "Legacy Path Agent", []byte(`{}`))
+
+	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
+		t.Fatalf("disable orchestration setting: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Legacy task path",
+		"description":   "Should not create orchestration plan.",
+		"status":        "todo",
+		"priority":      "medium",
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var created IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created issue: %v", err)
+	}
+	issueID := parseUUID(created.ID)
+
+	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
+	})
+	if err != nil {
+		t.Fatalf("list orchestration plans: %v", err)
+	}
+	if len(plans) != 0 {
+		t.Fatalf("expected no orchestration plans, got %d", len(plans))
+	}
+
+	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("list issue tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one legacy task, got %d", len(tasks))
+	}
+	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); ok {
+		t.Fatalf("legacy task should not carry orchestration context: %s", string(tasks[0].Context))
+	}
+}
+
+func TestCreateIssueWithOrchestrationEnabledStopsAfterRetryExhaustion(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	agentID := createHandlerTestAgent(t, "Retry Exhaust Agent", []byte(`{}`))
+
+	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{"orchestration_enabled": true}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
+		t.Fatalf("enable orchestration setting: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID)
+	})
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Retry exhaustion",
+		"description":   "Invalid evaluator results should stop after max attempts.",
+		"status":        "todo",
+		"priority":      "urgent",
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+		"acceptance_criteria": []map[string]any{
+			{"text": "Structured result must include evidence"},
+		},
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var created IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created issue: %v", err)
+	}
+	issueID := parseUUID(created.ID)
+
+	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
+	})
+	if err != nil {
+		t.Fatalf("list orchestration plans: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
+	}
+
+	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
+		t.Helper()
+		for _, node := range nodes {
+			if node.Type == nodeType {
+				return node
+			}
+		}
+		t.Fatalf("missing %s node", nodeType)
+		return db.OrchestrationNode{}
+	}
+
+	invalidResult := []byte(`{"status":"completed","summary":"done without evidence"}`)
+
+	completeQueuedNode := func(nodeID string) {
+		t.Helper()
+		tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
+		if err != nil {
+			t.Fatalf("list issue tasks: %v", err)
+		}
+
+		var queued db.AgentTaskQueue
+		for _, task := range tasks {
+			taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
+			if task.Status == "queued" && ok && taskCtx.OrchestrationNodeID == nodeID {
+				queued = task
+				break
+			}
+		}
+		if !queued.ID.Valid {
+			t.Fatalf("expected queued task for node %s", nodeID)
+		}
+
+		claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, queued.RuntimeID)
+		if err != nil {
+			t.Fatalf("claim task: %v", err)
+		}
+		if claimed == nil {
+			t.Fatal("expected claimed task")
+		}
+		started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
+		if err != nil {
+			t.Fatalf("start task: %v", err)
+		}
+		if _, err := testHandler.TaskService.CompleteTask(ctx, started.ID, invalidResult, "", ""); err != nil {
+			t.Fatalf("complete task: %v", err)
+		}
+	}
+
+	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("list orchestration nodes: %v", err)
+	}
+	inspectNode := nodeByType(nodes, "inspect")
+	completeQueuedNode(uuidToString(inspectNode.ID))
+
+	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload nodes after first attempt: %v", err)
+	}
+	inspectNode = nodeByType(nodes, "inspect")
+	if inspectNode.AttemptCount != 2 {
+		t.Fatalf("expected retry to increment attempt count to 2, got %d", inspectNode.AttemptCount)
+	}
+	if inspectNode.Status != "dispatched" {
+		t.Fatalf("expected inspect node dispatched after first failed evaluation, got %q", inspectNode.Status)
+	}
+
+	completeQueuedNode(uuidToString(inspectNode.ID))
+
+	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload nodes after retry exhaustion: %v", err)
+	}
+	inspectNode = nodeByType(nodes, "inspect")
+	if inspectNode.AttemptCount != inspectNode.MaxAttempts {
+		t.Fatalf("attempt_count=%d max_attempts=%d", inspectNode.AttemptCount, inspectNode.MaxAttempts)
+	}
+	if inspectNode.Status != "failed" {
+		t.Fatalf("expected node failed after retry exhaustion, got %s", inspectNode.Status)
+	}
+
+	finalPlan, err := testHandler.Queries.GetOrchestrationPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("reload plan after retry exhaustion: %v", err)
+	}
+	if finalPlan.Status != "failed" {
+		t.Fatalf("expected failed plan after retry exhaustion, got %q", finalPlan.Status)
+	}
+
+	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("list issue tasks after retry exhaustion: %v", err)
+	}
+	queuedCount := 0
+	queuedForInspect := 0
+	for _, task := range tasks {
+		if task.Status != "queued" {
+			continue
+		}
+		queuedCount++
+		taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
+		if ok && taskCtx.OrchestrationNodeID == uuidToString(inspectNode.ID) {
+			queuedForInspect++
+		}
+	}
+	if queuedForInspect != 0 {
+		t.Fatalf("expected no queued retry task after exhaustion, got %d", queuedForInspect)
+	}
+	if queuedCount != 0 {
+		t.Fatalf("expected no queued tasks after exhaustion, got %d", queuedCount)
+	}
+}
+
+func TestOrchestrationFailTaskRoutesThroughKernelRetry(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	agentID := createHandlerTestAgent(t, "FailTask Kernel Agent", []byte(`{}`))
+
+	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{"orchestration_enabled": true}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
+		t.Fatalf("enable orchestration setting: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID)
+	})
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "FailTask retry path",
+		"description":   "Kernel should own orchestration task failure retries.",
+		"status":        "todo",
+		"priority":      "urgent",
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+		"acceptance_criteria": []map[string]any{
+			{"text": "Runtime task failures are retried by kernel state machine"},
+		},
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var created IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created issue: %v", err)
+	}
+	issueID := parseUUID(created.ID)
+
+	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
+	})
+	if err != nil {
+		t.Fatalf("list orchestration plans: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
+	}
+
+	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
+		t.Helper()
+		for _, node := range nodes {
+			if node.Type == nodeType {
+				return node
+			}
+		}
+		t.Fatalf("missing %s node", nodeType)
+		return db.OrchestrationNode{}
+	}
+
+	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("list issue tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one orchestration task, got %d", len(tasks))
+	}
+
+	claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, tasks[0].RuntimeID)
+	if err != nil {
+		t.Fatalf("claim orchestration task: %v", err)
+	}
+	if claimed == nil {
+		t.Fatal("expected claimed orchestration task")
+	}
+	started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("start orchestration task: %v", err)
+	}
+	if _, err := testHandler.TaskService.FailTask(ctx, started.ID, "runtime crashed", "", "", "runtime_offline"); err != nil {
+		t.Fatalf("fail orchestration task: %v", err)
+	}
+
+	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("list orchestration nodes: %v", err)
+	}
+	if len(nodes) == 0 {
+		t.Fatal("expected orchestration nodes")
+	}
+	inspectNode := nodeByType(nodes, "inspect")
+	if inspectNode.AttemptCount != 2 {
+		t.Fatalf("expected failed attempt to consume retry budget, got attempt_count=%d", inspectNode.AttemptCount)
+	}
+	if inspectNode.Status != "dispatched" {
+		t.Fatalf("expected retry node to be dispatched, got %q", inspectNode.Status)
+	}
+
+	events, err := testHandler.Queries.ListOrchestrationEventsByPlan(ctx, plans[0].ID)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	eventTypes := map[string]bool{}
+	for _, event := range events {
+		eventTypes[event.EventType] = true
+	}
+	if !eventTypes["task.failed"] {
+		t.Fatalf("missing task.failed event: %#v", eventTypes)
+	}
+	if !eventTypes["node.retry_scheduled"] {
+		t.Fatalf("expected retry after task failure, got events %#v", eventTypes)
+	}
+
+	tasks, err = testHandler.Queries.ListTasksByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("list tasks after fail: %v", err)
+	}
+	queuedCount := 0
+	for _, task := range tasks {
+		if task.Status == "queued" {
+			queuedCount++
+		}
+	}
+	if queuedCount != 1 {
+		t.Fatalf("expected exactly one queued retry task, got %d", queuedCount)
+	}
+}
+
 // TestCreateIssueRejectsMalformedAssigneeID covers the case where parseUUID
 // silently produces an invalid pgtype.UUID and the validator would otherwise
 // treat (no type + unparseable id) as "no assignee" and accept the request.

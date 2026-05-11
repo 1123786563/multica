@@ -1074,6 +1074,8 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 // Pass "" when unknown (treated as 'agent_error').
 func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason string) (*db.AgentTaskQueue, error) {
 	var task db.AgentTaskQueue
+	var orchestrationQueuedTasks []db.AgentTaskQueue
+	isOrchestrationTask := false
 	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
 		t, err := qtx.FailAgentTask(ctx, db.FailAgentTaskParams{
 			ID:            taskID,
@@ -1086,6 +1088,9 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 			return err
 		}
 		task = t
+		if _, ok := ParseOrchestrationTaskContext(t.Context); ok {
+			isOrchestrationTask = true
+		}
 
 		if t.ChatSessionID.Valid {
 			// Pin the chat_session's runtime_id alongside the session_id so the
@@ -1104,6 +1109,13 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 			}); err != nil {
 				return fmt.Errorf("update chat session resume pointer: %w", err)
 			}
+		}
+		if isOrchestrationTask && s.Orchestrator != nil {
+			queued, err := s.Orchestrator.OnTaskFailedTx(ctx, qtx, t, failureReason)
+			if err != nil {
+				return fmt.Errorf("orchestration task failed: %w", err)
+			}
+			orchestrationQueuedTasks = queued
 		}
 		return nil
 	}); err != nil {
@@ -1136,10 +1148,20 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	slog.Warn("task failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", errMsg, "failure_reason", failureReason)
 	s.captureTaskFailed(ctx, task)
 
-	// Auto-retry eligible failures (orphan, timeout, runtime_offline,
-	// runtime_recovery). The helper itself enforces attempt < max_attempts
-	// and only triggers for issue/chat tasks.
-	retried, _ := s.MaybeRetryFailedTask(ctx, task)
+	var retried *db.AgentTaskQueue
+	if isOrchestrationTask {
+		if s.Orchestrator != nil {
+			for _, queuedTask := range orchestrationQueuedTasks {
+				s.Orchestrator.notifyTaskQueued(ctx, queuedTask)
+				retried = &queuedTask
+			}
+		}
+	} else {
+		// Auto-retry eligible failures (orphan, timeout, runtime_offline,
+		// runtime_recovery). The helper itself enforces attempt < max_attempts
+		// and only triggers for issue/chat tasks.
+		retried, _ = s.MaybeRetryFailedTask(ctx, task)
+	}
 
 	// Skip the per-failure system comment when we'll immediately retry —
 	// the new task will surface its own status to the user, and we don't
@@ -1178,7 +1200,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	// requester so they can either retry or fall back to the advanced form
 	// without losing their original prompt. Skipped when an auto-retry is
 	// pending — the new attempt will write its own outcome.
-	if retried == nil {
+	if retried == nil && !isOrchestrationTask {
 		if qc, ok := s.parseQuickCreateContext(task); ok {
 			s.notifyQuickCreateFailed(ctx, task, qc, errMsg)
 		}

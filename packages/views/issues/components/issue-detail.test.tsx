@@ -191,6 +191,12 @@ const mockApiObj = vi.hoisted(() => ({
   unsubscribeFromIssue: vi.fn().mockResolvedValue(undefined),
   getActiveTasksForIssue: vi.fn().mockResolvedValue({ tasks: [] }),
   listTasksByIssue: vi.fn().mockResolvedValue([]),
+  getIssueOrchestration: vi.fn().mockResolvedValue({
+    plans: [],
+    nodes: [],
+    events: [],
+    artifacts: [],
+  }),
   listTaskMessages: vi.fn().mockResolvedValue([]),
   listChildIssues: vi.fn().mockResolvedValue({ issues: [] }),
   listIssues: vi.fn().mockResolvedValue({ issues: [], total: 0 }),
@@ -526,5 +532,68 @@ describe("IssueDetail (shared)", () => {
         expect.objectContaining({ description: "" }),
       );
     });
+  });
+
+  it("surfaces orchestration evaluator reason from evaluation events", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          workspace_id: "ws-1",
+          source_type: "issue",
+          source_id: "issue-1",
+          objective: "Implement authentication",
+          status: "running",
+          policy: {},
+          metadata: {},
+          created_by_type: "member",
+          created_by_id: "user-1",
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:00:00Z",
+        },
+      ],
+      nodes: [
+        {
+          id: "node-1",
+          plan_id: "plan-1",
+          parent_node_id: null,
+          type: "implement",
+          title: "Implement authentication",
+          description: null,
+          status: "evaluating",
+          assignee_agent_id: "agent-1",
+          input_contract: {},
+          output_contract: {},
+          attempt_count: 1,
+          max_attempts: 2,
+          position_x: null,
+          position_y: null,
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:00:00Z",
+        },
+      ],
+      events: [
+        {
+          id: "event-1",
+          plan_id: "plan-1",
+          node_id: "node-1",
+          task_id: "task-1",
+          event_type: "evaluation.invalid_result",
+          actor_type: "kernel",
+          actor_id: null,
+          payload: { reason: "missing_summary" },
+          created_at: "2026-05-11T00:00:00Z",
+        },
+      ],
+      artifacts: [],
+    });
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getByText("Orchestration")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("missing_summary")).toBeInTheDocument();
   });
 });
