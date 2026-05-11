@@ -398,11 +398,20 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 	}
 	validation := ParseAgentResultPayload(rawResult, ResultParseOptions{AllowLegacyCompatibility: true})
 	result := validation.Result
-	pass, reason := false, "invalid_result_payload"
-	if validation.Valid {
-		pass, reason = hardCheckNodeResult(node, result)
+	eval, err := (HardCheckEvaluator{}).Evaluate(ctx, EvaluationInput{
+		Plan:               plan,
+		Node:               node,
+		Task:               task,
+		Result:             result,
+		Validation:         validation,
+		AcceptanceCriteria: ParseAcceptanceCriteria(taskCtx.AcceptanceCriteria),
+	})
+	if err != nil {
+		return err
 	}
-	waitHuman := validation.Valid && !pass && shouldWaitForHuman(result)
+	pass := eval.Pass
+	reason := eval.Reason
+	waitHuman := !pass && eval.RecommendedAction == "ask_human"
 
 	o.Logger.Info("orchestration: task completed, evaluating",
 		"task_id", util.UUIDToString(task.ID),
@@ -446,16 +455,14 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 				}
 			}
 		}
-		eventPayload := map[string]any{
-			"pass":    pass,
-			"reason":  reason,
-			"summary": result.Summary,
-		}
-		if !validation.Valid {
-			eventPayload["validation_errors"] = validation.Errors
-			eventPayload["compatibility_mode"] = validation.CompatibilityMode
-		}
-		payload := mustJSON(eventPayload)
+		payload := mustJSON(map[string]any{
+			"pass":               eval.Pass,
+			"reason":             eval.Reason,
+			"summary":            result.Summary,
+			"recommended_action": eval.RecommendedAction,
+			"validation_errors":  validation.Errors,
+			"compatibility_mode": validation.CompatibilityMode,
+		})
 		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
 			PlanID:    planID,
 			NodeID:    nodeID,
@@ -847,37 +854,6 @@ func (o *Orchestrator) runInTx(ctx context.Context, fn func(*db.Queries) error) 
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-func hardCheckNodeResult(node db.OrchestrationNode, result AgentStructuredResult) (bool, string) {
-	if result.Status == "failed" {
-		return false, "agent_reported_failed"
-	}
-	if strings.TrimSpace(result.Summary) == "" {
-		return false, "missing_summary"
-	}
-	if node.Type == "implement" && len(result.Artifacts) == 0 && len(result.ChangedFiles) == 0 {
-		return false, "missing_artifact_or_changed_files"
-	}
-	if node.Type == "test" && len(result.TestResult) == 0 && !hasArtifactType(result.Artifacts, "test_result") {
-		return false, "missing_test_result"
-	}
-	if testResultFailed(result.TestResult) {
-		return false, "test_result_failed"
-	}
-	for _, artifact := range result.Artifacts {
-		if artifact.Type == "test_result" && testResultFailed(artifact.Content) {
-			return false, "test_result_failed"
-		}
-	}
-	if !criteriaEvidenceValid(result.CriteriaEvidence) {
-		return false, "missing_criteria_evidence"
-	}
-	return true, "hard_check_passed"
-}
-
-func shouldWaitForHuman(result AgentStructuredResult) bool {
-	return result.Confidence > 0 && result.Confidence < 0.5
 }
 
 func mustJSON(v any) []byte {

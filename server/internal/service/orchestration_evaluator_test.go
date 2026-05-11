@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -104,6 +105,74 @@ func TestHardCheckEvaluatorAcceptanceCriteriaRequireEvidence(t *testing.T) {
 	}
 }
 
+func TestHardCheckEvaluatorMismatchedCriteriaEvidenceFails(t *testing.T) {
+	evaluator := HardCheckEvaluator{}
+	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
+		Node:       db.OrchestrationNode{Type: "implement"},
+		Validation: ResultValidation{Valid: true},
+		AcceptanceCriteria: []AcceptanceCriterion{
+			{Criterion: "must include tests"},
+		},
+		Result: AgentStructuredResult{
+			Status:       "completed",
+			Summary:      "done",
+			ChangedFiles: []string{"a.go"},
+			CriteriaEvidence: []CriteriaEvidence{
+				{Criterion: "must include docs", Evidence: "docs updated"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eval.Pass || eval.Reason != "missing_criteria_evidence" || len(eval.FailedCriteria) != 1 || eval.FailedCriteria[0] != "must include tests" {
+		t.Fatalf("unexpected eval: %#v", eval)
+	}
+}
+
+func TestHardCheckEvaluatorLowConfidenceFailureAsksHuman(t *testing.T) {
+	evaluator := HardCheckEvaluator{}
+	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
+		Node:       db.OrchestrationNode{Type: "implement"},
+		Validation: ResultValidation{Valid: true},
+		Result: AgentStructuredResult{
+			Status:           "completed",
+			Summary:          "done",
+			CriteriaEvidence: []CriteriaEvidence{{Criterion: "c", Evidence: "e"}},
+			Confidence:       0.3,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eval.Pass || eval.Reason != "missing_implementation_artifact" || eval.RecommendedAction != "ask_human" {
+		t.Fatalf("unexpected eval: %#v", eval)
+	}
+}
+
+func TestHardCheckEvaluatorMalformedAcceptanceCriteriaFailClosed(t *testing.T) {
+	evaluator := HardCheckEvaluator{}
+	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
+		Node:               db.OrchestrationNode{Type: "implement"},
+		Validation:         ResultValidation{Valid: true},
+		AcceptanceCriteria: ParseAcceptanceCriteria(json.RawMessage(`[{}]`)),
+		Result: AgentStructuredResult{
+			Status:       "completed",
+			Summary:      "done",
+			ChangedFiles: []string{"a.go"},
+			CriteriaEvidence: []CriteriaEvidence{
+				{Criterion: "node_objective", Evidence: "done"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eval.Pass || eval.Reason != "missing_criteria_evidence" || len(eval.FailedCriteria) != 1 || eval.FailedCriteria[0] != "acceptance_criteria" {
+		t.Fatalf("unexpected eval: %#v", eval)
+	}
+}
+
 func TestHardCheckEvaluatorPassesImplementWithChangedFilesAndEvidence(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
@@ -125,5 +194,26 @@ func TestHardCheckEvaluatorPassesImplementWithChangedFilesAndEvidence(t *testing
 	}
 	if !eval.Pass || eval.RecommendedAction != "complete" || eval.Reason != "hard_check_passed" {
 		t.Fatalf("unexpected eval: %#v", eval)
+	}
+}
+
+func TestParseAcceptanceCriteriaHandlesTextField(t *testing.T) {
+	criteria := ParseAcceptanceCriteria(json.RawMessage(`[{"text":" must include tests "}]`))
+	if len(criteria) != 1 || criteria[0].Criterion != "must include tests" {
+		t.Fatalf("unexpected criteria: %#v", criteria)
+	}
+}
+
+func TestParseAcceptanceCriteriaHandlesCriterionField(t *testing.T) {
+	criteria := ParseAcceptanceCriteria(json.RawMessage(`[{"criterion":" must include tests "}]`))
+	if len(criteria) != 1 || criteria[0].Criterion != "must include tests" {
+		t.Fatalf("unexpected criteria: %#v", criteria)
+	}
+}
+
+func TestParseAcceptanceCriteriaHandlesStringArrays(t *testing.T) {
+	criteria := ParseAcceptanceCriteria(json.RawMessage(`[" must include tests "," "]`))
+	if len(criteria) != 1 || criteria[0].Criterion != "must include tests" {
+		t.Fatalf("unexpected criteria: %#v", criteria)
 	}
 }
