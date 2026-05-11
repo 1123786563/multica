@@ -52,10 +52,11 @@ SELECT * FROM orchestration_edge
 WHERE plan_id = $1
 ORDER BY created_at ASC;
 
--- name: MarkOrchestrationNodeDispatched :exec
+-- name: MarkOrchestrationNodeDispatched :one
 UPDATE orchestration_node
 SET status = 'dispatched', attempt_count = attempt_count + 1, updated_at = now()
-WHERE id = $1;
+WHERE id = $1
+RETURNING *;
 
 -- name: MarkOrchestrationNodeRunning :exec
 UPDATE orchestration_node

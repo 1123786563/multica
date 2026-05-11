@@ -253,15 +253,37 @@ func (q *Queries) UpdateOrchestrationPlanStatus(ctx context.Context, arg UpdateO
 	return err
 }
 
-const markOrchestrationNodeDispatched = `-- name: MarkOrchestrationNodeDispatched :exec
+const markOrchestrationNodeDispatched = `-- name: MarkOrchestrationNodeDispatched :one
 UPDATE orchestration_node
 SET status = 'dispatched', attempt_count = attempt_count + 1, updated_at = now()
 WHERE id = $1
+RETURNING id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
 `
 
-func (q *Queries) MarkOrchestrationNodeDispatched(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, markOrchestrationNodeDispatched, id)
-	return err
+func (q *Queries) MarkOrchestrationNodeDispatched(ctx context.Context, id pgtype.UUID) (OrchestrationNode, error) {
+	row := q.db.QueryRow(ctx, markOrchestrationNodeDispatched, id)
+	var i OrchestrationNode
+	err := row.Scan(
+		&i.ID,
+		&i.PlanID,
+		&i.Type,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.AssigneeAgentID,
+		&i.InputContract,
+		&i.OutputContract,
+		&i.EvaluatorPolicy,
+		&i.RetryPolicy,
+		&i.RuntimeConstraints,
+		&i.AttemptCount,
+		&i.MaxAttempts,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const markOrchestrationNodeRunning = `-- name: MarkOrchestrationNodeRunning :exec

@@ -863,16 +863,27 @@ func (s *TaskService) maybeLogClaimSlow(agentID pgtype.UUID, outcome string, sta
 // StartTask transitions a dispatched task to running.
 // Issue status is NOT changed here — the agent manages it via the CLI.
 func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.AgentTaskQueue, error) {
-	task, err := s.Queries.StartAgentTask(ctx, taskID)
-	if err != nil {
+	var task db.AgentTaskQueue
+	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
+		t, err := qtx.StartAgentTask(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		task = t
+		if s.Orchestrator != nil {
+			if _, ok := ParseOrchestrationTaskContext(t.Context); ok {
+				if err := s.Orchestrator.OnTaskStartedTx(ctx, qtx, t); err != nil {
+					return fmt.Errorf("orchestration task started: %w", err)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("start task: %w", err)
 	}
 
 	slog.Info("task started", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskStarted(ctx, task)
-	if s.Orchestrator != nil {
-		s.Orchestrator.OnTaskStarted(ctx, task)
-	}
 	return &task, nil
 }
 
@@ -886,6 +897,7 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.Ag
 // causing the new task to resume against a stale (or NULL) session.
 func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, result []byte, sessionID, workDir string) (*db.AgentTaskQueue, error) {
 	var task db.AgentTaskQueue
+	var orchestrationQueuedTasks []db.AgentTaskQueue
 	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
 		t, err := qtx.CompleteAgentTask(ctx, db.CompleteAgentTaskParams{
 			ID:        taskID,
@@ -916,6 +928,15 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 				RuntimeID: sessionRuntimeID,
 			}); err != nil {
 				return fmt.Errorf("update chat session resume pointer: %w", err)
+			}
+		}
+		if s.Orchestrator != nil {
+			if _, ok := ParseOrchestrationTaskContext(t.Context); ok {
+				queued, err := s.Orchestrator.OnTaskCompletedTx(ctx, qtx, t, result)
+				if err != nil {
+					return fmt.Errorf("orchestration task completed: %w", err)
+				}
+				orchestrationQueuedTasks = queued
 			}
 		}
 		return nil
@@ -956,8 +977,8 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	if _, ok := ParseOrchestrationTaskContext(task.Context); ok {
 		isOrchestrationTask = true
 		if s.Orchestrator != nil {
-			if err := s.Orchestrator.OnTaskCompleted(ctx, task, result); err != nil {
-				slog.Warn("orchestration completion failed", "task_id", util.UUIDToString(task.ID), "error", err)
+			for _, queuedTask := range orchestrationQueuedTasks {
+				s.Orchestrator.notifyTaskQueued(ctx, queuedTask)
 			}
 		}
 	}

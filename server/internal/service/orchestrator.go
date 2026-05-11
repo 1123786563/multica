@@ -229,14 +229,10 @@ func (o *Orchestrator) OnIssueAssigned(ctx context.Context, issue db.Issue) (*db
 	return &queuedTasks[0], nil
 }
 
-func (o *Orchestrator) OnTaskStarted(ctx context.Context, task db.AgentTaskQueue) {
+func (o *Orchestrator) OnTaskStarted(ctx context.Context, task db.AgentTaskQueue) error {
 	taskCtx, ok := ParseOrchestrationTaskContext(task.Context)
 	if !ok {
-		return
-	}
-	nodeID, err := util.ParseUUID(taskCtx.OrchestrationNodeID)
-	if err != nil {
-		return
+		return nil
 	}
 	o.Logger.Info("orchestration: task started, marking node running",
 		"task_id", util.UUIDToString(task.ID),
@@ -244,7 +240,39 @@ func (o *Orchestrator) OnTaskStarted(ctx context.Context, task db.AgentTaskQueue
 		"node_id", taskCtx.OrchestrationNodeID,
 		"component", "orchestrator",
 	)
-	_ = o.Queries.MarkOrchestrationNodeRunning(ctx, nodeID)
+	if err := o.runInTx(ctx, func(qtx *db.Queries) error {
+		return o.OnTaskStartedTx(ctx, qtx, task)
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *Orchestrator) OnTaskStartedTx(ctx context.Context, qtx *db.Queries, task db.AgentTaskQueue) error {
+	taskCtx, ok := ParseOrchestrationTaskContext(task.Context)
+	if !ok {
+		return nil
+	}
+	nodeID, err := util.ParseUUID(taskCtx.OrchestrationNodeID)
+	if err != nil {
+		return err
+	}
+	planID, err := util.ParseUUID(taskCtx.OrchestrationPlanID)
+	if err != nil {
+		return err
+	}
+	if err := qtx.MarkOrchestrationNodeRunning(ctx, nodeID); err != nil {
+		return err
+	}
+	_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "node.running",
+		ActorType: "kernel",
+		Payload:   mustJSON(map[string]any{"task_id": util.UUIDToString(task.ID)}),
+	})
+	return err
 }
 
 func (o *Orchestrator) RetryNode(ctx context.Context, nodeID pgtype.UUID) (*db.AgentTaskQueue, error) {
@@ -376,25 +404,40 @@ func (o *Orchestrator) CancelPlan(ctx context.Context, planID pgtype.UUID) error
 }
 
 func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQueue, rawResult []byte) error {
+	var queuedTasks []db.AgentTaskQueue
+	if err := o.runInTx(ctx, func(qtx *db.Queries) error {
+		var err error
+		queuedTasks, err = o.OnTaskCompletedTx(ctx, qtx, task, rawResult)
+		return err
+	}); err != nil {
+		return err
+	}
+	for _, task := range queuedTasks {
+		o.notifyTaskQueued(ctx, task)
+	}
+	return nil
+}
+
+func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, task db.AgentTaskQueue, rawResult []byte) ([]db.AgentTaskQueue, error) {
 	taskCtx, ok := ParseOrchestrationTaskContext(task.Context)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	planID, err := util.ParseUUID(taskCtx.OrchestrationPlanID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	nodeID, err := util.ParseUUID(taskCtx.OrchestrationNodeID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	node, err := o.Queries.GetOrchestrationNode(ctx, nodeID)
+	node, err := qtx.GetOrchestrationNode(ctx, nodeID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	plan, err := o.Queries.GetOrchestrationPlan(ctx, planID)
+	plan, err := qtx.GetOrchestrationPlan(ctx, planID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	validation := ParseAgentResultPayload(rawResult, ResultParseOptions{AllowLegacyCompatibility: true})
 	result := validation.Result
@@ -407,7 +450,7 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 		AcceptanceCriteria: ParseAcceptanceCriteria(taskCtx.AcceptanceCriteria),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pass := eval.Pass
 	reason := eval.Reason
@@ -426,215 +469,264 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 		"component", "orchestrator",
 	)
 
-	var retryTask *db.AgentTaskQueue
-	var downstreamTasks []db.AgentTaskQueue
-	err = o.runInTx(ctx, func(qtx *db.Queries) error {
-		if err := qtx.MarkOrchestrationNodeEvaluating(ctx, nodeID); err != nil {
-			return err
-		}
-		if validation.Valid {
-			for _, artifact := range NormalizeArtifacts(result) {
-				content := artifact.Content
-				if len(content) == 0 {
-					content = []byte(`{}`)
-				}
-				metadata := artifact.Metadata
-				if len(metadata) == 0 {
-					metadata = []byte(`{}`)
-				}
-				if _, err := qtx.CreateOrchestrationArtifact(ctx, db.CreateOrchestrationArtifactParams{
-					PlanID:   planID,
-					NodeID:   nodeID,
-					TaskID:   task.ID,
-					Type:     artifact.Type,
-					Uri:      pgtype.Text{String: artifact.URI, Valid: artifact.URI != ""},
-					Content:  content,
-					Metadata: metadata,
-				}); err != nil {
-					return err
-				}
+	queuedTasks := make([]db.AgentTaskQueue, 0, 1)
+	if err := qtx.MarkOrchestrationNodeEvaluating(ctx, nodeID); err != nil {
+		return nil, err
+	}
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "node.evaluating",
+		ActorType: "kernel",
+		Payload:   mustJSON(map[string]any{"task_id": util.UUIDToString(task.ID)}),
+	}); err != nil {
+		return nil, err
+	}
+	if validation.Valid {
+		for _, artifact := range NormalizeArtifacts(result) {
+			content := artifact.Content
+			if len(content) == 0 {
+				content = []byte(`{}`)
+			}
+			metadata := artifact.Metadata
+			if len(metadata) == 0 {
+				metadata = []byte(`{}`)
+			}
+			created, err := qtx.CreateOrchestrationArtifact(ctx, db.CreateOrchestrationArtifactParams{
+				PlanID:   planID,
+				NodeID:   nodeID,
+				TaskID:   task.ID,
+				Type:     artifact.Type,
+				Uri:      pgtype.Text{String: artifact.URI, Valid: artifact.URI != ""},
+				Content:  content,
+				Metadata: metadata,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+				PlanID:    planID,
+				NodeID:    nodeID,
+				TaskID:    task.ID,
+				EventType: "artifact.recorded",
+				ActorType: "kernel",
+				Payload: mustJSON(map[string]any{
+					"artifact_id": util.UUIDToString(created.ID),
+					"type":        created.Type,
+				}),
+			}); err != nil {
+				return nil, err
 			}
 		}
-		payload := mustJSON(map[string]any{
-			"pass":               eval.Pass,
-			"reason":             eval.Reason,
-			"summary":            result.Summary,
-			"recommended_action": eval.RecommendedAction,
-			"validation_errors":  validation.Errors,
-			"compatibility_mode": validation.CompatibilityMode,
-		})
+	}
+	payload := mustJSON(map[string]any{
+		"pass":               eval.Pass,
+		"reason":             eval.Reason,
+		"summary":            result.Summary,
+		"recommended_action": eval.RecommendedAction,
+		"validation_errors":  validation.Errors,
+		"compatibility_mode": validation.CompatibilityMode,
+	})
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "task.completed",
+		ActorType: "agent",
+		ActorID:   task.AgentID,
+		Payload:   payload,
+	}); err != nil {
+		return nil, err
+	}
+	evaluationEventType := "evaluation.failed"
+	if validation.Valid && eval.Pass {
+		evaluationEventType = "evaluation.passed"
+	} else if !validation.Valid {
+		evaluationEventType = "evaluation.invalid_result"
+	} else if eval.RecommendedAction == "ask_human" {
+		evaluationEventType = "evaluation.waiting_human"
+	}
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: evaluationEventType,
+		ActorType: "kernel",
+		Payload:   payload,
+	}); err != nil {
+		return nil, err
+	}
+	if pass {
+		o.Logger.Info("orchestration: evaluation passed, completing node",
+			"plan_id", util.UUIDToString(planID),
+			"node_id", util.UUIDToString(nodeID),
+			"component", "orchestrator",
+		)
+		if err := qtx.CompleteOrchestrationNode(ctx, nodeID); err != nil {
+			return nil, err
+		}
 		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
 			PlanID:    planID,
 			NodeID:    nodeID,
 			TaskID:    task.ID,
-			EventType: "task.completed",
-			ActorType: "agent",
-			ActorID:   task.AgentID,
+			EventType: "node.completed",
+			ActorType: "kernel",
 			Payload:   payload,
 		}); err != nil {
-			return err
+			return nil, err
 		}
-		if pass {
-			o.Logger.Info("orchestration: evaluation passed, completing node",
-				"plan_id", util.UUIDToString(planID),
-				"node_id", util.UUIDToString(nodeID),
-				"component", "orchestrator",
-			)
-			if err := qtx.CompleteOrchestrationNode(ctx, nodeID); err != nil {
-				return err
-			}
-			if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
-				PlanID:    planID,
-				NodeID:    nodeID,
-				TaskID:    task.ID,
-				EventType: "node.completed",
-				ActorType: "kernel",
-				Payload:   payload,
-			}); err != nil {
-				return err
-			}
-			next, err := o.dispatchReadyNodes(ctx, qtx, plan, task.IssueID, task.Priority, taskCtx.AcceptanceCriteria, taskCtx.ContextRefs)
-			if err != nil {
-				return err
-			}
-			downstreamTasks = next
-			if len(next) > 0 {
-				if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "running"}); err != nil {
-					return err
-				}
-				return nil
-			}
-			complete, err := orchestrationPlanComplete(ctx, qtx, planID)
-			if err != nil {
-				return err
-			}
-			if !complete {
-				return nil
-			}
-			if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "completed"}); err != nil {
-				return err
-			}
-			if task.IssueID.Valid {
-				if _, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: task.IssueID, Status: "done"}); err != nil {
-					return err
-				}
-			}
-			_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
-				PlanID:    planID,
-				NodeID:    nodeID,
-				TaskID:    task.ID,
-				EventType: "plan.completed",
-				ActorType: "kernel",
-				Payload:   payload,
-			})
-			return err
+		next, err := o.dispatchReadyNodes(ctx, qtx, plan, task.IssueID, task.Priority, taskCtx.AcceptanceCriteria, taskCtx.ContextRefs)
+		if err != nil {
+			return nil, err
 		}
-		if waitHuman {
-			o.Logger.Warn("orchestration: low confidence, waiting for human review",
-				"plan_id", util.UUIDToString(planID),
-				"node_id", util.UUIDToString(nodeID),
-				"confidence", result.Confidence,
-				"component", "orchestrator",
-			)
-			if err := qtx.WaitOrchestrationNodeForHuman(ctx, nodeID); err != nil {
-				return err
+		queuedTasks = append(queuedTasks, next...)
+		if len(next) > 0 {
+			if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "running"}); err != nil {
+				return nil, err
 			}
-			if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "waiting_human"}); err != nil {
-				return err
-			}
-			_, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
-				PlanID:    planID,
-				NodeID:    nodeID,
-				TaskID:    task.ID,
-				EventType: "node.waiting_human",
-				ActorType: "kernel",
-				Payload:   payload,
-			})
-			return err
+			return queuedTasks, nil
 		}
-		o.Logger.Info("orchestration: evaluation failed, attempting auto-retry",
-			"plan_id", util.UUIDToString(planID),
-			"node_id", util.UUIDToString(nodeID),
-			"attempt", node.AttemptCount,
-			"max_attempts", node.MaxAttempts,
-			"reason", reason,
-			"component", "orchestrator",
-		)
-		if node.AttemptCount < node.MaxAttempts {
-			if err := qtx.ReadyOrchestrationNode(ctx, nodeID); err != nil {
-				return err
-			}
-			if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
-				PlanID:    planID,
-				NodeID:    nodeID,
-				TaskID:    task.ID,
-				EventType: "node.retry_ready",
-				ActorType: "kernel",
-				Payload:   payload,
-			}); err != nil {
-				return err
-			}
-			agent := db.Agent{ID: task.AgentID, RuntimeID: task.RuntimeID}
-			next, err := o.dispatchNodeTask(ctx, qtx, dispatchNodeInput{
-				Plan:               db.OrchestrationPlan{ID: planID, Objective: taskCtx.Objective},
-				Node:               node,
-				Agent:              agent,
-				IssueID:            task.IssueID,
-				Priority:           task.Priority,
-				AcceptanceCriteria: taskCtx.AcceptanceCriteria,
-				ContextRefs:        taskCtx.ContextRefs,
-			})
-			if err != nil {
-				return err
-			}
-			retryTask = &next
-			_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
-				PlanID:    planID,
-				NodeID:    nodeID,
-				TaskID:    next.ID,
-				EventType: "node.retry_scheduled",
-				ActorType: "kernel",
-				Payload: mustJSON(map[string]any{
-					"previous_task_id": util.UUIDToString(task.ID),
-					"next_task_id":     util.UUIDToString(next.ID),
-					"reason":           reason,
-				}),
-			})
-			return err
+		complete, err := orchestrationPlanComplete(ctx, qtx, planID)
+		if err != nil {
+			return nil, err
 		}
-		o.Logger.Error("orchestration: max attempts exhausted, failing node",
-			"plan_id", util.UUIDToString(planID),
-			"node_id", util.UUIDToString(nodeID),
-			"attempt", node.AttemptCount,
-			"reason", reason,
-			"component", "orchestrator",
-		)
-		if err := qtx.FailOrchestrationNode(ctx, nodeID); err != nil {
-			return err
+		if !complete {
+			return queuedTasks, nil
 		}
-		if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "failed"}); err != nil {
-			return err
+		if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "completed"}); err != nil {
+			return nil, err
+		}
+		if task.IssueID.Valid {
+			if _, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: task.IssueID, Status: "done"}); err != nil {
+				return nil, err
+			}
 		}
 		_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
 			PlanID:    planID,
 			NodeID:    nodeID,
 			TaskID:    task.ID,
-			EventType: "node.failed",
+			EventType: "plan.completed",
 			ActorType: "kernel",
 			Payload:   payload,
 		})
-		return err
+		return queuedTasks, err
+	}
+	if waitHuman {
+		o.Logger.Warn("orchestration: low confidence, waiting for human review",
+			"plan_id", util.UUIDToString(planID),
+			"node_id", util.UUIDToString(nodeID),
+			"confidence", result.Confidence,
+			"component", "orchestrator",
+		)
+		if err := qtx.WaitOrchestrationNodeForHuman(ctx, nodeID); err != nil {
+			return nil, err
+		}
+		if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "waiting_human"}); err != nil {
+			return nil, err
+		}
+		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+			PlanID:    planID,
+			NodeID:    nodeID,
+			TaskID:    task.ID,
+			EventType: "node.waiting_human",
+			ActorType: "kernel",
+			Payload:   payload,
+		}); err != nil {
+			return nil, err
+		}
+		_, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+			PlanID:    planID,
+			NodeID:    nodeID,
+			TaskID:    task.ID,
+			EventType: "plan.waiting_human",
+			ActorType: "kernel",
+			Payload:   payload,
+		})
+		return queuedTasks, err
+	}
+	o.Logger.Info("orchestration: evaluation failed, attempting auto-retry",
+		"plan_id", util.UUIDToString(planID),
+		"node_id", util.UUIDToString(nodeID),
+		"attempt", node.AttemptCount,
+		"max_attempts", node.MaxAttempts,
+		"reason", reason,
+		"component", "orchestrator",
+	)
+	if node.AttemptCount < node.MaxAttempts {
+		if err := qtx.ReadyOrchestrationNode(ctx, nodeID); err != nil {
+			return nil, err
+		}
+		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+			PlanID:    planID,
+			NodeID:    nodeID,
+			TaskID:    task.ID,
+			EventType: "node.retry_ready",
+			ActorType: "kernel",
+			Payload:   payload,
+		}); err != nil {
+			return nil, err
+		}
+		agent := db.Agent{ID: task.AgentID, RuntimeID: task.RuntimeID}
+		next, err := o.dispatchNodeTask(ctx, qtx, dispatchNodeInput{
+			Plan:               db.OrchestrationPlan{ID: planID, Objective: taskCtx.Objective},
+			Node:               node,
+			Agent:              agent,
+			IssueID:            task.IssueID,
+			Priority:           task.Priority,
+			AcceptanceCriteria: taskCtx.AcceptanceCriteria,
+			ContextRefs:        taskCtx.ContextRefs,
+		})
+		if err != nil {
+			return nil, err
+		}
+		queuedTasks = append(queuedTasks, next)
+		_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+			PlanID:    planID,
+			NodeID:    nodeID,
+			TaskID:    next.ID,
+			EventType: "node.retry_scheduled",
+			ActorType: "kernel",
+			Payload: mustJSON(map[string]any{
+				"previous_task_id": util.UUIDToString(task.ID),
+				"next_task_id":     util.UUIDToString(next.ID),
+				"reason":           reason,
+			}),
+		})
+		return queuedTasks, err
+	}
+	o.Logger.Error("orchestration: max attempts exhausted, failing node",
+		"plan_id", util.UUIDToString(planID),
+		"node_id", util.UUIDToString(nodeID),
+		"attempt", node.AttemptCount,
+		"reason", reason,
+		"component", "orchestrator",
+	)
+	if err := qtx.FailOrchestrationNode(ctx, nodeID); err != nil {
+		return nil, err
+	}
+	if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "failed"}); err != nil {
+		return nil, err
+	}
+	if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "node.failed",
+		ActorType: "kernel",
+		Payload:   payload,
+	}); err != nil {
+		return nil, err
+	}
+	_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		PlanID:    planID,
+		NodeID:    nodeID,
+		TaskID:    task.ID,
+		EventType: "plan.failed",
+		ActorType: "kernel",
+		Payload:   payload,
 	})
-	if err != nil {
-		return err
-	}
-	if retryTask != nil {
-		o.notifyTaskQueued(ctx, *retryTask)
-	}
-	for _, task := range downstreamTasks {
-		o.notifyTaskQueued(ctx, task)
-	}
-	return nil
+	return queuedTasks, err
 }
 
 func buildPlanNodeSpecs(issue db.Issue, defaultOutputContract []byte) []planNodeSpec {
@@ -816,7 +908,8 @@ func (o *Orchestrator) dispatchNodeTask(ctx context.Context, qtx *db.Queries, in
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("create node task: %w", err)
 	}
-	if err := qtx.MarkOrchestrationNodeDispatched(ctx, in.Node.ID); err != nil {
+	updatedNode, err := qtx.MarkOrchestrationNodeDispatched(ctx, in.Node.ID)
+	if err != nil {
 		return db.AgentTaskQueue{}, err
 	}
 	_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
@@ -825,7 +918,12 @@ func (o *Orchestrator) dispatchNodeTask(ctx context.Context, qtx *db.Queries, in
 		TaskID:    task.ID,
 		EventType: "node.dispatched",
 		ActorType: "kernel",
-		Payload:   mustJSON(map[string]any{"task_id": util.UUIDToString(task.ID), "run_id": util.UUIDToString(runID)}),
+		Payload: mustJSON(nodeDispatchedPayload(
+			util.UUIDToString(task.ID),
+			util.UUIDToString(runID),
+			updatedNode.AttemptCount,
+			updatedNode.MaxAttempts,
+		)),
 	})
 	if err != nil {
 		return db.AgentTaskQueue{}, err
@@ -862,6 +960,15 @@ func mustJSON(v any) []byte {
 		return []byte(`{}`)
 	}
 	return b
+}
+
+func nodeDispatchedPayload(taskID, runID string, attemptCount, maxAttempts int32) map[string]any {
+	return map[string]any{
+		"task_id":       taskID,
+		"run_id":        runID,
+		"attempt_count": attemptCount,
+		"max_attempts":  maxAttempts,
+	}
 }
 
 func truncate(s string, n int) string {
