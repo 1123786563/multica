@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -43,6 +44,21 @@ type OrchestrationNodeResponse struct {
 	CompletedAt        *string         `json:"completed_at"`
 	CreatedAt          string          `json:"created_at"`
 	UpdatedAt          string          `json:"updated_at"`
+	Summary            *NodeSummaryDTO `json:"summary,omitempty"`
+}
+
+type NodeSummaryDTO struct {
+	Status                 string `json:"status"`
+	ReasonCode             string `json:"reason_code"`
+	ReasonTitle            string `json:"reason_title"`
+	ReasonDetail           string `json:"reason_detail"`
+	RecommendedAction      string `json:"recommended_action"`
+	ActionEnabled          bool   `json:"action_enabled"`
+	AttemptCount           int32  `json:"attempt_count"`
+	MaxAttempts            int32  `json:"max_attempts"`
+	LatestEvaluationStatus string `json:"latest_evaluation_status,omitempty"`
+	LatestAgentSummary     string `json:"latest_agent_summary,omitempty"`
+	UpdatedAt              string `json:"updated_at,omitempty"`
 }
 
 type OrchestrationEventResponse struct {
@@ -77,37 +93,19 @@ type IssueOrchestrationResponse struct {
 	Artifacts []OrchestrationArtifactResponse `json:"artifacts"`
 }
 
-func orchestrationEnabled(w db.Workspace) bool {
-	if len(w.Settings) == 0 {
-		return false
-	}
-	var settings struct {
-		OrchestrationEnabled bool `json:"orchestration_enabled"`
-	}
-	if err := json.Unmarshal(w.Settings, &settings); err != nil {
-		return false
-	}
-	return settings.OrchestrationEnabled
-}
-
 func (h *Handler) shouldUseOrchestration(ctx context.Context, issue db.Issue) bool {
-	if !issue.WorkspaceID.Valid {
-		return false
-	}
-	ws, err := h.Queries.GetWorkspace(ctx, issue.WorkspaceID)
-	if err != nil {
-		return false
-	}
-	return orchestrationEnabled(ws)
+	_ = ctx
+	return issue.WorkspaceID.Valid
 }
 
 func (h *Handler) enqueueAssignedAgentWork(ctx context.Context, issue db.Issue) {
-	if h.shouldUseOrchestration(ctx, issue) && h.TaskService.Orchestrator != nil {
-		if _, err := h.TaskService.Orchestrator.OnIssueAssigned(ctx, issue); err == nil {
-			return
-		}
+	if !h.shouldUseOrchestration(ctx, issue) {
+		return
 	}
-	h.TaskService.EnqueueTaskForIssue(ctx, issue)
+	if h.TaskService.Orchestrator == nil {
+		return
+	}
+	_, _ = h.TaskService.Orchestrator.OnIssueAssigned(ctx, issue)
 }
 
 func (h *Handler) GetIssueOrchestration(w http.ResponseWriter, r *http.Request) {
@@ -137,16 +135,20 @@ func (h *Handler) GetIssueOrchestration(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusInternalServerError, "failed to list orchestration nodes")
 			return
 		}
-		for _, node := range nodes {
-			resp.Nodes = append(resp.Nodes, orchestrationNodeToResponse(node))
-		}
 		events, err := h.Queries.ListOrchestrationEventsByPlan(r.Context(), plan.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to list orchestration events")
 			return
 		}
+		eventsByNode := make(map[string][]db.OrchestrationEvent, len(nodes))
 		for _, event := range events {
+			if event.NodeID.Valid {
+				eventsByNode[uuidToString(event.NodeID)] = append(eventsByNode[uuidToString(event.NodeID)], event)
+			}
 			resp.Events = append(resp.Events, orchestrationEventToResponse(event))
+		}
+		for _, node := range nodes {
+			resp.Nodes = append(resp.Nodes, orchestrationNodeToResponse(node, eventsByNode[uuidToString(node.ID)]))
 		}
 		artifacts, err := h.Queries.ListOrchestrationArtifactsByPlan(r.Context(), plan.ID)
 		if err != nil {
@@ -255,7 +257,8 @@ func orchestrationPlanToResponse(plan db.OrchestrationPlan) OrchestrationPlanRes
 	}
 }
 
-func orchestrationNodeToResponse(node db.OrchestrationNode) OrchestrationNodeResponse {
+func orchestrationNodeToResponse(node db.OrchestrationNode, events []db.OrchestrationEvent) OrchestrationNodeResponse {
+	summary := service.BuildNodeSummaryFromRecords(node, events)
 	return OrchestrationNodeResponse{
 		ID:                 uuidToString(node.ID),
 		PlanID:             uuidToString(node.PlanID),
@@ -275,6 +278,23 @@ func orchestrationNodeToResponse(node db.OrchestrationNode) OrchestrationNodeRes
 		CompletedAt:        timestampToPtr(node.CompletedAt),
 		CreatedAt:          timestampToString(node.CreatedAt),
 		UpdatedAt:          timestampToString(node.UpdatedAt),
+		Summary:            nodeSummaryToDTO(summary),
+	}
+}
+
+func nodeSummaryToDTO(summary service.NodeSummary) *NodeSummaryDTO {
+	return &NodeSummaryDTO{
+		Status:                 summary.Status,
+		ReasonCode:             summary.ReasonCode,
+		ReasonTitle:            summary.ReasonTitle,
+		ReasonDetail:           summary.ReasonDetail,
+		RecommendedAction:      summary.RecommendedAction,
+		ActionEnabled:          summary.ActionEnabled,
+		AttemptCount:           summary.AttemptCount,
+		MaxAttempts:            summary.MaxAttempts,
+		LatestEvaluationStatus: summary.LatestEvaluationStatus,
+		LatestAgentSummary:     summary.LatestAgentSummary,
+		UpdatedAt:              summary.UpdatedAt,
 	}
 }
 

@@ -29,8 +29,10 @@ const acceptanceCriteriaFallback = "acceptance_criteria"
 
 type EvaluationResult struct {
 	Pass              bool     `json:"pass"`
+	Status            string   `json:"status"`
 	Score             float64  `json:"score"`
 	Reason            string   `json:"reason"`
+	ReasonDetail      string   `json:"reason_detail,omitempty"`
 	FailedCriteria    []string `json:"failed_criteria,omitempty"`
 	MissingArtifacts  []string `json:"missing_artifacts,omitempty"`
 	Risks             []string `json:"risks,omitempty"`
@@ -43,48 +45,123 @@ func (HardCheckEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (
 	_ = ctx
 	result := input.Result
 	if !input.Validation.Valid {
-		return EvaluationResult{Pass: false, Reason: "invalid_result", RecommendedAction: "retry", Score: 0}, nil
+		return EvaluationResult{
+			Pass:              false,
+			Status:            "invalid_result",
+			Reason:            "invalid_result",
+			ReasonDetail:      "Structured result payload did not satisfy the orchestration result contract.",
+			RecommendedAction: "retry",
+			Score:             0,
+		}, nil
 	}
 
 	switch result.Status {
 	case "failed":
-		return EvaluationResult{Pass: false, Reason: "agent_reported_failed", RecommendedAction: "retry", Risks: result.Risks}, nil
+		return EvaluationResult{
+			Pass:              false,
+			Status:            "failed",
+			Reason:            "agent_reported_failed",
+			ReasonDetail:      "Agent reported that execution failed and requires another attempt or operator review.",
+			RecommendedAction: "retry",
+			Risks:             result.Risks,
+		}, nil
 	case "blocked":
-		return EvaluationResult{Pass: false, Reason: "agent_reported_blocked", RecommendedAction: "ask_human", Risks: result.Risks}, nil
+		return EvaluationResult{
+			Pass:              false,
+			Status:            "waiting_human",
+			Reason:            "agent_reported_blocked",
+			ReasonDetail:      "Agent reported a blocker that requires human input before this node can proceed.",
+			RecommendedAction: "ask_human",
+			Risks:             result.Risks,
+		}, nil
 	case "needs_human":
-		return EvaluationResult{Pass: false, Reason: "agent_needs_human", RecommendedAction: "ask_human", Risks: result.Risks}, nil
+		return EvaluationResult{
+			Pass:              false,
+			Status:            "waiting_human",
+			Reason:            "agent_needs_human",
+			ReasonDetail:      "Agent requested human input before the node can be completed.",
+			RecommendedAction: "ask_human",
+			Risks:             result.Risks,
+		}, nil
 	}
 
 	if strings.TrimSpace(result.Summary) == "" {
-		return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "missing_summary"}), nil
+		return retryableEvaluation(result, EvaluationResult{
+			Pass:         false,
+			Status:       "failed",
+			Reason:       "missing_summary",
+			ReasonDetail: "Completed orchestration results must include a summary.",
+		}), nil
 	}
 	if testResultFailed(result.TestResult) || artifactTestResultFailed(result.Artifacts) {
-		return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "test_result_failed"}), nil
+		return retryableEvaluation(result, EvaluationResult{
+			Pass:         false,
+			Status:       "failed",
+			Reason:       "test_result_failed",
+			ReasonDetail: "Reported test output contains a failing result.",
+		}), nil
 	}
 	if failed := missingCriteriaEvidence(input.AcceptanceCriteria, result.CriteriaEvidence); len(failed) > 0 {
-		return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "missing_criteria_evidence", FailedCriteria: failed}), nil
+		return retryableEvaluation(result, EvaluationResult{
+			Pass:           false,
+			Status:         "failed",
+			Reason:         "missing_criteria_evidence",
+			ReasonDetail:   "Structured result did not include evidence for all required acceptance criteria.",
+			FailedCriteria: failed,
+		}), nil
 	}
 
 	switch input.Node.Type {
 	case "implement", "fix":
 		if len(result.ChangedFiles) == 0 && !hasArtifactType(result.Artifacts, "diff") && !hasArtifactType(result.Artifacts, "file") {
-			return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "missing_implementation_artifact", MissingArtifacts: []string{"diff", "file"}}), nil
+			return retryableEvaluation(result, EvaluationResult{
+				Pass:             false,
+				Status:           "failed",
+				Reason:           "missing_implementation_artifact",
+				ReasonDetail:     "Implementation nodes must attach changed files or diff/file artifacts.",
+				MissingArtifacts: []string{"diff", "file"},
+			}), nil
 		}
 	case "test":
 		if len(result.TestResult) == 0 && !hasArtifactType(result.Artifacts, "test_result") {
-			return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "missing_test_result", MissingArtifacts: []string{"test_result"}}), nil
+			return retryableEvaluation(result, EvaluationResult{
+				Pass:             false,
+				Status:           "failed",
+				Reason:           "missing_test_result",
+				ReasonDetail:     "Test nodes must report a test result artifact or structured test result payload.",
+				MissingArtifacts: []string{"test_result"},
+			}), nil
 		}
 	case "review":
 		if !hasArtifactType(result.Artifacts, "review_result") {
-			return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "missing_review_result", MissingArtifacts: []string{"review_result"}}), nil
+			return retryableEvaluation(result, EvaluationResult{
+				Pass:             false,
+				Status:           "failed",
+				Reason:           "missing_review_result",
+				ReasonDetail:     "Review nodes must include a review_result artifact.",
+				MissingArtifacts: []string{"review_result"},
+			}), nil
 		}
 	case "design":
 		if !hasArtifactType(result.Artifacts, "decision") && len(result.CriteriaEvidence) == 0 {
-			return retryableEvaluation(result, EvaluationResult{Pass: false, Reason: "missing_design_evidence", MissingArtifacts: []string{"decision"}}), nil
+			return retryableEvaluation(result, EvaluationResult{
+				Pass:             false,
+				Status:           "failed",
+				Reason:           "missing_design_evidence",
+				ReasonDetail:     "Design nodes must include a decision artifact or equivalent criteria evidence.",
+				MissingArtifacts: []string{"decision"},
+			}), nil
 		}
 	}
 
-	return EvaluationResult{Pass: true, Reason: "hard_check_passed", RecommendedAction: "complete", Score: result.Confidence}, nil
+	return EvaluationResult{
+		Pass:              true,
+		Status:            "passed",
+		Reason:            "hard_check_passed",
+		ReasonDetail:      "Kernel hard checks passed for this node.",
+		RecommendedAction: "complete",
+		Score:             result.Confidence,
+	}, nil
 }
 
 func retryableEvaluation(result AgentStructuredResult, eval EvaluationResult) EvaluationResult {

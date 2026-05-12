@@ -160,11 +160,10 @@ func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages
 	}, nil)
 }
 
-func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, sessionID, workDir string) error {
+func (c *Client) CompleteTask(ctx context.Context, taskID, output string, structuredResult json.RawMessage, branchName, sessionID, workDir string) error {
 	body := map[string]any{"output": output}
-	var structured json.RawMessage
-	if json.Unmarshal([]byte(strings.TrimSpace(output)), &structured) == nil && len(structured) > 0 {
-		body["result"] = structured
+	if len(structuredResult) > 0 {
+		body["result"] = structuredResult
 	}
 	if branchName != "" {
 		body["branch_name"] = branchName

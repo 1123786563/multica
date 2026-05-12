@@ -743,7 +743,7 @@ Node completed 必须经过 Evaluator 验收。
 2. 只有 workspace 开启 orchestration feature flag 时触发。
 3. 只有 issue label 包含 `orchestrated` 时触发。
 
-第一版建议使用 workspace feature flag。
+历史上第一版曾建议使用 workspace feature flag 做 rollout；当前实现已收敛为所有新 agent-assigned issue 默认触发 orchestration。
 
 #### 流程
 
@@ -2054,8 +2054,8 @@ Plan 所有必要 node 完成才算完成。
 |---|---|
 | 数据库迁移 | 新增 orchestration_plan / node / edge / event / artifact 表，agent_task_queue 仅新增 orchestration_plan_id / orchestration_node_id / orchestration_run_id |
 | sqlc 查询 | 有 plan、node、edge、event、artifact 的 Create / Get / List / UpdateStatus 查询，并已重新生成代码 |
-| feature flag | workspace 未启用 orchestration 时，原 `EnqueueTaskForIssue` 路径行为不变 |
-| issue 分配入口 | agent-assigned issue 在 flag 开启时创建 plan + initial node，而不是直接把整个 issue 交给 agent |
+| feature flag | `workspace.settings.orchestration_enabled` 仅作为历史 rollout 残留；不再决定新 issue/new assignment 的执行路径 |
+| issue 分配入口 | 所有新 agent-assigned issue 创建 plan + initial node，而不是直接把整个 issue 交给 agent |
 | single-node planner | 简单 issue 生成一个 implement node，保留 issue acceptance_criteria 和 context_refs |
 | task enqueue | node dispatch 后创建 agent_task_queue 记录，并写入 orchestration_plan_id / orchestration_node_id |
 | claim payload | daemon claim response 带 orchestration context，legacy task response 仍兼容 |

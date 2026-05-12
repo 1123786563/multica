@@ -889,6 +889,53 @@ func TestExecuteAndDrain_ContextCancelled_ReportsCancelled(t *testing.T) {
 	}
 }
 
+func TestBuildCompletedTaskResult_ParsesStructuredResultForOrchestrationTask(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		ID:          "task-1",
+		WorkspaceID: "ws-1",
+		Orchestration: &OrchestrationContext{
+			OrchestrationPlanID: "plan-1",
+			OrchestrationNodeID: "node-1",
+			NodeType:            "implement",
+		},
+	}
+	agentResult := agent.Result{
+		Status:    "completed",
+		Output:    `{"status":"completed","summary":"done","changed_files":["a.go"],"criteria_evidence":[{"criterion":"c","evidence":"e"}]}`,
+		SessionID: "sess-1",
+	}
+
+	got := buildCompletedTaskResult(task, "codex", agentResult, "/tmp/workdir", "/tmp/root", nil, slog.Default())
+	if got.Status != "completed" {
+		t.Fatalf("expected completed status, got %+v", got)
+	}
+	if len(got.StructuredResult) == 0 {
+		t.Fatalf("expected structured result to be captured for orchestration task, got %+v", got)
+	}
+}
+
+func TestBuildCompletedTaskResult_DoesNotParseStructuredResultForLegacyTask(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		ID:          "task-1",
+		WorkspaceID: "ws-1",
+		IssueID:     "issue-1",
+	}
+	agentResult := agent.Result{
+		Status:    "completed",
+		Output:    `{"status":"completed","summary":"done","changed_files":["a.go"],"criteria_evidence":[{"criterion":"c","evidence":"e"}]}`,
+		SessionID: "sess-1",
+	}
+
+	got := buildCompletedTaskResult(task, "codex", agentResult, "/tmp/workdir", "/tmp/root", nil, slog.Default())
+	if len(got.StructuredResult) != 0 {
+		t.Fatalf("expected no structured result for legacy task path, got %+v", got)
+	}
+}
+
 func TestEnsureRepoReadyFastPathDoesNotRefresh(t *testing.T) {
 	t.Parallel()
 
@@ -1233,6 +1280,33 @@ func TestReportTaskResult_CompletedHitsCompleteEndpoint(t *testing.T) {
 	}
 	if rec.payload["session_id"] != "ses-1" {
 		t.Errorf("session_id: got %v", rec.payload["session_id"])
+	}
+}
+
+func TestReportTaskResult_CompletedForwardsStructuredResult(t *testing.T) {
+	t.Parallel()
+
+	rec := &reportTaskResultRecorder{}
+	srv := httptest.NewServer(rec.handler(t))
+	t.Cleanup(srv.Close)
+
+	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
+	d.reportTaskResult(context.Background(), "task-2", TaskResult{
+		Status:           "completed",
+		Comment:          "completed with structured result",
+		StructuredResult: json.RawMessage(`{"status":"completed","summary":"done","changed_files":["a.go"]}`),
+	}, slog.Default())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.path != "/api/daemon/tasks/task-2/complete" {
+		t.Fatalf("expected /complete endpoint, got %s", rec.path)
+	}
+	if rec.payload["output"] != "completed with structured result" {
+		t.Fatalf("output: got %v", rec.payload["output"])
+	}
+	if _, ok := rec.payload["result"]; !ok {
+		t.Fatalf("expected explicit structured result field, got %#v", rec.payload)
 	}
 }
 

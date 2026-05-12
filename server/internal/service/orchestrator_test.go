@@ -217,6 +217,11 @@ func TestParseAgentResultLegacyAndStructured(t *testing.T) {
 	if legacy.Status != "completed" || legacy.Summary != "legacy summary" {
 		t.Fatalf("legacy result not normalized: %#v", legacy)
 	}
+
+	strictLegacyValidation := ParseAgentResultPayload([]byte(`{"output":"legacy summary"}`), ResultParseOptions{})
+	if strictLegacyValidation.Valid {
+		t.Fatalf("legacy-compatible payload must be invalid without compatibility mode: %#v", strictLegacyValidation.Result)
+	}
 }
 
 func TestNodeDispatchedEventPayloadIncludesAttemptMetadata(t *testing.T) {

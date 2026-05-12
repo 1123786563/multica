@@ -95,3 +95,47 @@ func TestNormalizeGOOS(t *testing.T) {
 		}
 	}
 }
+
+func TestClientCompleteTask_OmitsStructuredResultWithoutExplicitPayload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body["output"] != `{"status":"completed","summary":"done"}` {
+			t.Fatalf("unexpected output field: %#v", body["output"])
+		}
+		if _, ok := body["result"]; ok {
+			t.Fatalf("did not expect implicit structured result field without explicit payload, got %#v", body)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	if err := c.CompleteTask(context.Background(), "task-1", `{"status":"completed","summary":"done"}`, nil, "", "", ""); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+}
+
+func TestClientCompleteTask_OmitsStructuredResultWhenOutputIsNotPureJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body["output"] != "done\n```json\n{}\n```" {
+			t.Fatalf("unexpected output field: %#v", body["output"])
+		}
+		if _, ok := body["result"]; ok {
+			t.Fatalf("did not expect structured result field for non-pure JSON output, got %#v", body)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	if err := c.CompleteTask(context.Background(), "task-1", "done\n```json\n{}\n```", nil, "", "", ""); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+}

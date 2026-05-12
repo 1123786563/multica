@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 
 const mockUpdateWorkspace = vi.hoisted(() => vi.fn());
 const mockUseQuery = vi.hoisted(() => vi.fn());
@@ -18,9 +17,6 @@ vi.mock("../../i18n", () => ({
           description_placeholder: "What does this workspace focus on?",
           context_label: "Context",
           context_placeholder: "Background information and context for AI agents working in this workspace",
-          orchestration_label: "Enable orchestration",
-          orchestration_description:
-            "Let the kernel create and manage orchestration plans for agent-assigned issues.",
           slug_label: "Slug",
           save: "Save",
           saving: "Saving...",
@@ -124,18 +120,13 @@ describe("WorkspaceTab", () => {
     });
   });
 
-  it("persists orchestration_enabled when the toggle changes", async () => {
-    const user = userEvent.setup();
+  it("does not expose an orchestration rollout toggle", () => {
     render(<WorkspaceTab />);
 
-    await user.click(screen.getByRole("switch", { name: "Enable orchestration" }));
-
-    expect(mockUpdateWorkspace).toHaveBeenCalledWith("ws-1", {
-      settings: {
-        orchestration_enabled: true,
-      },
-    });
-    expect(mockSetQueriesData).toHaveBeenCalled();
-    expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ["workspaces", "list"] });
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByText("Enable orchestration")).not.toBeInTheDocument();
+    expect(mockUpdateWorkspace).not.toHaveBeenCalled();
+    expect(mockSetQueriesData).not.toHaveBeenCalled();
+    expect(mockInvalidateQueries).not.toHaveBeenCalled();
   });
 });

@@ -177,9 +177,11 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	})
 	s.captureIssueCreatedFromAutopilot(ap, run, issue)
 
-	// Enqueue agent task via the existing flow.
-	if _, err := s.TaskSvc.EnqueueTaskForIssue(ctx, issue); err != nil {
-		return fmt.Errorf("enqueue task for issue: %w", err)
+	if s.TaskSvc.Orchestrator == nil {
+		return fmt.Errorf("orchestrator unavailable")
+	}
+	if _, err := s.TaskSvc.Orchestrator.OnIssueAssigned(ctx, issue); err != nil {
+		return fmt.Errorf("orchestrate issue: %w", err)
 	}
 
 	slog.Info("autopilot dispatched (create_issue)",

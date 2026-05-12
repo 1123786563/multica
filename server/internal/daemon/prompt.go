@@ -64,7 +64,9 @@ func buildOrchestrationNodePrompt(task Task) string {
 	b.WriteString("2. Do not mark the issue as done.\n")
 	b.WriteString("3. Do not create downstream tasks or trigger other agents.\n")
 	b.WriteString("4. Do not claim completion without evidence.\n")
-	b.WriteString("5. Return a final structured JSON object in your normal task output.\n\n")
+	b.WriteString("5. Your final output must be the JSON object only.\n")
+	b.WriteString("6. Do not wrap the JSON in Markdown fences.\n")
+	b.WriteString("7. Do not add any prose before or after the JSON.\n\n")
 	b.WriteString("Required final JSON shape:\n")
 	b.WriteString(`{
   "status": "completed",

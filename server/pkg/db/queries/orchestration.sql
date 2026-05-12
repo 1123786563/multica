@@ -111,7 +111,8 @@ ORDER BY created_at ASC;
 -- name: CreateOrchestrationNodeTask :one
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context,
-    orchestration_plan_id, orchestration_node_id, orchestration_run_id
+    orchestration_plan_id, orchestration_node_id, orchestration_run_id,
+    force_fresh_session
 )
-VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, COALESCE(sqlc.narg('force_fresh_session')::boolean, FALSE))
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session;

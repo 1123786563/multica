@@ -1220,26 +1220,26 @@ git commit -m "feat(orchestration): event state transitions with attempt metadat
 
 ---
 
-## Task 7: Add Feature Flag and Retry Boundary Integration Tests
+## Task 7: Add Orchestration-Only Ingress and Retry Boundary Integration Tests
 
 **Files:**
 - Modify: `server/internal/handler/handler_test.go`
 - Modify: `server/internal/service/orchestrator.go`
 
-- [ ] **Step 1: Add feature flag off test**
+- [ ] **Step 1: Add default / flag-off ingress test**
 
 In `server/internal/handler/handler_test.go`, add a test near existing orchestration handler tests:
 
 ```go
-func TestIssueAssignedToAgent_OrchestrationFlagOffUsesLegacyTaskPath(t *testing.T) {
+func TestIssueAssignedToAgent_OrchestrationFlagOffStillUsesOrchestrationPath(t *testing.T) {
 	ctx := context.Background()
 	resetTestDB(t)
 	testHandler := newTestHandler(t)
 	seedBasicWorkspace(t, testHandler)
 
 	issue := createIssueViaHandler(t, testHandler, map[string]any{
-		"title":       "Legacy task path",
-		"description": "Should not create orchestration plan.",
+		"title":       "Orchestration path without flag",
+		"description": "Should still create orchestration plan.",
 		"assignee_id": uuidToString(testAgentID),
 	})
 
@@ -1250,8 +1250,8 @@ func TestIssueAssignedToAgent_OrchestrationFlagOffUsesLegacyTaskPath(t *testing.
 	if err != nil {
 		t.Fatalf("list plans: %v", err)
 	}
-	if len(plans) != 0 {
-		t.Fatalf("expected no orchestration plans, got %d", len(plans))
+	if len(plans) != 1 {
+		t.Fatalf("expected one orchestration plan, got %d", len(plans))
 	}
 
 	tasks, err := testHandler.Queries.ListAgentTasksByIssue(ctx, parseUUID(issue.ID))
@@ -1259,10 +1259,10 @@ func TestIssueAssignedToAgent_OrchestrationFlagOffUsesLegacyTaskPath(t *testing.
 		t.Fatalf("list tasks: %v", err)
 	}
 	if len(tasks) != 1 {
-		t.Fatalf("expected one legacy task, got %d", len(tasks))
+		t.Fatalf("expected one orchestration task, got %d", len(tasks))
 	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); ok {
-		t.Fatalf("legacy task should not carry orchestration context: %s", string(tasks[0].Context))
+	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
+		t.Fatalf("task should carry orchestration context: %s", string(tasks[0].Context))
 	}
 }
 ```
@@ -1271,7 +1271,7 @@ Adjust helper names to the existing test helpers in this file. Do not invent new
 
 - [ ] **Step 2: Add retry exhaustion test**
 
-Add a test that creates an orchestration issue with flag on, completes the first task with an invalid result twice, and asserts no third task is created:
+Add a test that creates an orchestration issue, completes the first task with an invalid result twice, and asserts no third task is created:
 
 ```go
 invalidResult := []byte(`{"status":"completed","summary":"done without evidence"}`)
@@ -1301,10 +1301,10 @@ if nodes[0].Status != "failed" {
 Run:
 
 ```bash
-cd server && go test ./internal/handler -run 'TestIssueAssignedToAgent_OrchestrationFlagOffUsesLegacyTaskPath|Test.*Retry.*Exhaust' -count=1
+cd server && go test ./internal/handler -run 'TestIssueAssignedToAgent_OrchestrationFlagOffStillUsesOrchestrationPath|Test.*Retry.*Exhaust' -count=1
 ```
 
-Expected: feature flag test may already pass; retry exhaustion may fail if attempt count or max-attempt check is off.
+Expected: ingress test may already pass; retry exhaustion may fail if attempt count or max-attempt check is off.
 
 - [ ] **Step 4: Implement minimal fixes**
 
@@ -1327,7 +1327,7 @@ Use `latestNode` when dispatching retry task so event payload reflects the curre
 Run:
 
 ```bash
-cd server && go test ./internal/handler -run 'TestIssueAssignedToAgent_OrchestrationFlagOffUsesLegacyTaskPath|Test.*Retry.*Exhaust|Test.*Orchestration' -count=1
+cd server && go test ./internal/handler -run 'TestIssueAssignedToAgent_OrchestrationFlagOffStillUsesOrchestrationPath|Test.*Retry.*Exhaust|Test.*Orchestration' -count=1
 ```
 
 Expected: PASS.

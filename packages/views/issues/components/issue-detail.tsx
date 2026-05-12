@@ -40,7 +40,8 @@ import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, Command
 import { AvatarGroup, AvatarGroupCount } from "@multica/ui/components/ui/avatar";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PropRow } from "../../common/prop-row";
-import type { IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
+import type { IssueStatus, IssuePriority, TimelineEntry, OrchestrationNode } from "@multica/core/types";
+import type { OrchestrationNodeSummary } from "@multica/core/types/agent";
 import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
 import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
 import { IssueActionsDropdown, useIssueActions } from "../actions";
@@ -95,6 +96,111 @@ function priorityLabel(priority: string, t: ActivityT): string {
   return priority;
 }
 
+function getFallbackReasonCode(node: OrchestrationNode | undefined, latestEvaluatorReason: string | null): string {
+  if (latestEvaluatorReason) return latestEvaluatorReason;
+  if (!node) return "ready_to_run";
+  switch (node.status) {
+    case "pending":
+    case "blocked":
+      return "pending_dependencies";
+    case "ready":
+    case "dispatched":
+      return "ready_to_run";
+    case "running":
+      return "running";
+    case "evaluating":
+      return "evaluation_in_progress";
+    case "waiting_human":
+      return "waiting_for_approval";
+    case "failed":
+      return node.attempt_count >= node.max_attempts ? "retry_exhausted" : "runtime_failed";
+    case "completed":
+      return "completed";
+    default:
+      return node.status;
+  }
+}
+
+function getFallbackRecommendedAction(node: OrchestrationNode | undefined): string {
+  if (!node) return "none";
+  switch (node.status) {
+    case "waiting_human":
+      return "approve";
+    case "failed":
+      return "retry";
+    default:
+      return "none";
+  }
+}
+
+function buildFallbackSummary(
+  node: OrchestrationNode | undefined,
+  latestEvaluatorReason: string | null,
+  latestEventAt: string | null,
+): OrchestrationNodeSummary | null {
+  if (!node) return null;
+  const reasonCode = getFallbackReasonCode(node, latestEvaluatorReason);
+  return {
+    status: node.status,
+    reason_code: reasonCode,
+    reason_title: reasonCode,
+    reason_detail: latestEvaluatorReason ?? reasonCode,
+    recommended_action: getFallbackRecommendedAction(node),
+    action_enabled: ["waiting_human", "failed"].includes(node.status),
+    attempt_count: node.attempt_count,
+    max_attempts: node.max_attempts,
+    latest_evaluation_status: node.status,
+    latest_agent_summary: "",
+    updated_at: latestEventAt ?? node.updated_at,
+  };
+}
+
+function orchestrationReasonLabel(reasonCode: string, t: ActivityT): string {
+  switch (reasonCode) {
+    case "pending_dependencies":
+      return t(($) => $.orchestration.reason.pending_dependencies);
+    case "ready_to_run":
+      return t(($) => $.orchestration.reason.ready_to_run);
+    case "running":
+      return t(($) => $.orchestration.reason.running);
+    case "evaluation_in_progress":
+      return t(($) => $.orchestration.reason.evaluation_in_progress);
+    case "waiting_for_human_input":
+      return t(($) => $.orchestration.reason.waiting_for_human_input);
+    case "waiting_for_approval":
+      return t(($) => $.orchestration.reason.waiting_for_approval);
+    case "retry_scheduled":
+      return t(($) => $.orchestration.reason.retry_scheduled);
+    case "runtime_failed":
+      return t(($) => $.orchestration.reason.runtime_failed);
+    case "invalid_result":
+      return t(($) => $.orchestration.reason.invalid_result);
+    case "evidence_insufficient":
+      return t(($) => $.orchestration.reason.evidence_insufficient);
+    case "retry_exhausted":
+      return t(($) => $.orchestration.reason.retry_exhausted);
+    case "completed":
+      return t(($) => $.orchestration.reason.completed);
+    default:
+      return reasonCode;
+  }
+}
+
+function orchestrationActionLabel(action: string, t: ActivityT): string {
+  switch (action) {
+    case "retry":
+      return t(($) => $.orchestration.action.retry);
+    case "approve":
+      return t(($) => $.orchestration.action.approve);
+    case "provide_input":
+      return t(($) => $.orchestration.action.provide_input);
+    case "inspect_evidence":
+      return t(($) => $.orchestration.action.inspect_evidence);
+    default:
+      return t(($) => $.orchestration.action.none);
+  }
+}
+
 function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string; open: boolean; onOpenChange: (open: boolean) => void }) {
   const { t } = useT("issues");
   const queryClient = useQueryClient();
@@ -138,6 +244,7 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
     typeof latestEvaluatorEvent?.payload.reason === "string"
       ? latestEvaluatorEvent.payload.reason
       : null;
+  const decisionSummary = currentNode?.summary ?? buildFallbackSummary(currentNode, latestEvaluatorReason, latestEvent?.created_at ?? null);
   const artifactSummary = artifacts.map((artifact) => artifact.type).slice(0, 3).join(", ");
   const formatTimestamp = (value: string | null | undefined) => {
     if (!value) return "—";
@@ -148,8 +255,11 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
       minute: "2-digit",
     });
   };
-  const canApprove = currentNode?.status === "waiting_human";
-  const canRetry = currentNode && ["failed", "waiting_human"].includes(currentNode.status);
+  const canApprove = currentNode?.status === "waiting_human" || (decisionSummary?.recommended_action === "approve" && decisionSummary.action_enabled);
+  const canRetry = currentNode
+    ? ["failed", "waiting_human"].includes(currentNode.status) ||
+      (decisionSummary?.recommended_action === "retry" && decisionSummary.action_enabled)
+    : false;
   const canCancel = !["completed", "failed", "cancelled"].includes(plan.status);
 
   return (
@@ -172,10 +282,44 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
               <PropRow label={t(($) => $.orchestration.current_node)}>
                 <span className="truncate text-muted-foreground">{currentNode.title}</span>
               </PropRow>
+              <PropRow label={t(($) => $.orchestration.current_status)}>
+                <span className="truncate text-muted-foreground">{decisionSummary?.status ?? currentNode.status}</span>
+              </PropRow>
+              <PropRow label={t(($) => $.orchestration.why_this_state)}>
+                <span className="text-muted-foreground">
+                  {decisionSummary
+                    ? orchestrationReasonLabel(decisionSummary.reason_code, t)
+                    : "—"}
+                </span>
+              </PropRow>
+              <PropRow label={t(($) => $.orchestration.recommended_action)}>
+                <span className="text-muted-foreground">
+                  {decisionSummary
+                    ? orchestrationActionLabel(decisionSummary.recommended_action, t)
+                    : t(($) => $.orchestration.action.none)}
+                </span>
+              </PropRow>
               <PropRow label={t(($) => $.orchestration.attempts)}>
-                <span className="text-muted-foreground">{currentNode.attempt_count}/{currentNode.max_attempts}</span>
+                <span className="text-muted-foreground">
+                  {(decisionSummary?.attempt_count ?? 0)}/{(decisionSummary?.max_attempts ?? 0)}
+                </span>
               </PropRow>
             </>
+          )}
+          {decisionSummary?.reason_detail && (
+            <PropRow label={t(($) => $.orchestration.reason_detail)}>
+              <span className="text-muted-foreground">{decisionSummary.reason_detail}</span>
+            </PropRow>
+          )}
+          {decisionSummary?.latest_agent_summary && (
+            <PropRow label={t(($) => $.orchestration.latest_agent_summary)}>
+              <span className="text-muted-foreground">{decisionSummary.latest_agent_summary}</span>
+            </PropRow>
+          )}
+          {decisionSummary?.updated_at && (
+            <PropRow label={t(($) => $.orchestration.last_updated)}>
+              <span className="text-muted-foreground">{formatTimestamp(decisionSummary.updated_at)}</span>
+            </PropRow>
           )}
           <PropRow label={t(($) => $.orchestration.artifacts)}>
             <span className="truncate text-muted-foreground">

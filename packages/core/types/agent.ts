@@ -141,10 +141,25 @@ export interface OrchestrationNode {
   runtime_constraints: Record<string, unknown>;
   attempt_count: number;
   max_attempts: number;
+  summary?: OrchestrationNodeSummary | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface OrchestrationNodeSummary {
+  status: string;
+  reason_code: string;
+  reason_title: string;
+  reason_detail: string;
+  recommended_action: "none" | "retry" | "approve" | "provide_input" | "inspect_evidence" | string;
+  action_enabled: boolean;
+  attempt_count: number;
+  max_attempts: number;
+  latest_evaluation_status: string;
+  latest_agent_summary: string;
+  updated_at: string | null;
 }
 
 export interface OrchestrationEvent {

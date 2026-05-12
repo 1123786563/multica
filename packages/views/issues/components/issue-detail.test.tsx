@@ -594,7 +594,75 @@ describe("IssueDetail (shared)", () => {
       expect(screen.getByText("Orchestration")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("missing_summary")).toBeInTheDocument();
+    expect(screen.getAllByText("missing_summary").length).toBeGreaterThan(0);
+    expect(screen.getByText("Current status")).toBeInTheDocument();
+    expect(screen.getByText("Why this state")).toBeInTheDocument();
+  });
+
+  it("renders summary-backed orchestration decision details when node summary is present", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          workspace_id: "ws-1",
+          source_type: "issue",
+          source_id: "issue-1",
+          objective: "Implement authentication",
+          status: "waiting_human",
+          policy: {},
+          metadata: {},
+          created_by_type: "member",
+          created_by_id: "user-1",
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      nodes: [
+        {
+          id: "node-1",
+          plan_id: "plan-1",
+          parent_node_id: null,
+          type: "implement",
+          title: "Implement JWT auth",
+          description: null,
+          status: "waiting_human",
+          assignee_agent_id: "agent-1",
+          input_contract: {},
+          output_contract: {},
+          attempt_count: 1,
+          max_attempts: 2,
+          summary: {
+            status: "waiting_human",
+            reason_code: "waiting_for_approval",
+            reason_title: "Approval required",
+            reason_detail: "Kernel evaluation requires human approval before marking this node complete.",
+            recommended_action: "approve",
+            action_enabled: true,
+            attempt_count: 1,
+            max_attempts: 2,
+            latest_evaluation_status: "waiting_human",
+            latest_agent_summary: "Implementation is ready; waiting for sign-off.",
+            updated_at: "2026-05-11T00:03:00Z",
+          },
+          position_x: null,
+          position_y: null,
+          created_at: "2026-05-11T00:01:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      events: [],
+      artifacts: [],
+    });
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getByText("Waiting for approval")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Recommended action")).toBeInTheDocument();
+    expect(screen.getAllByText("Approve").length).toBeGreaterThan(0);
+    expect(screen.getByText("Implementation is ready; waiting for sign-off.")).toBeInTheDocument();
   });
 
   it("renders orchestration process details for nodes, events, and artifacts", async () => {

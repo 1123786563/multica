@@ -18,6 +18,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
@@ -1542,7 +1543,7 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 	switch result.Status {
 	case "completed":
 		taskLog.Info("task completed", "status", result.Status)
-		if err := d.client.CompleteTask(ctx, taskID, result.Comment, result.BranchName, result.SessionID, result.WorkDir); err != nil {
+		if err := d.client.CompleteTask(ctx, taskID, result.Comment, result.StructuredResult, result.BranchName, result.SessionID, result.WorkDir); err != nil {
 			taskLog.Error("complete task failed, falling back to fail", "error", err)
 			if failErr := d.client.FailTask(ctx, taskID, fmt.Sprintf("complete task failed: %s", err.Error()), result.SessionID, result.WorkDir, "agent_error"); failErr != nil {
 				taskLog.Error("fail task fallback also failed", "error", failErr)
@@ -1922,14 +1923,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				FailureReason: reason,
 			}, nil
 		}
-		return TaskResult{
-			Status:    "completed",
-			Comment:   result.Output,
-			SessionID: result.SessionID,
-			WorkDir:   env.WorkDir,
-			EnvRoot:   env.RootDir,
-			Usage:     usageEntries,
-		}, nil
+		return buildCompletedTaskResult(task, provider, result, env.WorkDir, env.RootDir, usageEntries, taskLog), nil
 	case "timeout":
 		// Surface session_id/work_dir so the chat resume pointer is kept
 		// in sync even when the agent times out after building a session.
@@ -1995,6 +1989,32 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			FailureReason: failureReason,
 		}, nil
 	}
+}
+
+func buildCompletedTaskResult(task Task, provider string, result agent.Result, workDir, envRoot string, usageEntries []TaskUsageEntry, taskLog *slog.Logger) TaskResult {
+	completed := TaskResult{
+		Status:    "completed",
+		Comment:   result.Output,
+		SessionID: result.SessionID,
+		WorkDir:   workDir,
+		EnvRoot:   envRoot,
+		Usage:     usageEntries,
+	}
+	if task.Orchestration == nil {
+		return completed
+	}
+
+	validation := service.ParseAgentResultPayload([]byte(result.Output), service.ResultParseOptions{})
+	if !validation.Valid {
+		taskLog.Warn("orchestration completed output is not a valid structured result",
+			"provider", provider,
+			"errors", validation.Errors,
+		)
+		return completed
+	}
+
+	completed.StructuredResult = json.RawMessage([]byte(strings.TrimSpace(result.Output)))
+	return completed
 }
 
 // executeAndDrain runs a backend, drains its message stream (forwarding to the

@@ -1285,22 +1285,23 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	return &child, nil
 }
 
-// RerunIssue creates a fresh queued task for the agent currently assigned
-// to the issue. Used by the manual rerun endpoint.
+// RerunIssue creates a fresh orchestration execution for the agent currently
+// assigned to the issue. Used by the manual rerun endpoint.
 //
-// The new task is flagged force_fresh_session=true so the daemon starts a
-// clean agent session instead of resuming the prior (agent_id, issue_id)
-// session. A user clicking rerun has just judged the prior output bad —
-// resuming the same conversation would replay the same poisoned state.
-// Auto-retry of an orphaned mid-flight failure (HandleFailedTasks →
-// MaybeRetryFailedTask → CreateRetryTask) does NOT take this path, so
-// MUL-1128's mid-flight resume contract is preserved.
+// Rerun cancels the active plan (if any) and creates a new plan whose first
+// dispatched task carries force_fresh_session=true. The daemon therefore
+// starts a clean agent session instead of resuming the prior
+// (agent_id, issue_id) session. A user clicking rerun has just judged the
+// prior output bad — resuming the same conversation would replay the same
+// poisoned state. Auto-retry of an orphaned mid-flight failure
+// (HandleFailedTasks → MaybeRetryFailedTask → CreateRetryTask) does NOT take
+// this path, so MUL-1128's mid-flight resume contract is preserved.
 //
 // Only tasks belonging to the issue's current assignee are cancelled.
 // Tasks owned by other agents on the same issue (e.g. a parallel
 // @-mention agent) are left alone — rerun must not collateral-cancel
 // them.
-func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, triggerCommentID pgtype.UUID) (*db.AgentTaskQueue, error) {
+func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	issue, err := s.Queries.GetIssue(ctx, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("load issue: %w", err)
@@ -1308,16 +1309,20 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, trigg
 	if !issue.AssigneeID.Valid || issue.AssigneeType.String != "agent" {
 		return nil, fmt.Errorf("issue is not assigned to an agent")
 	}
-	// Cancel only the assignee's active/queued tasks on this issue. This
-	// covers both the unique-index conflict (queued/dispatched) and a
-	// stuck running task without touching other agents on the issue.
+	if s.Orchestrator == nil {
+		return nil, fmt.Errorf("orchestrator unavailable")
+	}
+	return s.rerunOrchestrationIssue(ctx, issue)
+}
+
+func (s *TaskService) rerunOrchestrationIssue(ctx context.Context, issue db.Issue) (*db.AgentTaskQueue, error) {
 	cancelled, err := s.Queries.CancelAgentTasksByIssueAndAgent(ctx, db.CancelAgentTasksByIssueAndAgentParams{
-		IssueID: issueID,
+		IssueID: issue.ID,
 		AgentID: issue.AssigneeID,
 	})
 	if err != nil {
 		slog.Warn("rerun: cancel prior tasks failed",
-			"issue_id", util.UUIDToString(issueID),
+			"issue_id", util.UUIDToString(issue.ID),
 			"agent_id", util.UUIDToString(issue.AssigneeID),
 			"error", err,
 		)
@@ -1328,17 +1333,21 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, trigg
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
 	}
 
-	task, err := s.enqueueIssueTask(ctx, issue, triggerCommentID, true)
+	task, err := s.Orchestrator.RerunIssue(ctx, issue)
 	if err != nil {
 		return nil, err
 	}
+	if task == nil {
+		return nil, fmt.Errorf("orchestrator did not create a rerun task")
+	}
 	slog.Info("issue rerun enqueued",
 		"task_id", util.UUIDToString(task.ID),
-		"issue_id", util.UUIDToString(issueID),
+		"issue_id", util.UUIDToString(issue.ID),
 		"agent_id", util.UUIDToString(issue.AssigneeID),
 		"cancelled_prior", len(cancelled),
+		"path", "orchestration",
 	)
-	return &task, nil
+	return task, nil
 }
 
 // HandleFailedTasks runs the post-failure side effects for a batch of

@@ -23,6 +23,9 @@ func TestHardCheckEvaluatorInvalidValidationFails(t *testing.T) {
 	if eval.Pass || eval.RecommendedAction != "retry" || eval.Reason != "invalid_result" {
 		t.Fatalf("unexpected eval: %#v", eval)
 	}
+	if eval.Status != "invalid_result" || eval.ReasonDetail == "" {
+		t.Fatalf("expected observability fields for invalid result, got %#v", eval)
+	}
 }
 
 func TestHardCheckEvaluatorImplementRequiresEvidence(t *testing.T) {
@@ -194,6 +197,55 @@ func TestHardCheckEvaluatorPassesImplementWithChangedFilesAndEvidence(t *testing
 	}
 	if !eval.Pass || eval.RecommendedAction != "complete" || eval.Reason != "hard_check_passed" {
 		t.Fatalf("unexpected eval: %#v", eval)
+	}
+	if eval.Status != "passed" || eval.ReasonDetail == "" {
+		t.Fatalf("expected observability fields for successful evaluation, got %#v", eval)
+	}
+}
+
+func TestHardCheckEvaluatorInvalidResultMapsToRetry(t *testing.T) {
+	evaluator := HardCheckEvaluator{}
+
+	result, err := evaluator.Evaluate(context.Background(), EvaluationInput{
+		Node: db.OrchestrationNode{Type: "implement"},
+		Validation: ResultValidation{
+			Valid:  false,
+			Errors: []ValidationError{{Code: "missing_summary", Message: "missing summary"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate returned error: %v", err)
+	}
+	if result.Reason != "invalid_result" {
+		t.Fatalf("expected invalid_result, got %q", result.Reason)
+	}
+	if result.RecommendedAction != "retry" {
+		t.Fatalf("expected retry action, got %q", result.RecommendedAction)
+	}
+}
+
+func TestHardCheckEvaluatorMissingEvidenceMapsToRetry(t *testing.T) {
+	evaluator := HardCheckEvaluator{}
+
+	result, err := evaluator.Evaluate(context.Background(), EvaluationInput{
+		Node: db.OrchestrationNode{Type: "implement"},
+		Validation: ResultValidation{
+			Valid: true,
+		},
+		Result: AgentStructuredResult{
+			Status:           "completed",
+			Summary:          "done",
+			CriteriaEvidence: []CriteriaEvidence{{Criterion: "criterion", Evidence: "evidence"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate returned error: %v", err)
+	}
+	if result.Reason != "missing_implementation_artifact" {
+		t.Fatalf("expected missing_implementation_artifact, got %q", result.Reason)
+	}
+	if result.RecommendedAction != "retry" {
+		t.Fatalf("expected retry action, got %q", result.RecommendedAction)
 	}
 }
 

@@ -53,7 +53,7 @@ Kernel 必须满足以下不变量：
 4. issue 只能在 plan 完成后由 kernel 推进到 `done`。
 5. evaluator 失败后只能进入三类结果：retry、waiting_human、failed。
 6. 每个关键状态变化必须写入 `orchestration_event`。
-7. workspace 未开启 `orchestration_enabled` 时，原 `EnqueueTaskForIssue` 路径行为不变。
+7. 新建或新分配的 agent-assigned issue 必须进入 orchestration path，不允许再回退到 legacy enqueue path。
 8. legacy task completion 对非 orchestration task 继续兼容；对 orchestration task 必须进入 evidence evaluation，不能直接视为完成。
 
 ### 3.2 Evidence Contract
@@ -292,24 +292,13 @@ event payload 不应该存大日志或完整命令输出。大内容应进入 ar
 
 状态更新和对应 event 必须在同一个数据库事务内完成。任何关键状态变化没有 event，视为 correctness bug。
 
-## 9. Feature Flag 行为
+## 9. Rollout Residuals
 
-`workspace.settings.orchestration_enabled` 是兼容边界。
+`workspace.settings.orchestration_enabled` 仍可能出现在历史数据或旧文档中，但它不再控制新 issue/new assignment 的执行路径。
 
-### 9.1 Flag Off
+### 9.1 Runtime Semantics
 
-当 `orchestration_enabled` 不存在或为 false：
-
-- agent-assigned issue 继续走 legacy task path。
-- 不创建 orchestration plan。
-- 不创建 orchestration node。
-- task context 不要求 orchestration 字段。
-- daemon prompt 继续走 issue-oriented prompt。
-- legacy task completion 行为保持兼容。
-
-### 9.2 Flag On
-
-当 `orchestration_enabled` 为 true：
+当前语义应当是：
 
 - agent-assigned issue 创建 orchestration plan。
 - simple planner 创建 node。
@@ -318,13 +307,22 @@ event payload 不应该存大日志或完整命令输出。大内容应进入 ar
 - daemon 使用 node-oriented prompt。
 - task completion 必须经过 orchestrator evaluator 后才能影响 node / plan / issue。
 
+### 9.2 Compatibility Boundary
+
+兼容性只保留在已存在的 legacy task 上：
+
+- 历史 legacy task 可继续按原 completion payload 完成。
+- orchestration task 不允许绕过 evaluator 直接完成 node / plan / issue。
+- 新 issue、新 assignment、新 rerun、新 comment trigger 均不得再创建 legacy issue task。
+
 ### 9.3 测试要求
 
 必须证明：
 
-- flag off：创建 legacy task，不创建 plan。
-- flag on：创建 plan + node + orchestration task，不创建直接执行整个 issue 的 legacy task。
-- flag 切换只影响新 assignment；既有 task 按创建时模式继续执行。
+- default / flag off：创建 plan + node + orchestration task。
+- update assign / batch assign / comment trigger / autopilot create_issue / welcome issue 均走 orchestration path。
+- rerun 只会创建新的 orchestration plan，不会回退创建 legacy issue task。
+- 历史 legacy task 的 completion compatibility 仍然可用。
 
 ## 10. Structured Result Protocol
 
@@ -628,8 +626,7 @@ Hard check 规则：
 
 新增或补齐：
 
-- feature flag off 走 legacy task path。
-- feature flag on 创建 plan、node、orchestration task。
+- default / flag off 也创建 plan、node、orchestration task。
 - task start 将 node 置为 running 并写 event。
 - task completion 先进入 evaluating，再应用 evaluator decision。
 - evaluator success 完成 node 和 plan。
@@ -664,7 +661,7 @@ Hard check 规则：
 ### Phase 1：Document Invariants and Add Tests
 
 - 补状态机 invariant tests。
-- 补 feature flag tests。
+- 补 orchestration-only ingress tests。
 - 补 attempt / retry boundary tests。
 - 补 event completeness assertions。
 
@@ -697,8 +694,8 @@ Hard check 规则：
 
 完成标准：
 
-1. feature flag off 时 agent-assigned issue 保持 legacy 行为。
-2. feature flag on 时 agent-assigned issue 进入 plan/node/task path。
+1. agent-assigned issue 在 default / flag off 下仍进入 plan/node/task path。
+2. update assign、batch assign、comment trigger、autopilot create_issue、welcome issue 均进入 orchestration path。
 3. task completion 不会绕过 evaluator 直接完成 node。
 4. plan 只有在所有必要 node completed/skipped 后才能 completed。
 5. issue `done` 只在 plan completed 后由 kernel 写入。

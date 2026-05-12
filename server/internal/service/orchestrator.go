@@ -47,6 +47,7 @@ type dispatchNodeInput struct {
 	Priority           int32
 	AcceptanceCriteria json.RawMessage
 	ContextRefs        json.RawMessage
+	ForceFreshSession  bool
 }
 
 type planNodeSpec struct {
@@ -89,6 +90,32 @@ func (o *Orchestrator) OnIssueAssigned(ctx context.Context, issue db.Issue) (*db
 		return nil, nil
 	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("lookup active plan: %w", err)
+	}
+
+	return o.startIssuePlan(ctx, issue, false)
+}
+
+func (o *Orchestrator) RerunIssue(ctx context.Context, issue db.Issue) (*db.AgentTaskQueue, error) {
+	if !issue.AssigneeID.Valid {
+		return nil, fmt.Errorf("issue has no assignee")
+	}
+	if existing, err := o.Queries.GetActiveOrchestrationPlanBySource(ctx, db.GetActiveOrchestrationPlanBySourceParams{
+		SourceType: "issue",
+		SourceID:   issue.ID,
+	}); err == nil && existing.ID.Valid {
+		if err := o.CancelPlan(ctx, existing.ID); err != nil {
+			return nil, fmt.Errorf("cancel active plan: %w", err)
+		}
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("lookup active plan: %w", err)
+	}
+
+	return o.startIssuePlan(ctx, issue, true)
+}
+
+func (o *Orchestrator) startIssuePlan(ctx context.Context, issue db.Issue, forceFreshSession bool) (*db.AgentTaskQueue, error) {
+	if !issue.AssigneeID.Valid {
+		return nil, fmt.Errorf("issue has no assignee")
 	}
 
 	agent, err := o.Queries.GetAgent(ctx, issue.AssigneeID)
@@ -199,7 +226,7 @@ func (o *Orchestrator) OnIssueAssigned(ctx context.Context, issue db.Issue) (*db
 				}
 			}
 		}
-		tasks, err := o.dispatchReadyNodes(ctx, qtx, plan, issue.ID, priorityToInt(issue.Priority), json.RawMessage(issue.AcceptanceCriteria), json.RawMessage(issue.ContextRefs))
+		tasks, err := o.dispatchReadyNodes(ctx, qtx, plan, issue.ID, priorityToInt(issue.Priority), json.RawMessage(issue.AcceptanceCriteria), json.RawMessage(issue.ContextRefs), forceFreshSession)
 		if err != nil {
 			return err
 		}
@@ -479,7 +506,7 @@ func (o *Orchestrator) ApproveNode(ctx context.Context, nodeID pgtype.UUID) erro
 		}); err != nil {
 			return err
 		}
-		next, err := o.dispatchReadyNodes(ctx, qtx, plan, plan.SourceID, 0, nil, nil)
+		next, err := o.dispatchReadyNodes(ctx, qtx, plan, plan.SourceID, 0, nil, nil, false)
 		if err != nil {
 			return err
 		}
@@ -568,7 +595,7 @@ func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, t
 	if err != nil {
 		return nil, err
 	}
-	validation := ParseAgentResultPayload(rawResult, ResultParseOptions{AllowLegacyCompatibility: true})
+	validation := ParseAgentResultPayload(rawResult, ResultParseOptions{})
 	result := validation.Result
 	eval, err := (HardCheckEvaluator{}).Evaluate(ctx, EvaluationInput{
 		Plan:               plan,
@@ -705,7 +732,7 @@ func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, t
 		}); err != nil {
 			return nil, err
 		}
-		next, err := o.dispatchReadyNodes(ctx, qtx, plan, task.IssueID, task.Priority, taskCtx.AcceptanceCriteria, taskCtx.ContextRefs)
+		next, err := o.dispatchReadyNodes(ctx, qtx, plan, task.IssueID, task.Priority, taskCtx.AcceptanceCriteria, taskCtx.ContextRefs, false)
 		if err != nil {
 			return nil, err
 		}
@@ -895,7 +922,7 @@ func jsonHasContent(raw []byte) bool {
 	return trimmed != "" && trimmed != "null" && trimmed != "[]" && trimmed != "{}"
 }
 
-func (o *Orchestrator) dispatchReadyNodes(ctx context.Context, qtx *db.Queries, plan db.OrchestrationPlan, issueID pgtype.UUID, priority int32, acceptanceCriteria, contextRefs json.RawMessage) ([]db.AgentTaskQueue, error) {
+func (o *Orchestrator) dispatchReadyNodes(ctx context.Context, qtx *db.Queries, plan db.OrchestrationPlan, issueID pgtype.UUID, priority int32, acceptanceCriteria, contextRefs json.RawMessage, forceFreshSession bool) ([]db.AgentTaskQueue, error) {
 	nodes, err := qtx.ListOrchestrationNodesByPlan(ctx, plan.ID)
 	if err != nil {
 		return nil, err
@@ -956,6 +983,7 @@ func (o *Orchestrator) dispatchReadyNodes(ctx context.Context, qtx *db.Queries, 
 			Priority:           priority,
 			AcceptanceCriteria: acceptanceCriteria,
 			ContextRefs:        contextRefs,
+			ForceFreshSession:  forceFreshSession,
 		})
 		if err != nil {
 			return nil, err
@@ -1033,6 +1061,7 @@ func (o *Orchestrator) dispatchNodeTask(ctx context.Context, qtx *db.Queries, in
 		OrchestrationPlanID: in.Plan.ID,
 		OrchestrationNodeID: in.Node.ID,
 		OrchestrationRunID:  runID,
+		ForceFreshSession:   pgtype.Bool{Bool: in.ForceFreshSession, Valid: in.ForceFreshSession},
 	})
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("create node task: %w", err)

@@ -103,6 +103,9 @@ func TestBuildOrchestrationNodePrompt(t *testing.T) {
 		"Do not mark the issue as done",
 		"Do not create downstream tasks",
 		"Do not claim completion without evidence",
+		"Your final output must be the JSON object only",
+		"Do not wrap the JSON in Markdown fences",
+		"Do not add any prose before or after the JSON",
 		`"changed_files"`,
 		`"criteria_evidence"`,
 	}
