@@ -117,6 +117,15 @@ describe("ApiClient schema fallback", () => {
       expect(res).toEqual({ issues: [] });
     });
   });
+
+  describe("getIssueOrchestration", () => {
+    it("falls back to an empty orchestration snapshot when nodes is malformed", async () => {
+      stubFetchJson({ run: null, nodes: "not-an-array", events: [], evidence: [] });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.getIssueOrchestration("issue-1");
+      expect(res).toEqual({ run: null, nodes: [], events: [], evidence: [] });
+    });
+  });
 });
 
 // Direct tests for the helper, decoupled from any specific endpoint —

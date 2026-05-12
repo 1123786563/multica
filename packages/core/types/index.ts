@@ -1,5 +1,16 @@
 export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueReaction } from "./issue";
 export type {
+  IssueOrchestration,
+  OrchestrationRun,
+  OrchestrationRunStatus,
+  OrchestrationRunSource,
+  OrchestrationNode,
+  OrchestrationNodeKind,
+  OrchestrationNodeStatus,
+  OrchestrationEvent,
+  OrchestrationEvidence,
+} from "./orchestration";
+export type {
   Agent,
   AgentStatus,
   AgentRuntimeMode,

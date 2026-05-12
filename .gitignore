@@ -3,7 +3,9 @@ dist
 *.log
 .DS_Store
 .envrc
-
+.pnpm-store/
+.omc/
+.serena/
 # build outputs
 .turbo
 .next
