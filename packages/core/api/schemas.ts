@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Attachment, IssueOrchestration, ListIssuesResponse, TimelineEntry } from "../types";
+import type { IssueOrchestration, ListIssuesResponse, TimelineEntry } from "../types";
 
 // ---------------------------------------------------------------------------
 // Schemas for the highest-risk API endpoints — those whose responses drive

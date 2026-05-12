@@ -81,9 +81,6 @@ import type {
   ListAutopilotRunsResponse,
   NotificationPreferenceResponse,
   NotificationPreferences,
-  GitHubPullRequest,
-  ListGitHubInstallationsResponse,
-  GitHubConnectResponse,
   IssueOrchestration,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
@@ -94,7 +91,6 @@ import { parseWithFallback } from "./schema";
 import {
   ChildIssuesResponseSchema,
   CommentsListSchema,
-  EMPTY_ATTACHMENT,
   EMPTY_ISSUE_ORCHESTRATION,
   EMPTY_LIST_ISSUES_RESPONSE,
   EMPTY_TIMELINE_ENTRIES,
@@ -440,13 +436,6 @@ export class ApiClient {
 
   async getIssue(id: string): Promise<Issue> {
     return this.fetch(`/api/issues/${id}`);
-  }
-
-  async getIssueOrchestration(issueId: string): Promise<IssueOrchestration> {
-    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/orchestration`);
-    return parseWithFallback(raw, IssueOrchestrationSchema, EMPTY_ISSUE_ORCHESTRATION, {
-      endpoint: "GET /api/issues/:id/orchestration",
-    });
   }
 
   async createIssue(data: CreateIssueRequest): Promise<Issue> {

@@ -592,3 +592,12 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 	}
 	return item, true
 }
+
+func (h *Handler) maybeStartIssueOrchestration(r *http.Request, issue db.Issue, actorType, actorID string) {
+	if h.OrchestrationService == nil {
+		return
+	}
+	if _, err := h.OrchestrationService.EnsureActiveRunForIssue(r.Context(), issue, actorType, actorID); err != nil {
+		slog.Warn("maybeStartIssueOrchestration failed", "issue_id", issue.ID, "error", err)
+	}
+}
