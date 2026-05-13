@@ -988,7 +988,10 @@ func TestRetryExhaustionCreatesAttentionComment(t *testing.T) {
 	if len(nodes) == 0 {
 		t.Fatal("expected at least one orchestration node")
 	}
-	targetNode := nodes[0]
+	targetNode := nodeByType(nodes, "plan")
+	if !targetNode.ID.Valid {
+		t.Fatalf("expected plan node, got %+v", nodes)
+	}
 	completeQueuedNode(uuidToString(targetNode.ID))
 
 	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)

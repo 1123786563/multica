@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multica Orchestration 流程全景</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0e17;
+      --surface: #111827;
+      --border: #1e293b;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent: #6366f1;
+      --accent-light: #818cf8;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacGridFont, 'Segoe UI', 'PingFang SC', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 {
+      font-size: 2rem;
+      text-align: center;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle { text-align: center; color: var(--text-muted); margin-bottom: 3rem; font-size: 1.1rem; }
+    h2 {
+      font-size: 1.4rem; color: var(--accent-light);
+      margin: 3rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border);
+    }
+    h3 { font-size: 1.1rem; color: var(--text); margin: 1.5rem 0 0.75rem; }
+    .desc { color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.95rem; }
+    .mermaid {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; overflow-x: auto;
+    }
+    .legend {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem; margin: 1rem 0 2rem;
+    }
+    .legend-item {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.9rem;
+    }
+    .legend-item code { color: var(--accent-light); font-size: 0.85rem; }
+    .toc {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 1.5rem 2rem; margin-bottom: 3rem;
+    }
+    .toc h3 { margin-top: 0; }
+    .toc ol { padding-left: 1.5rem; }
+    .toc li { margin: 0.4rem 0; }
+    .toc a { color: var(--accent-light); text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+    table {
+      width: 100%; border-collapse: collapse; margin: 1rem 0 2rem;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    }
+    th, td { padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+    th { color: var(--accent-light); font-weight: 600; }
+    td code { color: var(--accent-light); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<h1>Multica Orchestration 流程全景</h1>
+<p class="subtitle">AI-Native 编排内核 — Plan → Execute → Verify 三阶段 DAG，硬校验 + 人工审批 + 自动重试</p>
+
+<nav class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#overview">编排系统总览</a></li>
+    <li><a href="#data-model">数据模型：Plan / Node / Edge / Event / Artifact</a></li>
+    <li><a href="#lifecycle">完整生命周期时序图</a></li>
+    <li><a href="#node-state">Node 状态机</a></li>
+    <li><a href="#evaluator">HardCheckEvaluator 评估逻辑</a></li>
+    <li><a href="#human">人工决策：Approve / RequestChanges / Retry</a></li>
+    <li><a href="#retry">自动重试与失败恢复</a></li>
+    <li><a href="#observability">可观测性：NodeSummary 语义</a></li>
+    <li><a href="#daemon">Daemon 侧：Task Context 与 Prompt</a></li>
+    <li><a href="#frontend">前端：Issue Detail + Execution Log</a></li>
+    <li><a href="#db">数据库 Schema 关键表</a></li>
+  </ol>
+</nav>
+
+<!-- ==================== 1. 总览 ==================== -->
+<h2 id="overview">1. 编排系统总览</h2>
+<p class="desc">当一个 Issue 被分配给 Agent 时，Orchestrator 自动创建一个 Plan（计划），其中包含三个有序 Node（节点）：Plan → Execute → Verify。每个 Node 通过 DAG 边声明依赖，仅在上游 Node 完成后才被调度。</p>
+
+<div class="mermaid">
+graph TB
+    subgraph "触发源"
+        A1["Issue 分配 Agent"]
+        A2["手动 Rerun"]
+        A3["Autopilot 触发"]
+        A4["Recovery 恢复"]
+    end
+
+    subgraph "Orchestrator 核心"
+        Orch["Orchestrator<br/>server/internal/service/orchestrator.go"]
+        Eval["HardCheckEvaluator<br/>orchestration_evaluator.go"]
+        Obs["Observability<br/>orchestration_observability.go"]
+    end
+
+    subgraph "Plan DAG (Plan → Execute → Verify)"
+        N1["Plan Node<br/>分析 & 设计"]
+        N2["Execute Node<br/>实现代码"]
+        N3["Verify Node<br/>测试 & 验证"]
+        N1 -->|"blocks"| N2
+        N2 -->|"blocks"| N3
+    end
+
+    subgraph "Daemon 执行"
+        D1["Task Context (JSON)<br/>注入到 Agent Prompt"]
+        D2["Agent 执行<br/>输出结构化 Result"]
+    end
+
+    subgraph "评估与决策"
+        E1{"HardCheck<br/>评估"}
+        E2["✅ Pass → 下游 Node 调度"]
+        E3["🔄 Fail → 自动重试<br/>(max 2 attempts)"]
+        E4["⚠️ AskHuman → 等待人工"]
+        E5["❌ Exhausted → Plan 失败"]
+    end
+
+    subgraph "人工介入"
+        H1["Approve<br/>标记完成 + 继续下游"]
+        H2["RequestChanges<br/>带修改要求重新执行"]
+        H3["Retry<br/>手动重试"]
+    end
+
+    A1 & A2 & A3 & A4 --> Orch
+    Orch -->|"创建 Plan"| N1 & N2 & N3
+    Orch -->|"dispatchNodeTask()"| D1
+    D1 --> D2
+    D2 -->|"rawResult"| Eval
+    Eval --> E1
+    E1 -->|"pass=true"| E2
+    E1 -->|"fail + retryable"| E3
+    E1 -->|"risks/blocked/needs_human"| E4
+    E1 -->|"max attempts exhausted"| E5
+    E3 -->|"重新 dispatch"| D1
+    E4 --> H1 & H2 & H3
+    H1 -->|"完成 Node"| E2
+    H2 -->|"带 changeRequest"| D1
+    Obs -.->|"读 events"| E1
+
+    style N1 fill:#4f46e5,stroke:#818cf8,color:#fff
+    style N2 fill:#059669,stroke:#34d399,color:#fff
+    style N3 fill:#d97706,stroke:#fbbf24,color:#fff
+    style E1 fill:#b91c1c,stroke:#f87171,color:#fff
+    style Eval fill:#7c3aed,stroke:#a78bfa,color:#fff
+</div>
+
+<!-- ==================== 2. 数据模型 ==================== -->
+<h2 id="data-model">2. 数据模型</h2>
+<p class="desc">编排系统的五个核心实体及其关系。Plan 通过 Source (issue) 关联，Node 通过 Edge 构成 DAG，Event 记录完整审计轨迹，Artifact 保存证据。</p>
+
+<div class="mermaid">
+erDiagram
+    ISSUE ||--o{ ORCHESTRATION_PLAN : "source"
+    ORCHESTRATION_PLAN ||--o{ ORCHESTRATION_NODE : "contains"
+    ORCHESTRATION_PLAN ||--o{ ORCHESTRATION_EDGE : "defines"
+    ORCHESTRATION_PLAN ||--o{ ORCHESTRATION_EVENT : "logs"
+    ORCHESTRATION_PLAN ||--o{ ORCHESTRATION_ARTIFACT : "stores"
+    ORCHESTRATION_NODE ||--o{ ORCHESTRATION_EVENT : "emits"
+    ORCHESTRATION_NODE ||--o{ ORCHESTRATION_ARTIFACT : "produces"
+    ORCHESTRATION_NODE ||--o{ AGENT_TASK_QUEUE : "dispatches"
+    AGENT_TASK_QUEUE ||--o{ ORCHESTRATION_EVENT : "triggers"
+
+    ORCHESTRATION_PLAN {
+      uuid id PK
+      uuid workspace_id FK
+      string source_type "issue"
+      uuid source_id FK
+      text objective
+      string status "running|completed|failed|cancelled|waiting_human"
+      jsonb policy
+      jsonb metadata
+    }
+
+    ORCHESTRATION_NODE {
+      uuid id PK
+      uuid plan_id FK
+      string type "plan|execute|verify"
+      string title
+      text description
+      string status "pending|ready|dispatched|running|evaluating|completed|failed|waiting_human|cancelled"
+      uuid assignee_agent_id FK
+      jsonb input_contract
+      jsonb output_contract
+      jsonb evaluator_policy
+      jsonb retry_policy
+      int attempt_count
+      int max_attempts "默认 2"
+      timestamp started_at
+      timestamp completed_at
+    }
+
+    ORCHESTRATION_EDGE {
+      uuid id PK
+      uuid plan_id FK
+      uuid from_node_id FK
+      uuid to_node_id FK
+      string type "blocks"
+    }
+
+    ORCHESTRATION_EVENT {
+      uuid id PK
+      uuid plan_id FK
+      uuid node_id FK
+      uuid task_id FK
+      string event_type "plan.created|node.dispatched|evaluation.passed|..."
+      string actor_type "kernel|agent|member"
+      uuid actor_id
+      jsonb payload
+    }
+
+    ORCHESTRATION_ARTIFACT {
+      uuid id PK
+      uuid plan_id FK
+      uuid node_id FK
+      uuid task_id FK
+      string type "diff|file|test_result|decision|..."
+      string uri
+      jsonb content
+      jsonb metadata
+    }
+</div>
+
+<!-- ==================== 3. 完整生命周期 ==================== -->
+<h2 id="lifecycle">3. 完整生命周期时序图</h2>
+<p class="desc">从 Issue 分配 Agent 开始，到 Plan 完成或失败的全流程。展示了 Node 调度、Daemon 执行、HardCheck 评估、自动重试、人工审批等关键路径。</p>
+
+<div class="mermaid">
+sequenceDiagram
+    participant User as 用户
+    participant Handler as Handler
+    participant Orch as Orchestrator
+    participant DB as PostgreSQL
+    participant Bus as Event Bus
+    participant Daemon as Daemon (Agent)
+    participant Evaluator as HardCheckEvaluator
+    participant FE as 前端
+
+    Note over User,FE: ━━━ Phase 1: Issue 分配 → 创建 Plan ━━━
+
+    User->>Handler: PUT /api/issues/{id}<br/>(assign agent)
+    Handler->>Orch: OnIssueAssigned(issue)
+    Orch->>DB: LockActiveOrchestrationPlanBySource<br/>(防并发, SELECT FOR UPDATE)
+    Orch->>DB: CreateOrchestrationPlan<br/>(status=running)
+    Orch->>DB: CreateOrchestrationNode × 3<br/>(plan:ready, execute:pending, verify:pending)
+    Orch->>DB: CreateOrchestrationEdge × 2<br/>(plan→execute, execute→verify)
+    Orch->>Orch: dispatchReadyNodes()<br/>plan Node 依赖已满足
+    Orch->>DB: CreateOrchestrationNodeTask<br/>(agent_task_queue, status=queued)
+    Orch->>Bus: Publish task:queued
+    Bus->>Daemon: WS: daemon:task_available
+    Bus-->>FE: WS: task:queued
+
+    Note over User,FE: ━━━ Phase 2: Daemon 认领 + 执行 ━━━
+
+    Daemon->>Handler: POST /api/daemon/runtimes/{id}/tasks/claim
+    Handler->>Orch: OnTaskStarted(task)
+    Orch->>DB: MarkOrchestrationNodeRunning(nodeID)
+    Orch->>DB: CreateOrchestrationEvent(node.running)
+    Handler-->>Daemon: 200 OK
+    Bus-->>FE: WS: task:dispatch (node: running)
+
+    Daemon->>Daemon: BuildPrompt(task)<br/>注入 OrchestrationTaskContext
+    Daemon->>Daemon: Agent 执行 Node 任务
+
+    Note over User,FE: ━━━ Phase 3: Agent 返回结构化结果 ━━━
+
+    Daemon->>Handler: POST /api/daemon/tasks/{id}/complete<br/>body: AgentStructuredResult JSON
+    Handler->>Orch: OnTaskCompleted(task, rawResult)
+
+    Note over Orch,Evaluator: ━━━ Phase 4: 评估 (Evaluation) ━━━
+
+    Orch->>DB: MarkOrchestrationNodeEvaluating(nodeID)
+    Orch->>Orch: ParseAgentResultPayload(rawResult)<br/>→ ResultValidation
+    Orch->>Evaluator: HardCheckEvaluator.Evaluate(input)
+
+    alt 评估通过 (pass=true)
+        Evaluator-->>Orch: EvaluationResult{pass=true}
+        Orch->>DB: CompleteOrchestrationNode
+        Orch->>DB: CreateOrchestrationEvent(node.completed)
+        Orch->>DB: CreateOrchestrationArtifact × N
+        Orch->>Orch: dispatchReadyNodes()<br/>→ 调度下一个 Node
+
+        alt 还有下游 Node
+            Orch->>DB: CreateOrchestrationNodeTask<br/>(下一个 Node)
+            Orch-->>Daemon: WS: daemon:task_available
+        else 所有 Node 完成
+            Orch->>DB: UpdatePlanStatus(completed)
+            Orch->>DB: UpdateIssueStatus(in_review)
+            Orch->>DB: CreateOrchestrationEvent(plan.completed)
+            Orch-->>FE: WS: orchestration:updated
+        end
+    else 需要人工审批 (ask_human)
+        Evaluator-->>Orch: EvaluationResult{recommendedAction="ask_human"}
+        Orch->>DB: WaitOrchestrationNodeForHuman
+        Orch->>DB: UpdatePlanStatus(waiting_human)
+        Orch->>DB: CreateOrchestrationEvent(node.waiting_human)
+        Orch->>Orch: createAttentionCommentIfNeeded<br/>→ Issue 评论 + 订阅通知
+        Orch-->>FE: WS: orchestration:updated
+
+        Note over User,FE: ━━━ Phase 5: 人工决策 ━━━
+
+        FE->>User: 显示 Decision Panel<br/>(Approve / RequestChanges)
+        User->>Handler: POST /api/orchestration/nodes/{id}/approve
+        Handler->>Orch: ApproveNode(nodeID)
+        Orch->>DB: CompleteOrchestrationNode
+        Orch->>Orch: dispatchReadyNodes()
+        Orch-->>FE: WS: orchestration:updated
+
+    else 评估失败 + 可重试 (retry)
+        Evaluator-->>Orch: EvaluationResult{recommendedAction="retry"}
+        alt attemptCount < maxAttempts
+            Orch->>DB: ReadyOrchestrationNode(nodeID)
+            Orch->>DB: CreateOrchestrationNodeTask<br/>(with priorEvidenceSummary)
+            Orch->>DB: CreateOrchestrationEvent(node.retry_scheduled)
+            Orch-->>Daemon: WS: daemon:task_available
+        else attemptCount >= maxAttempts
+            Orch->>DB: FailOrchestrationNode
+            Orch->>DB: UpdatePlanStatus(failed)
+            Orch->>Orch: createAttentionCommentIfNeeded
+            Orch-->>FE: WS: orchestration:updated
+        end
+    end
+</div>
+
+<!-- ==================== 4. Node 状态机 ==================== -->
+<h2 id="node-state">4. Node 状态机</h2>
+<p class="desc">每个 OrchestrationNode 的完整状态流转。蓝色为自动转换，红色为异常路径，黄色为人工干预路径。</p>
+
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> pending : 创建 (execute/verify node)
+    [*] --> ready : 创建 (plan node)<br/>或 retry 后重置
+
+    pending --> ready : 上游 Node completed
+    ready --> dispatched : dispatchNodeTask()
+    dispatched --> running : OnTaskStarted()
+    running --> evaluating : OnTaskCompleted()
+
+    evaluating --> completed : 评估 pass=true
+    evaluating --> waiting_human : 评估 ask_human
+    evaluating --> ready : 评估 fail + attempt < max<br/>(auto retry)
+    evaluating --> failed : 评估 fail + attempt ≥ max
+
+    running --> failed : OnTaskFailed()<br/>attempt ≥ max
+    running --> ready : OnTaskFailed()<br/>attempt < max (auto retry)
+
+    waiting_human --> completed : ApproveNode()
+    waiting_human --> dispatched : RequestNodeChanges()
+
+    failed --> dispatched : RetryNode()<br/>(手动重试)
+
+    pending --> cancelled : CancelPlan()
+    ready --> cancelled : CancelPlan()
+    dispatched --> cancelled : CancelPlan()
+    running --> cancelled : CancelPlan()
+    evaluating --> cancelled : CancelPlan()
+    waiting_human --> cancelled : CancelPlan()
+
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+
+    note right of evaluating : 核心决策点<br/>HardCheckEvaluator
+    note right of waiting_human : 人工审批<br/>risks/tests_failed/blocked
+    note right of failed : 重试耗尽<br/>或手动标记
+</div>
+
+<div class="legend">
+  <div class="legend-item"><code>pending → ready</code> — 上游依赖完成时自动推进</div>
+  <div class="legend-item"><code>evaluating</code> — 硬校验决策点，决定 pass/retry/ask_human</div>
+  <div class="legend-item"><code>waiting_human</code> — 自动创建 Attention Comment + 订阅通知</div>
+  <div class="legend-item"><code>failed</code> — 可手动 RetryNode() 恢复</div>
+</div>
+
+<!-- ==================== 5. HardCheckEvaluator ==================== -->
+<h2 id="evaluator">5. HardCheckEvaluator 评估逻辑</h2>
+<p class="desc">OnTaskCompleted 收到 Agent 的结构化结果后，HardCheckEvaluator 执行硬校验决策树。按优先级依次检查：结构校验 → 状态 → 风险 → 测试 → 证据 → Node 类型特定检查。</p>
+
+<div class="mermaid">
+graph TD
+    Start["HardCheckEvaluator.Evaluate()"]
+    V{"ResultValidation<br/>结构校验通过?"}
+
+    Start --> V
+
+    V -->|"No"| INV["❌ evidence_insufficient<br/>recommendedAction=retry"]
+
+    V -->|"Yes"| S{"result.status?"}
+
+    S -->|"failed"| FAIL["❌ failed<br/>agent_reported_failed<br/>retry"]
+    S -->|"blocked"| BLOCK["⚠️ waiting_human<br/>agent_reported_blocked<br/>ask_human"]
+    S -->|"needs_human"| NEEDS["⚠️ waiting_human<br/>agent_needs_human<br/>ask_human"]
+
+    S -->|"completed"| SUM{"summary 非空?"}
+    SUM -->|"No"| FAIL2["❌ missing_summary<br/>retry"]
+
+    SUM -->|"Yes"| RISK{"有 risks?"}
+    RISK -->|"Yes"| RISKH["⚠️ risk_requires_approval<br/>ask_human"]
+
+    RISK -->|"No"| TEST{"测试失败?"}
+    TEST -->|"Yes"| FAIL3["❌ test_result_failed<br/>retry"]
+
+    TEST -->|"No"| CRIT{"验收标准证据<br/>满足?"}
+    CRIT -->|"No"| FAIL4["❌ missing_criteria_evidence<br/>retry"]
+
+    CRIT -->|"Yes"| TYPE{"Node 类型?"}
+
+    TYPE -->|"execute"| EX{"有 changedFiles<br/>或 diff/file artifact?"}
+    EX -->|"No"| FAIL5["❌ missing_implementation_artifact<br/>retry"]
+    EX -->|"Yes"| PASS
+
+    TYPE -->|"verify"| VF{"有 testResult<br/>或 test_result artifact?"}
+    VF -->|"No"| FAIL6["❌ missing_test_result<br/>retry"]
+    VF -->|"Yes"| PASS
+
+    TYPE -->|"plan"| PL{"有 decision artifact<br/>或 criteriaEvidence?"}
+    PL -->|"No"| FAIL7["❌ missing_design_evidence<br/>retry"]
+    PL -->|"Yes"| PASS
+
+    PASS["✅ hard_check_passed<br/>recommendedAction=complete<br/>confidence 分数记录"]
+
+    style PASS fill:#059669,stroke:#34d399,color:#fff
+    style INV fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL2 fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL3 fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL4 fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL5 fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL6 fill:#b91c1c,stroke:#f87171,color:#fff
+    style FAIL7 fill:#b91c1c,stroke:#f87171,color:#fff
+    style RISKH fill:#d97706,stroke:#fbbf24,color:#fff
+    style BLOCK fill:#d97706,stroke:#fbbf24,color:#fff
+    style NEEDS fill:#d97706,stroke:#fbbf24,color:#fff
+</div>
+
+<h3>Agent 结构化结果格式 (AgentStructuredResult)</h3>
+<table>
+  <tr><th>字段</th><th>说明</th><th>校验规则</th></tr>
+  <tr><td><code>schema_version</code></td><td>Schema 版本，必须为 1</td><td>required</td></tr>
+  <tr><td><code>status</code></td><td>completed / failed / blocked / needs_human</td><td>required</td></tr>
+  <tr><td><code>summary</code></td><td>执行摘要</td><td>completed 时 required</td></tr>
+  <tr><td><code>changed_files</code></td><td>变更文件列表</td><td>execute Node 需要</td></tr>
+  <tr><td><code>artifacts</code></td><td>diff / file / test_result / decision / ...</td><td>类型白名单</td></tr>
+  <tr><td><code>test_result</code></td><td>测试结果 JSON</td><td>verify Node 需要</td></tr>
+  <tr><td><code>criteria_evidence</code></td><td>验收标准证据</td><td>需与 acceptance_criteria 对齐</td></tr>
+  <tr><td><code>risks</code></td><td>风险列表</td><td>有风险 → ask_human</td></tr>
+  <tr><td><code>confidence</code></td><td>置信度 0.0-1.0</td><td>范围校验</td></tr>
+  <tr><td><code>next_actions</code></td><td>后续行动建议</td><td>needs_human 时需要</td></tr>
+</table>
+
+<!-- ==================== 6. 人工决策 ==================== -->
+<h2 id="human">6. 人工决策：Approve / RequestChanges / Retry</h2>
+<p class="desc">当 Node 进入 <code>waiting_human</code> 或 <code>failed</code> 状态时，拥有权限的用户可以执行三种操作。权限控制：owner/admin 始终可操作，普通 member 仅当自己是 issue 创建者或当前 assignee 时可操作。</p>
+
+<div class="mermaid">
+graph LR
+    subgraph "waiting_human 状态"
+        WH["Node: waiting_human"]
+        A["Approve<br/>POST /api/orchestration/nodes/{id}/approve"]
+        RC["RequestChanges<br/>POST /api/orchestration/nodes/{id}/request-changes<br/>body: {change_request}"]
+    end
+
+    subgraph "failed 状态"
+        F["Node: failed"]
+        R["Retry<br/>POST /api/orchestration/nodes/{id}/retry"]
+    end
+
+    subgraph "权限"
+        P1["owner / admin: 始终允许"]
+        P2["member: 仅当 creator 或 assignee"]
+    end
+
+    A -->|"CompleteOrchestrationNode"| DONE["Node → completed"]
+    A -->|"dispatchReadyNodes()"| NEXT["调度下游 Node"]
+    RC -->|"ReadyOrchestrationNode"| READY["Node → ready"]
+    RC -->|"dispatchNodeTask()<br/>with changeRequest"| DISPATCH["创建新 Task<br/>携带修改要求"]
+    R -->|"ReadyOrchestrationNode"| READY2["Node → ready"]
+    R -->|"dispatchNodeTask()"| DISPATCH2["创建新 Task"]
+
+    P1 & P2 -.-> A & RC & R
+
+    style WH fill:#d97706,stroke:#fbbf24,color:#fff
+    style F fill:#b91c1c,stroke:#f87171,color:#fff
+    style DONE fill:#059669,stroke:#34d399,color:#fff
+</div>
+
+<!-- ==================== 7. 自动重试 ==================== -->
+<h2 id="retry">7. 自动重试与失败恢复</h2>
+<p class="desc">每个 Node 有 <code>max_attempts</code>（默认 2）。失败时若未耗尽重试次数，Orchestrator 自动重新调度，并携带 <code>priorEvidenceSummary</code> 和 <code>changeRequest</code> 帮助 Agent 避免重复错误。重试耗尽后自动创建 Attention Comment 通知用户。</p>
+
+<div class="mermaid">
+graph TB
+    subgraph "失败触发源"
+        F1["OnTaskCompleted()<br/>评估失败"]
+        F2["OnTaskFailed()<br/>运行时崩溃"]
+        F3["RecoverOrphanedTasks()<br/>Daemon 重启后恢复"]
+    end
+
+    CHECK{"attemptCount<br/>&lt; maxAttempts?"}
+
+    subgraph "自动重试路径"
+        READY["ReadyOrchestrationNode()"]
+        DISPATCH["dispatchNodeTask()"]
+        EVIDENCE["注入 priorEvidenceSummary<br/>+ changeRequest"]
+    end
+
+    subgraph "重试耗尽路径"
+        FAIL["FailOrchestrationNode()"]
+        PLAN_FAIL["UpdatePlanStatus(failed)"]
+        COMMENT["createAttentionCommentIfNeeded()<br/>→ 在 Issue 创建系统评论"]
+        SUB["ensureAttentionAudience()<br/>→ 自动订阅 creator + assignee"]
+    end
+
+    F1 & F2 & F3 --> CHECK
+    CHECK -->|"Yes"| READY --> DISPATCH --> EVIDENCE
+    CHECK -->|"No"| FAIL --> PLAN_FAIL
+    PLAN_FAIL --> COMMENT --> SUB
+
+    style CHECK fill:#d97706,stroke:#fbbf24,color:#fff
+    style EVIDENCE fill:#4f46e5,stroke:#818cf8,color:#fff
+    style COMMENT fill:#b91c1c,stroke:#f87171,color:#fff
+</div>
+
+<div class="legend">
+  <div class="legend-item"><code>priorEvidenceSummary</code> — 拼接 Agent 上次的 summary + Kernel 评估 reason + validation errors</div>
+  <div class="legend-item"><code>changeRequest</code> — 评估失败原因的自然语言描述，告诉 Agent 需要修正什么</div>
+  <div class="legend-item"><code>Attention Comment</code> — 自动在 Issue 创建评论，包含推荐操作 (Approve/Retry) + Agent 摘要 + 详情</div>
+</div>
+
+<!-- ==================== 8. 可观测性 ==================== -->
+<h2 id="observability">8. 可观测性：NodeSummary 语义</h2>
+<p class="desc">前端通过 <code>GET /api/issues/{id}/orchestration</code> 获取完整编排状态。后端为每个 Node 计算 <code>NodeSummary</code>，从 Event 审计轨迹推导出语义化的 reason_code + recommended_action，驱动前端 Decision Panel 的展示。</p>
+
+<div class="mermaid">
+graph LR
+    subgraph "Event 审计轨迹"
+        E1["evaluation.passed"]
+        E2["evaluation.failed"]
+        E3["evaluation.invalid_result"]
+        E4["evaluation.waiting_human"]
+        E5["node.retry_scheduled"]
+        E6["node.waiting_human"]
+        E7["task.failed"]
+    end
+
+    subgraph "BuildNodeSummaryFromRecords()"
+        PARSE["遍历 events<br/>提取最新 EvaluationResult<br/>+ agent summary + failure reason"]
+        BUILD["deriveObservabilitySemantics()<br/>根据 (nodeStatus, evaluation)<br/>推导语义"]
+    end
+
+    subgraph "NodeSummary 输出"
+        S1["reason_code<br/>waiting_for_approval<br/>runtime_failed<br/>retry_exhausted<br/>evidence_insufficient"]
+        S2["recommended_action<br/>approve / retry /<br/>provide_input / none"]
+        S3["action_enabled<br/>控制按钮是否可点击"]
+    end
+
+    E1 & E2 & E3 & E4 & E5 & E6 & E7 --> PARSE --> BUILD
+    BUILD --> S1 & S2 & S3
+
+    style BUILD fill:#7c3aed,stroke:#a78bfa,color:#fff
+</div>
+
+<h3>reason_code → 推荐操作 映射表</h3>
+<table>
+  <tr><th>reason_code</th><th>Node 状态</th><th>推荐操作</th><th>按钮状态</th></tr>
+  <tr><td><code>pending_dependencies</code></td><td>pending</td><td>none</td><td>不可操作</td></tr>
+  <tr><td><code>ready_to_run</code></td><td>ready</td><td>none</td><td>不可操作</td></tr>
+  <tr><td><code>running</code></td><td>running</td><td>none</td><td>不可操作</td></tr>
+  <tr><td><code>completed</code></td><td>completed</td><td>none</td><td>不可操作</td></tr>
+  <tr><td><code>waiting_for_approval</code></td><td>waiting_human</td><td>approve</td><td>✅ Approve / RequestChanges</td></tr>
+  <tr><td><code>waiting_for_human_input</code></td><td>waiting_human</td><td>provide_input</td><td>✅ Approve / RequestChanges</td></tr>
+  <tr><td><code>runtime_failed</code></td><td>failed</td><td>retry</td><td>✅ Retry</td></tr>
+  <tr><td><code>evidence_insufficient</code></td><td>failed</td><td>retry</td><td>✅ Retry</td></tr>
+  <tr><td><code>retry_exhausted</code></td><td>failed</td><td>retry</td><td>✅ Retry (手动)</td></tr>
+</table>
+
+<!-- ==================== 9. Daemon 侧 ==================== -->
+<h2 id="daemon">9. Daemon 侧：Task Context 与 Prompt</h2>
+<p class="desc">当 Daemon 认领一个 orchestration task 时，task.context 字段包含 JSON 序列化的 <code>OrchestrationTaskContext</code>。Daemon 据此构建专门的 Node Prompt，约束 Agent 只执行当前 Node。</p>
+
+<div class="mermaid">
+graph LR
+    subgraph "Task Context (JSON)"
+        TC["OrchestrationTaskContext<br/>type: 'orchestration_node'<br/>plan_id / node_id / run_id<br/>node_type: plan|execute|verify<br/>objective / node_title<br/>input_contract / output_contract<br/>acceptance_criteria<br/>prior_evidence_summary<br/>change_request"]
+    end
+
+    subgraph "Daemon Prompt 构建"
+        P["buildOrchestrationNodePrompt()"]
+        RULES["执行规则:<br/>1. 只执行当前 Node<br/>2. 不要标记 Issue 完成<br/>3. 不要创建下游任务<br/>4. 没有证据不能声称完成<br/>5. 输出必须是纯 JSON"]
+        SCHEMA["输出 Schema:<br/>{schema_version, status, summary,<br/>changed_files, artifacts,<br/>test_result, risks, confidence,<br/>criteria_evidence}"]
+    end
+
+    subgraph "Agent 执行"
+        AGENT["Coding Agent<br/>(Claude/GPT/...)"]
+        RESULT["AgentStructuredResult JSON"]
+    end
+
+    TC --> P
+    P --> RULES --> SCHEMA
+    TC -->|"注入 Objective + Contracts"| AGENT
+    SCHEMA -->|"约束输出格式"| AGENT
+    AGENT --> RESULT
+
+    style TC fill:#4f46e5,stroke:#818cf8,color:#fff
+    style SCHEMA fill:#059669,stroke:#34d399,color:#fff
+    style RESULT fill:#d97706,stroke:#fbbf24,color:#fff
+</div>
+
+<!-- ==================== 10. 前端 ==================== -->
+<h2 id="frontend">10. 前端：Issue Detail + Execution Log</h2>
+<p class="desc">前端通过 <code>GET /api/issues/{id}/orchestration</code> 获取编排数据，渲染 Decision Panel（node 状态卡片 + 操作按钮）和 Execution Log（task 运行历史）。WS 事件 <code>orchestration:updated</code> 驱动实时刷新。</p>
+
+<div class="mermaid">
+graph TB
+    subgraph "API"
+        API1["GET /api/issues/{id}/orchestration<br/>→ plans + nodes + events + artifacts"]
+        API2["POST /api/orchestration/nodes/{id}/approve"]
+        API3["POST /api/orchestration/nodes/{id}/request-changes"]
+        API4["POST /api/orchestration/nodes/{id}/retry"]
+        API5["POST /api/plans/{planId}/cancel"]
+    end
+
+    subgraph "前端组件"
+        ID["IssueDetail<br/>packages/views/issues/components/"]
+        DP["Decision Panel<br/>Node 状态卡片<br/>Approve / RequestChanges / Retry 按钮"]
+        EL["ExecutionLogSection<br/>Active Tasks (脉冲指示器)<br/>Past Tasks (折叠列表)<br/>Cancel / Transcript / Retry"]
+    end
+
+    subgraph "实时更新"
+        WS["WS: orchestration:updated<br/>→ invalidateQueries<br/>['issues', 'orchestration']"]
+        WS2["WS: task:*<br/>→ invalidate task list"]
+    end
+
+    API1 --> ID
+    ID --> DP & EL
+    DP -->|"用户操作"| API2 & API3 & API4 & API5
+    WS & WS2 -->|"刷新"| ID
+
+    style DP fill:#d97706,stroke:#fbbf24,color:#fff
+    style EL fill:#4f46e5,stroke:#818cf8,color:#fff
+</div>
+
+<!-- ==================== 11. DB Schema ==================== -->
+<h2 id="db">11. 数据库 Schema 关键约束</h2>
+<p class="desc">通过 migration 085 和 086 建立的完整性约束，确保 orchestration 数据一致性。</p>
+
+<table>
+  <tr><th>表</th><th>关键约束</th><th>作用</th></tr>
+  <tr><td><code>orchestration_plan</code></td><td>UNIQUE (source_type, source_id) WHERE status NOT IN ('completed','failed','cancelled')</td><td>同一 Issue 最多一个活跃 Plan</td></tr>
+  <tr><td><code>orchestration_node</code></td><td>FK → plan_id; type IN ('plan','execute','verify')</td><td>Node 类型白名单</td></tr>
+  <tr><td><code>orchestration_edge</code></td><td>FK → plan_id, from_node_id, to_node_id</td><td>DAG 边引用完整性</td></tr>
+  <tr><td><code>orchestration_event</code></td><td>FK → plan_id; 可选 node_id, task_id</td><td>完整审计轨迹</td></tr>
+  <tr><td><code>agent_task_queue</code></td><td>orchestration_plan_id → plan.id; orchestration_node_id → node.id</td><td>Task 与 Node 的关联</td></tr>
+</table>
+
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#4f46e5',
+      primaryTextColor: '#e2e8f0',
+      primaryBorderColor: '#818cf8',
+      lineColor: '#64748b',
+      secondaryColor: '#1e293b',
+      tertiaryColor: '#111827',
+      background: '#0a0e17',
+      mainBkg: '#1e293b',
+      nodeBorder: '#818cf8',
+      clusterBkg: '#111827',
+      clusterBorder: '#334155',
+      titleColor: '#e2e8f0',
+      edgeLabelBackground: '#1e293b',
+      actorTextColor: '#e2e8f0',
+      actorBorder: '#818cf8',
+      actorBkg: '#1e293b',
+      signalColor: '#94a3b8',
+      labelBoxBkgColor: '#1e293b',
+      labelBoxBorderColor: '#334155',
+      labelTextColor: '#e2e8f0',
+      loopTextColor: '#94a3b8',
+      noteBorderColor: '#334155',
+      noteBkgColor: '#1e293b',
+      noteTextColor: '#e2e8f0',
+      activationBorderColor: '#818cf8',
+      activationBkgColor: '#312e81',
+      sequenceNumberColor: '#e2e8f0',
+    },
+    flowchart: { htmlLabels: true, curve: 'basis' },
+    sequence: { actorMargin: 100, mirrorActors: false },
+    stateDiagram: { htmlLabels: true },
+  });
+</script>
+</body>
+</html>
