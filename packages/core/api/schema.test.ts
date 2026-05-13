@@ -119,11 +119,143 @@ describe("ApiClient schema fallback", () => {
   });
 
   describe("getIssueOrchestration", () => {
-    it("falls back to an empty orchestration snapshot when nodes is malformed", async () => {
-      stubFetchJson({ run: null, nodes: "not-an-array", events: [], evidence: [] });
+    it("parses plan-based orchestration snapshots from the issue read API", async () => {
+      stubFetchJson({
+        plans: [
+          {
+            id: "plan-1",
+            workspace_id: "workspace-1",
+            source_type: "issue",
+            source_id: "issue-1",
+            objective: "Implement orchestration kernel model",
+            status: "running",
+            policy: {},
+            metadata: {},
+            created_by_type: "member",
+            created_by_id: "user-1",
+            created_at: "2026-05-12T00:00:00Z",
+            updated_at: "2026-05-12T00:00:00Z",
+          },
+        ],
+        nodes: [
+          {
+            id: "node-1",
+            plan_id: "plan-1",
+            type: "inspect",
+            title: "Inspect issue context",
+            description: null,
+            status: "ready",
+            assignee_agent_id: "agent-1",
+            input_contract: {},
+            output_contract: {},
+            evaluator_policy: {},
+            retry_policy: {},
+            runtime_constraints: {},
+            attempt_count: 0,
+            max_attempts: 2,
+            linked_task_id: "task-1",
+            artifact_count: 3,
+            summary: null,
+            permissions: {
+              can_approve: false,
+              can_request_changes: false,
+              can_retry: false,
+            },
+            approval_history: [],
+            started_at: null,
+            completed_at: null,
+            created_at: "2026-05-12T00:00:00Z",
+            updated_at: "2026-05-12T00:00:00Z",
+          },
+        ],
+        events: [
+          {
+            id: "event-1",
+            plan_id: "plan-1",
+            node_id: null,
+            task_id: null,
+            event_type: "plan.created",
+            actor_type: "kernel",
+            actor_id: null,
+            payload: {},
+            created_at: "2026-05-12T00:00:00Z",
+          },
+        ],
+        artifacts: [],
+      });
       const client = new ApiClient("https://api.example.test");
       const res = await client.getIssueOrchestration("issue-1");
-      expect(res).toEqual({ run: null, nodes: [], events: [], evidence: [] });
+      expect(res.plans).toHaveLength(1);
+      expect(res.plans[0]!.source_id).toBe("issue-1");
+      expect(res.nodes[0]!.type).toBe("inspect");
+      expect(res.nodes[0]!.linked_task_id).toBe("task-1");
+      expect(res.nodes[0]!.artifact_count).toBe(3);
+      expect(res.nodes[0]!.permissions?.can_approve).toBe(false);
+      expect(res.nodes[0]!.approval_history).toEqual([]);
+      expect(res.events[0]!.event_type).toBe("plan.created");
+      expect(res.artifacts).toEqual([]);
+    });
+
+    it("falls back to an empty orchestration snapshot when nodes is malformed", async () => {
+      stubFetchJson({ plans: [], nodes: "not-an-array", events: [], artifacts: [] });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.getIssueOrchestration("issue-1");
+      expect(res).toEqual({ plans: [], nodes: [], events: [], artifacts: [] });
+    });
+
+    it("preserves unknown enum strings and downgrades malformed optional arrays", async () => {
+      stubFetchJson({
+        plans: [
+          {
+            id: "plan-1",
+            workspace_id: "workspace-1",
+            source_type: "issue",
+            source_id: "issue-1",
+            objective: "Handle future backend enum",
+            status: "future_plan_state",
+            policy: {},
+            metadata: {},
+            created_by_type: null,
+            created_by_id: null,
+            created_at: "2026-05-12T00:00:00Z",
+            updated_at: "2026-05-12T00:00:00Z",
+          },
+        ],
+        nodes: [
+          {
+            id: "node-1",
+            plan_id: "plan-1",
+            type: "future_node_type",
+            title: "Future node",
+            description: null,
+            status: "future_node_state",
+            assignee_agent_id: null,
+            input_contract: {},
+            output_contract: {},
+            evaluator_policy: {},
+            retry_policy: {},
+            runtime_constraints: {},
+            attempt_count: 1,
+            max_attempts: 2,
+            linked_task_id: null,
+            artifact_count: 0,
+            summary: null,
+            permissions: null,
+            approval_history: "not-an-array",
+            started_at: null,
+            completed_at: null,
+            created_at: "2026-05-12T00:00:00Z",
+            updated_at: "2026-05-12T00:00:00Z",
+          },
+        ],
+        events: [],
+        artifacts: [],
+      });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.getIssueOrchestration("issue-1");
+      expect(res.plans[0]!.status).toBe("future_plan_state");
+      expect(res.nodes[0]!.status).toBe("future_node_state");
+      expect(res.nodes[0]!.approval_history).toEqual([]);
     });
   });
 });

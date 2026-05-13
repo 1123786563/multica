@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/util"
@@ -38,42 +39,42 @@ func TestParseOrchestrationTaskContext(t *testing.T) {
 	}
 
 	// Valid context
-	ctx, ok := ParseOrchestrationTaskContext([]byte(`{"type":"orchestration_node","orchestration_plan_id":"plan-1","orchestration_node_id":"node-1","node_type":"implement","objective":"fix bug"}`))
+	ctx, ok := ParseOrchestrationTaskContext([]byte(`{"type":"orchestration_node","orchestration_plan_id":"plan-1","orchestration_node_id":"node-1","node_type":"plan","objective":"fix bug"}`))
 	if !ok {
 		t.Fatal("valid context should return true")
 	}
 	if ctx.OrchestrationPlanID != "plan-1" || ctx.OrchestrationNodeID != "node-1" {
 		t.Fatalf("unexpected context: %+v", ctx)
 	}
-	if ctx.NodeType != "implement" || ctx.Objective != "fix bug" {
+	if ctx.NodeType != "plan" || ctx.Objective != "fix bug" {
 		t.Fatalf("unexpected node_type/objective: %+v", ctx)
 	}
 }
 
 func TestBuildPlanNodeSpecs(t *testing.T) {
-	t.Run("simple plan for normal issue", func(t *testing.T) {
+	t.Run("kernel v1 shape for normal issue", func(t *testing.T) {
 		issue := db.Issue{Title: "Fix typo", Priority: "medium"}
 		specs := buildPlanNodeSpecs(issue, []byte(`{"required":["summary"]}`))
-		if len(specs) != 1 {
-			t.Fatalf("expected 1 node, got %d", len(specs))
+		if len(specs) != 3 {
+			t.Fatalf("expected 3 nodes, got %d", len(specs))
 		}
-		if specs[0].Type != "implement" {
-			t.Fatalf("expected implement, got %s", specs[0].Type)
+		if specs[0].Type != "plan" || specs[1].Type != "execute" || specs[2].Type != "verify" {
+			t.Fatalf("expected plan/execute/verify, got %s/%s/%s", specs[0].Type, specs[1].Type, specs[2].Type)
 		}
 	})
 
-	t.Run("medium plan for urgent issue", func(t *testing.T) {
+	t.Run("kernel v1 shape for urgent issue", func(t *testing.T) {
 		issue := db.Issue{Title: "Critical fix", Priority: "urgent"}
 		specs := buildPlanNodeSpecs(issue, []byte(`{"required":["summary"]}`))
 		if len(specs) != 3 {
 			t.Fatalf("expected 3 nodes for urgent, got %d", len(specs))
 		}
-		if specs[0].Type != "inspect" || specs[1].Type != "implement" || specs[2].Type != "test" {
-			t.Fatalf("expected inspect/implement/test, got %s/%s/%s", specs[0].Type, specs[1].Type, specs[2].Type)
+		if specs[0].Type != "plan" || specs[1].Type != "execute" || specs[2].Type != "verify" {
+			t.Fatalf("expected plan/execute/verify, got %s/%s/%s", specs[0].Type, specs[1].Type, specs[2].Type)
 		}
 	})
 
-	t.Run("medium plan for issue with acceptance criteria", func(t *testing.T) {
+	t.Run("kernel v1 shape for issue with acceptance criteria", func(t *testing.T) {
 		issue := db.Issue{
 			Title:              "Feature X",
 			Priority:           "low",
@@ -82,6 +83,9 @@ func TestBuildPlanNodeSpecs(t *testing.T) {
 		specs := buildPlanNodeSpecs(issue, []byte(`{"required":["summary"]}`))
 		if len(specs) != 3 {
 			t.Fatalf("expected 3 nodes for acceptance criteria issue, got %d", len(specs))
+		}
+		if specs[0].Type != "plan" || specs[1].Type != "execute" || specs[2].Type != "verify" {
+			t.Fatalf("expected plan/execute/verify, got %s/%s/%s", specs[0].Type, specs[1].Type, specs[2].Type)
 		}
 	})
 }
@@ -129,6 +133,7 @@ func TestNormalizeArtifacts(t *testing.T) {
 
 func TestEmptyArtifactTypeInvalidInStructuredResult(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"completed",
 		"summary":"done",
 		"artifacts":[{"content":{}}],
@@ -200,7 +205,7 @@ func TestTestResultFailed(t *testing.T) {
 }
 
 func TestParseAgentResultLegacyAndStructured(t *testing.T) {
-	structuredValidation := ParseAgentResultPayload([]byte(`{"status":"completed","summary":"done","changed_files":["a.go"]}`), ResultParseOptions{AllowLegacyCompatibility: true})
+	structuredValidation := ParseAgentResultPayload([]byte(`{"schema_version":1,"status":"completed","summary":"done","changed_files":["a.go"]}`), ResultParseOptions{AllowLegacyCompatibility: true})
 	if !structuredValidation.Valid {
 		t.Fatalf("structured result should be valid: %#v", structuredValidation.Errors)
 	}
@@ -237,5 +242,43 @@ func TestNodeDispatchedEventPayloadIncludesAttemptMetadata(t *testing.T) {
 	}
 	if payload["max_attempts"] != int32(2) {
 		t.Fatalf("missing max_attempts: %#v", payload)
+	}
+}
+
+func TestExpectedResultSchemaForNodeUsesOutputContract(t *testing.T) {
+	node := db.OrchestrationNode{OutputContract: []byte(`{"required":["summary","test_result"]}`)}
+	got := expectedResultSchemaForNode(node)
+	if string(got) != `{"required":["summary","test_result"]}` {
+		t.Fatalf("expected output contract schema, got %s", string(got))
+	}
+
+	node.OutputContract = []byte(`not-json`)
+	got = expectedResultSchemaForNode(node)
+	if string(got) != `{"required":["summary"]}` {
+		t.Fatalf("expected fallback schema for invalid output contract, got %s", string(got))
+	}
+}
+
+func TestBuildRetryEvidenceSummaryIncludesValidationAndKernelContext(t *testing.T) {
+	summary := buildRetryEvidenceSummary(
+		AgentStructuredResult{Summary: "I completed the whole issue."},
+		ResultValidation{
+			Errors: []ValidationError{
+				{Code: "missing_schema_version", Field: "schema_version", Message: "schema_version is required"},
+			},
+		},
+		EvaluationResult{
+			Reason:       "evidence_insufficient",
+			ReasonDetail: "Structured result payload did not satisfy the orchestration result contract.",
+		},
+	)
+	if !strings.Contains(summary, "Previous agent summary: I completed the whole issue.") {
+		t.Fatalf("missing previous summary in %q", summary)
+	}
+	if !strings.Contains(summary, "Kernel reason: evidence_insufficient") {
+		t.Fatalf("missing kernel reason in %q", summary)
+	}
+	if !strings.Contains(summary, "missing_schema_version@schema_version") {
+		t.Fatalf("missing validation error context in %q", summary)
 	}
 }

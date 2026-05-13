@@ -977,6 +977,10 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	if _, ok := ParseOrchestrationTaskContext(task.Context); ok {
 		isOrchestrationTask = true
 		if s.Orchestrator != nil {
+			if task.IssueID.Valid {
+				s.Orchestrator.publishOrchestrationUpdatedFromIssue(ctx, task.IssueID)
+			}
+			s.Orchestrator.createAttentionCommentIfNeeded(ctx, task)
 			for _, queuedTask := range orchestrationQueuedTasks {
 				s.Orchestrator.notifyTaskQueued(ctx, queuedTask)
 			}
@@ -1151,6 +1155,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	var retried *db.AgentTaskQueue
 	if isOrchestrationTask {
 		if s.Orchestrator != nil {
+			s.Orchestrator.createAttentionCommentIfNeeded(ctx, task)
 			for _, queuedTask := range orchestrationQueuedTasks {
 				s.Orchestrator.notifyTaskQueued(ctx, queuedTask)
 				retried = &queuedTask
@@ -1167,7 +1172,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	// the new task will surface its own status to the user, and we don't
 	// want to spam the issue with "task timed out" messages on every
 	// daemon hiccup.
-	if errMsg != "" && task.IssueID.Valid && retried == nil {
+	if errMsg != "" && task.IssueID.Valid && retried == nil && !isOrchestrationTask {
 		s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(errMsg), "system", task.TriggerCommentID)
 	}
 

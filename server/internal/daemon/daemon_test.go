@@ -903,7 +903,7 @@ func TestBuildCompletedTaskResult_ParsesStructuredResultForOrchestrationTask(t *
 	}
 	agentResult := agent.Result{
 		Status:    "completed",
-		Output:    `{"status":"completed","summary":"done","changed_files":["a.go"],"criteria_evidence":[{"criterion":"c","evidence":"e"}]}`,
+		Output:    `{"schema_version":1,"status":"completed","summary":"done","changed_files":["a.go"],"criteria_evidence":[{"criterion":"c","evidence":"e"}]}`,
 		SessionID: "sess-1",
 	}
 
@@ -926,7 +926,7 @@ func TestBuildCompletedTaskResult_DoesNotParseStructuredResultForLegacyTask(t *t
 	}
 	agentResult := agent.Result{
 		Status:    "completed",
-		Output:    `{"status":"completed","summary":"done","changed_files":["a.go"],"criteria_evidence":[{"criterion":"c","evidence":"e"}]}`,
+		Output:    `{"schema_version":1,"status":"completed","summary":"done","changed_files":["a.go"],"criteria_evidence":[{"criterion":"c","evidence":"e"}]}`,
 		SessionID: "sess-1",
 	}
 
@@ -1294,7 +1294,7 @@ func TestReportTaskResult_CompletedForwardsStructuredResult(t *testing.T) {
 	d.reportTaskResult(context.Background(), "task-2", TaskResult{
 		Status:           "completed",
 		Comment:          "completed with structured result",
-		StructuredResult: json.RawMessage(`{"status":"completed","summary":"done","changed_files":["a.go"]}`),
+		StructuredResult: json.RawMessage(`{"schema_version":1,"status":"completed","summary":"done","changed_files":["a.go"]}`),
 	}, slog.Default())
 
 	rec.mu.Lock()

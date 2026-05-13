@@ -136,32 +136,70 @@ export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
 }).loose();
 
-const OrchestrationRunSchema = z.object({
+const OrchestrationPlanSchema = z.object({
   id: z.string(),
   workspace_id: z.string(),
-  issue_id: z.string(),
+  source_type: z.string(),
+  source_id: z.string(),
+  objective: z.string(),
   status: z.string(),
-  source: z.string(),
-  plan_version: z.number(),
+  policy: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
   created_by_type: z.string().nullable(),
   created_by_id: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 }).loose();
 
+const OrchestrationNodeSummarySchema = z.object({
+  status: z.string(),
+  reason_code: z.string(),
+  reason_title: z.string(),
+  reason_detail: z.string(),
+  recommended_action: z.string(),
+  action_enabled: z.boolean(),
+  attempt_count: z.number(),
+  max_attempts: z.number(),
+  latest_evaluation_status: z.string().optional(),
+  latest_agent_summary: z.string().optional(),
+  prior_evidence_summary: z.string().optional(),
+  updated_at: z.string().optional(),
+}).loose();
+
+const OrchestrationNodePermissionsSchema = z.object({
+  can_approve: z.boolean().default(false),
+  can_request_changes: z.boolean().default(false),
+  can_retry: z.boolean().default(false),
+}).loose();
+
+const OrchestrationApprovalHistoryItemSchema = z.object({
+  action: z.string(),
+  actor_type: z.string(),
+  actor_id: z.string().nullable().optional(),
+  created_at: z.string(),
+  change_request: z.string().optional(),
+}).loose();
+
 const OrchestrationNodeSchema = z.object({
   id: z.string(),
-  run_id: z.string(),
-  workspace_id: z.string(),
-  issue_id: z.string(),
-  key: z.string(),
-  kind: z.string(),
+  plan_id: z.string(),
+  type: z.string(),
+  title: z.string(),
+  description: z.string().nullable(),
   status: z.string(),
-  position: z.number(),
-  dependencies: z.array(z.string()).default([]),
-  agent_task_id: z.string().nullable(),
-  attempt: z.number(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
+  assignee_agent_id: z.string().nullable(),
+  input_contract: z.record(z.string(), z.unknown()).default({}),
+  output_contract: z.record(z.string(), z.unknown()).default({}),
+  evaluator_policy: z.record(z.string(), z.unknown()).default({}),
+  retry_policy: z.record(z.string(), z.unknown()).default({}),
+  runtime_constraints: z.record(z.string(), z.unknown()).default({}),
+  attempt_count: z.number(),
+  max_attempts: z.number(),
+  linked_task_id: z.string().nullable().optional(),
+  artifact_count: z.number().default(0),
+  summary: OrchestrationNodeSummarySchema.nullable().optional(),
+  permissions: OrchestrationNodePermissionsSchema.nullable().optional(),
+  approval_history: z.array(OrchestrationApprovalHistoryItemSchema).catch([]).default([]),
   started_at: z.string().nullable(),
   completed_at: z.string().nullable(),
   created_at: z.string(),
@@ -170,39 +208,39 @@ const OrchestrationNodeSchema = z.object({
 
 const OrchestrationEventSchema = z.object({
   id: z.string(),
-  run_id: z.string(),
+  plan_id: z.string(),
   node_id: z.string().nullable(),
-  workspace_id: z.string(),
-  issue_id: z.string(),
-  type: z.string(),
-  message: z.string().nullable(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
+  task_id: z.string().nullable(),
+  event_type: z.string(),
+  actor_type: z.string(),
+  actor_id: z.string().nullable(),
+  payload: z.record(z.string(), z.unknown()).default({}),
   created_at: z.string(),
 }).loose();
 
-const OrchestrationEvidenceSchema = z.object({
+const OrchestrationArtifactSchema = z.object({
   id: z.string(),
-  run_id: z.string(),
-  node_id: z.string(),
-  workspace_id: z.string(),
-  issue_id: z.string(),
-  agent_task_id: z.string().nullable(),
-  kind: z.string(),
-  summary: z.string().nullable(),
-  data: z.record(z.string(), z.unknown()).default({}),
+  plan_id: z.string(),
+  node_id: z.string().nullable(),
+  task_id: z.string().nullable(),
+  type: z.string(),
+  uri: z.string().nullable(),
+  content: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  content_hash: z.string().nullable(),
   created_at: z.string(),
 }).loose();
 
 export const IssueOrchestrationSchema = z.object({
-  run: OrchestrationRunSchema.nullable().default(null),
+  plans: z.array(OrchestrationPlanSchema).default([]),
   nodes: z.array(OrchestrationNodeSchema).default([]),
   events: z.array(OrchestrationEventSchema).default([]),
-  evidence: z.array(OrchestrationEvidenceSchema).default([]),
+  artifacts: z.array(OrchestrationArtifactSchema).default([]),
 }).loose();
 
 export const EMPTY_ISSUE_ORCHESTRATION: IssueOrchestration = {
-  run: null,
+  plans: [],
   nodes: [],
   events: [],
-  evidence: [],
+  artifacts: [],
 };

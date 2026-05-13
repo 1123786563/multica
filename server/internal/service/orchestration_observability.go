@@ -19,6 +19,7 @@ type NodeSummary struct {
 	MaxAttempts            int32  `json:"max_attempts"`
 	LatestEvaluationStatus string `json:"latest_evaluation_status,omitempty"`
 	LatestAgentSummary     string `json:"latest_agent_summary,omitempty"`
+	PriorEvidenceSummary   string `json:"prior_evidence_summary,omitempty"`
 	UpdatedAt              string `json:"updated_at,omitempty"`
 }
 
@@ -37,16 +38,17 @@ type NodeObservabilityInput struct {
 }
 
 type orchestrationEventPayload struct {
-	Reason            string `json:"reason"`
-	Summary           string `json:"summary"`
-	RecommendedAction string `json:"recommended_action"`
-	FailureReason     string `json:"failure_reason"`
+	Reason               string `json:"reason"`
+	Summary              string `json:"summary"`
+	RecommendedAction    string `json:"recommended_action"`
+	FailureReason        string `json:"failure_reason"`
+	PriorEvidenceSummary string `json:"prior_evidence_summary"`
 }
 
 func BuildNodeSummary(input NodeObservabilityInput) NodeSummary {
 	reasonCode, reasonTitle, reasonDetail, recommendedAction, latestEvaluationStatus := deriveObservabilitySemantics(input)
 
-	if input.RetryScheduled {
+	if input.RetryScheduled && input.NodeStatus != "failed" && input.NodeStatus != "waiting_human" && input.NodeStatus != "completed" {
 		reasonCode = "retry_scheduled"
 		reasonTitle = "Retry scheduled"
 		reasonDetail = "Kernel scheduled another attempt for this node after the previous run failed."
@@ -80,6 +82,7 @@ func BuildNodeSummary(input NodeObservabilityInput) NodeSummary {
 		MaxAttempts:            input.MaxAttempts,
 		LatestEvaluationStatus: latestEvaluationStatus,
 		LatestAgentSummary:     strings.TrimSpace(input.LatestAgentSummary),
+		PriorEvidenceSummary:   strings.TrimSpace(input.LegacyReason),
 	}
 	if !input.NodeUpdatedAt.IsZero() {
 		summary.UpdatedAt = input.NodeUpdatedAt.UTC().Format(time.RFC3339)
@@ -132,8 +135,8 @@ func BuildNodeSummaryFromRecords(node db.OrchestrationNode, events []db.Orchestr
 		case "evaluation.invalid_result":
 			input.Evaluation = &EvaluationResult{
 				Pass:              false,
-				Status:            "invalid_result",
-				Reason:            payload.Reason,
+				Status:            "evidence_insufficient",
+				Reason:            firstNonEmpty(payload.Reason, "evidence_insufficient"),
 				RecommendedAction: payload.RecommendedAction,
 			}
 		case "evaluation.waiting_human":
@@ -153,6 +156,9 @@ func BuildNodeSummaryFromRecords(node db.OrchestrationNode, events []db.Orchestr
 			input.RetryScheduled = true
 			if strings.TrimSpace(payload.Reason) != "" {
 				input.LatestFailureReason = payload.Reason
+			}
+			if strings.TrimSpace(payload.PriorEvidenceSummary) != "" {
+				input.LegacyReason = payload.PriorEvidenceSummary
 			}
 		case "node.waiting_human":
 			if input.Evaluation == nil {
@@ -220,8 +226,8 @@ func deriveObservabilitySemantics(input NodeObservabilityInput) (string, string,
 func mapFailureReason(input NodeObservabilityInput) string {
 	if input.Evaluation != nil {
 		switch input.Evaluation.Reason {
-		case "invalid_result":
-			return "invalid_result"
+		case "invalid_result", "evidence_insufficient":
+			return "evidence_insufficient"
 		case "missing_summary", "test_result_failed", "missing_criteria_evidence", "missing_implementation_artifact", "missing_test_result", "missing_review_result", "missing_design_evidence":
 			return "evidence_insufficient"
 		}

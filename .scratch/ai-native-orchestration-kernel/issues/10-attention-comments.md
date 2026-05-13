@@ -1,6 +1,6 @@
 # Attention comments notify issue-relevant humans only
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: Medium
 
@@ -12,12 +12,12 @@ The audience should stay scoped to Issue-relevant humans: creator, human assigne
 
 ## Acceptance criteria
 
-- [ ] `waiting_for_approval`, retry exhaustion, and run failure create an Attention Comment or equivalent Issue-visible activity.
-- [ ] Successful verification does not create a success comment by default.
-- [ ] Notifications target Issue creator, human assignee, and subscribers, with deduplication.
-- [ ] Agent assignees are not mentioned or notified as if they were approval owners.
-- [ ] The comment content includes the reason, recommended action, and a concise evidence summary.
-- [ ] Tests cover each attention state, success no-comment behavior, audience selection, deduplication, and no agent mention loop.
+- [x] `waiting_for_approval`, retry exhaustion, and run failure create an Attention Comment or equivalent Issue-visible activity.
+- [x] Successful verification does not create a success comment by default.
+- [x] Notifications target Issue creator, human assignee, and subscribers, with deduplication.
+- [x] Agent assignees are not mentioned or notified as if they were approval owners.
+- [x] The comment content includes the reason, recommended action, and a concise evidence summary.
+- [x] Tests cover each attention state, success no-comment behavior, audience selection, deduplication, and no agent mention loop.
 
 ## Agent / human ownership
 

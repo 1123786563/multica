@@ -68,7 +68,6 @@ type Handler struct {
 	Bus                   *events.Bus
 	TaskService           *service.TaskService
 	AutopilotService      *service.AutopilotService
-	OrchestrationService  *service.OrchestrationService
 	EmailService          *service.EmailService
 	UpdateStore           UpdateStore
 	ModelListStore        ModelListStore
@@ -112,7 +111,6 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		Bus:                   bus,
 		TaskService:           taskSvc,
 		AutopilotService:      service.NewAutopilotService(queries, txStarter, bus, taskSvc),
-		OrchestrationService:  service.NewOrchestrationService(txStarter),
 		EmailService:          emailService,
 		UpdateStore:           NewInMemoryUpdateStore(),
 		ModelListStore:        NewInMemoryModelListStore(),
@@ -591,13 +589,4 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 		return db.InboxItem{}, false
 	}
 	return item, true
-}
-
-func (h *Handler) maybeStartIssueOrchestration(r *http.Request, issue db.Issue, actorType, actorID string) {
-	if h.OrchestrationService == nil {
-		return
-	}
-	if _, err := h.OrchestrationService.EnsureActiveRunForIssue(r.Context(), issue, actorType, actorID); err != nil {
-		slog.Warn("maybeStartIssueOrchestration failed", "issue_id", issue.ID, "error", err)
-	}
 }

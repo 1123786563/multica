@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_agent_task_unique_orchestration_dispatch;
+DROP INDEX IF EXISTS idx_orchestration_plan_unique_active_source;

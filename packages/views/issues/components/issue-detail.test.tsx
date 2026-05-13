@@ -566,6 +566,17 @@ describe("IssueDetail (shared)", () => {
           output_contract: {},
           attempt_count: 1,
           max_attempts: 2,
+          summary: {
+            status: "evaluating",
+            reason_code: "evidence_insufficient",
+            reason_title: "Evidence insufficient",
+            reason_detail: "Structured result payload did not satisfy the orchestration result contract.",
+            recommended_action: "retry",
+            action_enabled: true,
+            attempt_count: 1,
+            max_attempts: 2,
+            latest_evaluation_status: "evidence_insufficient",
+          },
           position_x: null,
           position_y: null,
           created_at: "2026-05-11T00:00:00Z",
@@ -581,7 +592,7 @@ describe("IssueDetail (shared)", () => {
           event_type: "evaluation.invalid_result",
           actor_type: "kernel",
           actor_id: null,
-          payload: { reason: "missing_summary" },
+          payload: { reason: "evidence_insufficient" },
           created_at: "2026-05-11T00:00:00Z",
         },
       ],
@@ -594,7 +605,7 @@ describe("IssueDetail (shared)", () => {
       expect(screen.getByText("Orchestration")).toBeInTheDocument();
     });
 
-    expect(screen.getAllByText("missing_summary").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Evidence insufficient").length).toBeGreaterThan(0);
     expect(screen.getByText("Current status")).toBeInTheDocument();
     expect(screen.getByText("Why this state")).toBeInTheDocument();
   });
@@ -642,8 +653,23 @@ describe("IssueDetail (shared)", () => {
             max_attempts: 2,
             latest_evaluation_status: "waiting_human",
             latest_agent_summary: "Implementation is ready; waiting for sign-off.",
+            prior_evidence_summary: "Previous attempt lacked criteria evidence.",
             updated_at: "2026-05-11T00:03:00Z",
           },
+          permissions: {
+            can_approve: true,
+            can_request_changes: true,
+            can_retry: false,
+          },
+          approval_history: [
+            {
+              action: "request_changes",
+              actor_type: "member",
+              actor_id: "user-1",
+              created_at: "2026-05-11T00:02:30Z",
+              change_request: "Add rollback notes before approval.",
+            },
+          ],
           position_x: null,
           position_y: null,
           created_at: "2026-05-11T00:01:00Z",
@@ -663,6 +689,149 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("Recommended action")).toBeInTheDocument();
     expect(screen.getAllByText("Approve").length).toBeGreaterThan(0);
     expect(screen.getByText("Implementation is ready; waiting for sign-off.")).toBeInTheDocument();
+    expect(screen.getByText("Prior evidence summary")).toBeInTheDocument();
+    expect(screen.getByText("Previous attempt lacked criteria evidence.")).toBeInTheDocument();
+    expect(screen.getByText("Add rollback notes before approval.")).toBeInTheDocument();
+  });
+
+  it("shows approval controls only when permissions and recommended action allow them", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          workspace_id: "ws-1",
+          source_type: "issue",
+          source_id: "issue-1",
+          objective: "Implement authentication",
+          status: "waiting_human",
+          policy: {},
+          metadata: {},
+          created_by_type: "member",
+          created_by_id: "user-1",
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      nodes: [
+        {
+          id: "node-1",
+          plan_id: "plan-1",
+          type: "implement",
+          title: "Implement JWT auth",
+          description: null,
+          status: "waiting_human",
+          assignee_agent_id: "agent-1",
+          input_contract: {},
+          output_contract: {},
+          evaluator_policy: {},
+          retry_policy: {},
+          runtime_constraints: {},
+          attempt_count: 1,
+          max_attempts: 2,
+          linked_task_id: "task-1",
+          artifact_count: 1,
+          summary: {
+            status: "waiting_human",
+            reason_code: "waiting_for_approval",
+            reason_title: "Approval required",
+            reason_detail: "Kernel evaluation requires human approval before marking this node complete.",
+            recommended_action: "approve",
+            action_enabled: true,
+            attempt_count: 1,
+            max_attempts: 2,
+          },
+          permissions: {
+            can_approve: true,
+            can_request_changes: false,
+            can_retry: false,
+          },
+          approval_history: [],
+          started_at: null,
+          completed_at: null,
+          created_at: "2026-05-11T00:01:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      events: [],
+      artifacts: [],
+    });
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Approve").length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText("Request changes")).not.toBeInTheDocument();
+  });
+
+  it("shows request-changes control when the server grants that permission", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          workspace_id: "ws-1",
+          source_type: "issue",
+          source_id: "issue-1",
+          objective: "Implement authentication",
+          status: "waiting_human",
+          policy: {},
+          metadata: {},
+          created_by_type: "member",
+          created_by_id: "user-1",
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      nodes: [
+        {
+          id: "node-1",
+          plan_id: "plan-1",
+          type: "implement",
+          title: "Implement JWT auth",
+          description: null,
+          status: "waiting_human",
+          assignee_agent_id: "agent-1",
+          input_contract: {},
+          output_contract: {},
+          evaluator_policy: {},
+          retry_policy: {},
+          runtime_constraints: {},
+          attempt_count: 1,
+          max_attempts: 2,
+          linked_task_id: "task-1",
+          artifact_count: 1,
+          summary: {
+            status: "waiting_human",
+            reason_code: "waiting_for_approval",
+            reason_title: "Approval required",
+            reason_detail: "Kernel evaluation requires human approval before marking this node complete.",
+            recommended_action: "approve",
+            action_enabled: true,
+            attempt_count: 1,
+            max_attempts: 2,
+          },
+          permissions: {
+            can_approve: false,
+            can_request_changes: true,
+            can_retry: false,
+          },
+          approval_history: [],
+          started_at: null,
+          completed_at: null,
+          created_at: "2026-05-11T00:01:00Z",
+          updated_at: "2026-05-11T00:03:00Z",
+        },
+      ],
+      events: [],
+      artifacts: [],
+    });
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getByText("Request changes")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
   });
 
   it("renders orchestration process details for nodes, events, and artifacts", async () => {
@@ -697,6 +866,8 @@ describe("IssueDetail (shared)", () => {
           output_contract: {},
           attempt_count: 1,
           max_attempts: 2,
+          linked_task_id: "task-1",
+          artifact_count: 0,
           position_x: null,
           position_y: null,
           created_at: "2026-05-11T00:00:00Z",
@@ -715,6 +886,21 @@ describe("IssueDetail (shared)", () => {
           output_contract: {},
           attempt_count: 2,
           max_attempts: 2,
+          linked_task_id: "task-2",
+          artifact_count: 1,
+          summary: {
+            status: "waiting_human",
+            reason_code: "waiting_for_approval",
+            reason_title: "Approval required",
+            reason_detail: "Kernel evaluation requires human approval before marking this node complete.",
+            recommended_action: "approve",
+            action_enabled: true,
+            attempt_count: 2,
+            max_attempts: 2,
+            latest_evaluation_status: "waiting_human",
+            latest_agent_summary: "Waiting for sign-off.",
+            prior_evidence_summary: "Previous attempt lacked criteria evidence.",
+          },
           position_x: null,
           position_y: null,
           created_at: "2026-05-11T00:01:00Z",
@@ -773,9 +959,11 @@ describe("IssueDetail (shared)", () => {
 
     expect(screen.getByText("Inspect current auth flow")).toBeInTheDocument();
     expect(screen.getAllByText("Implement JWT auth")).toHaveLength(2);
+    expect(screen.getByText("task-2")).toBeInTheDocument();
+    expect(screen.getByText("1 evidence")).toBeInTheDocument();
     expect(screen.getByText("Events")).toBeInTheDocument();
     expect(screen.getByText("node.dispatched")).toBeInTheDocument();
-    expect(screen.getAllByText("evaluation.waiting_human")).toHaveLength(2);
+    expect(screen.getByText("evaluation.waiting_human")).toBeInTheDocument();
     expect(screen.getAllByText("Artifacts")).toHaveLength(2);
     expect(screen.getByText("changed_files")).toBeInTheDocument();
   });

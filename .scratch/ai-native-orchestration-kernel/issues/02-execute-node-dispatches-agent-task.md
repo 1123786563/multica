@@ -1,6 +1,6 @@
 # Execute node dispatches through existing Agent Task lifecycle
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: High
 
@@ -12,12 +12,12 @@ This slice should also record the selected Agent's currently bound skill context
 
 ## Acceptance criteria
 
-- [ ] A ready `execute` node creates exactly one linked Agent Task through the existing task queue.
-- [ ] The linked node records the Agent Task id, node attempt, and dispatch event in one consistent state transition.
-- [ ] Re-running advancement or recovery for the same node attempt reuses the existing linked task instead of creating a duplicate.
-- [ ] Daemon claim responses for orchestration-created tasks include Orchestration Context such as run id, node id, node type, attempt, expected result schema, prior evidence summary, and change request when present.
-- [ ] Agent-bound skill context is visible to the task path using the existing Agent skill model; no global skill planner is introduced.
-- [ ] Tests cover dispatch idempotency, enabled-vs-disabled workspace behavior, task claim compatibility, and agent-bound skill context preservation.
+- [x] A ready `execute` node creates exactly one linked Agent Task through the existing task queue.
+- [x] The linked node records the Agent Task id, node attempt, and dispatch event in one consistent state transition.
+- [x] Re-running advancement or recovery for the same node attempt reuses the existing linked task instead of creating a duplicate.
+- [x] Daemon claim responses for orchestration-created tasks include Orchestration Context such as run id, node id, node type, attempt, expected result schema, prior evidence summary, and change request when present.
+- [x] Agent-bound skill context is visible to the task path using the existing Agent skill model; no global skill planner is introduced.
+- [x] Tests cover dispatch idempotency, orchestration-by-default ingress behavior, task claim compatibility, and agent-bound skill context preservation.
 
 ## Agent / human ownership
 

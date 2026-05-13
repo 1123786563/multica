@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -48,16 +49,27 @@ func TestBuildNodeSummaryWaitingHumanApproval(t *testing.T) {
 
 func TestBuildNodeSummaryRetryExhausted(t *testing.T) {
 	summary := BuildNodeSummary(NodeObservabilityInput{
-		NodeStatus:          "failed",
-		AttemptCount:        2,
-		MaxAttempts:         2,
-		LatestFailureReason: "daemon disconnected",
+		NodeStatus:   "failed",
+		AttemptCount: 2,
+		MaxAttempts:  2,
+		Evaluation: &EvaluationResult{
+			Status:            "evidence_insufficient",
+			Reason:            "evidence_insufficient",
+			ReasonDetail:      "Structured result payload did not satisfy the orchestration result contract.",
+			RecommendedAction: "retry",
+		},
 	})
 	if summary.ReasonCode != "retry_exhausted" {
 		t.Fatalf("expected retry_exhausted, got %q", summary.ReasonCode)
 	}
 	if summary.RecommendedAction != "retry" {
 		t.Fatalf("expected retry action, got %q", summary.RecommendedAction)
+	}
+	if summary.LatestEvaluationStatus != "evidence_insufficient" {
+		t.Fatalf("expected evidence_insufficient evaluation status, got %q", summary.LatestEvaluationStatus)
+	}
+	if summary.ReasonDetail == "" || !strings.Contains(summary.ReasonDetail, "Structured result payload did not satisfy the orchestration result contract.") {
+		t.Fatalf("expected retry exhausted detail to preserve evidence failure detail, got %q", summary.ReasonDetail)
 	}
 }
 
@@ -105,7 +117,7 @@ func TestBuildNodeSummaryFromRecordsUsesLatestEvents(t *testing.T) {
 		{
 			NodeID:    nodeID,
 			EventType: "node.retry_scheduled",
-			Payload:   []byte(`{"reason":"timeout"}`),
+			Payload:   []byte(`{"reason":"timeout","prior_evidence_summary":"Previous agent summary: attempt failed"}`),
 			CreatedAt: pgtype.Timestamptz{Time: time.Date(2026, 5, 11, 10, 3, 0, 0, time.UTC), Valid: true},
 		},
 	}
@@ -119,5 +131,33 @@ func TestBuildNodeSummaryFromRecordsUsesLatestEvents(t *testing.T) {
 	}
 	if summary.UpdatedAt != "2026-05-11T10:03:00Z" {
 		t.Fatalf("expected updated_at from latest event, got %q", summary.UpdatedAt)
+	}
+	if summary.PriorEvidenceSummary != "Previous agent summary: attempt failed" {
+		t.Fatalf("expected prior evidence summary to round-trip, got %q", summary.PriorEvidenceSummary)
+	}
+}
+
+func TestBuildNodeSummaryFromRecordsTreatsInvalidResultAsEvidenceInsufficient(t *testing.T) {
+	nodeID := pgtype.UUID{Bytes: [16]byte{2}, Valid: true}
+	node := db.OrchestrationNode{
+		ID:           nodeID,
+		Status:       "failed",
+		AttemptCount: 2,
+		MaxAttempts:  2,
+	}
+	events := []db.OrchestrationEvent{
+		{
+			NodeID:    nodeID,
+			EventType: "evaluation.invalid_result",
+			Payload:   []byte(`{"reason":"evidence_insufficient","recommended_action":"retry","summary":"bad output"}`),
+		},
+	}
+
+	summary := BuildNodeSummaryFromRecords(node, events)
+	if summary.ReasonCode != "retry_exhausted" {
+		t.Fatalf("expected retry_exhausted, got %q", summary.ReasonCode)
+	}
+	if summary.LatestEvaluationStatus != "evidence_insufficient" {
+		t.Fatalf("expected evidence_insufficient status, got %q", summary.LatestEvaluationStatus)
 	}
 }

@@ -1,6 +1,6 @@
 # Issue Detail orchestration API returns Decision Panel summaries
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: Medium
 
@@ -12,12 +12,12 @@ The response should include run state, node state, reason codes, recommended act
 
 ## Acceptance criteria
 
-- [ ] The issue orchestration read API returns Decision Panel-ready summaries for run and nodes.
-- [ ] `reason_code` and `recommended_action` are derived server-side.
-- [ ] The response includes linked task ids, attempts, evidence counts, latest summaries, events, evidence detail, and permission flags.
-- [ ] Read authorization follows Issue read permission and does not introduce a separate evidence side channel.
-- [ ] Core API client schemas parse the response with fallbacks for missing fields, unknown enum values, and malformed optional arrays.
-- [ ] Backend and core tests cover read permissions, derived reason/action values, malformed response fallback, and unknown enum downgrade behavior.
+- [x] The issue orchestration read API returns Decision Panel-ready summaries for run and nodes.
+- [x] `reason_code` and `recommended_action` are derived server-side.
+- [x] The response includes linked task ids, attempts, evidence counts, latest summaries, events, evidence detail, and permission flags.
+- [x] Read authorization follows Issue read permission and does not introduce a separate evidence side channel.
+- [x] Core API client schemas parse the response with fallbacks for missing fields, unknown enum values, and malformed optional arrays.
+- [x] Backend and core tests cover read permissions, derived reason/action values, malformed response fallback, and unknown enum downgrade behavior.
 
 ## Agent / human ownership
 

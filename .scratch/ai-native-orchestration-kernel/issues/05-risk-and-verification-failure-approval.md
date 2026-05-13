@@ -1,6 +1,6 @@
 # Risk-bearing or failed verification pauses for human approval
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: High
 
@@ -12,12 +12,12 @@ The approval action API should support `approve`, `retry`, `request_changes`, an
 
 ## Acceptance criteria
 
-- [ ] Risk-bearing evidence or failed verification moves the relevant node/run into `waiting_for_approval`.
-- [ ] The approval action API supports `approve`, `retry`, `request_changes`, and `cancel`.
-- [ ] Workspace owners/admins, Issue creator, and Issue human assignee can act; agent assignees cannot approve their own orchestration.
-- [ ] `request_changes` records an audited Change Request and passes it into the next node attempt's Orchestration Context without rewriting the Issue description.
-- [ ] The read API exposes permission flags, reason code, recommended action, and approval history.
-- [ ] Tests cover approval permission boundaries, each approval action, risk-to-approval routing, request-changes context propagation, and event persistence.
+- [x] Risk-bearing evidence or failed verification moves the relevant node/run into `waiting_for_approval`.
+- [x] The approval action API supports `approve`, `retry`, `request_changes`, and `cancel`.
+- [x] Workspace owners/admins, Issue creator, and Issue human assignee can act; agent assignees cannot approve their own orchestration.
+- [x] `request_changes` records an audited Change Request and passes it into the next node attempt's Orchestration Context without rewriting the Issue description.
+- [x] The read API exposes permission flags, reason code, recommended action, and approval history.
+- [x] Tests cover approval permission boundaries, each approval action, risk-to-approval routing, request-changes context propagation, and event persistence.
 
 ## Agent / human ownership
 

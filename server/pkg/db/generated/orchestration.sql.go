@@ -11,87 +11,41 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const createOrchestrationPlan = `-- name: CreateOrchestrationPlan :one
-INSERT INTO orchestration_plan (
-    workspace_id, source_type, source_id, objective, status,
-    policy, metadata, created_by_type, created_by_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at
+const cancelActiveOrchestrationNodesByPlan = `-- name: CancelActiveOrchestrationNodesByPlan :many
+UPDATE orchestration_node
+SET status = 'cancelled', completed_at = COALESCE(completed_at, now()), updated_at = now()
+WHERE plan_id = $1 AND status IN ('pending', 'ready', 'dispatched', 'running', 'evaluating', 'blocked', 'waiting_human')
+RETURNING id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
 `
 
-type CreateOrchestrationPlanParams struct {
-	WorkspaceID   pgtype.UUID `json:"workspace_id"`
-	SourceType    string      `json:"source_type"`
-	SourceID      pgtype.UUID `json:"source_id"`
-	Objective     string      `json:"objective"`
-	Status        string      `json:"status"`
-	Policy        []byte      `json:"policy"`
-	Metadata      []byte      `json:"metadata"`
-	CreatedByType pgtype.Text `json:"created_by_type"`
-	CreatedByID   pgtype.UUID `json:"created_by_id"`
-}
-
-func (q *Queries) CreateOrchestrationPlan(ctx context.Context, arg CreateOrchestrationPlanParams) (OrchestrationPlan, error) {
-	row := q.db.QueryRow(ctx, createOrchestrationPlan,
-		arg.WorkspaceID, arg.SourceType, arg.SourceID, arg.Objective, arg.Status,
-		arg.Policy, arg.Metadata, arg.CreatedByType, arg.CreatedByID,
-	)
-	var i OrchestrationPlan
-	err := row.Scan(
-		&i.ID, &i.WorkspaceID, &i.SourceType, &i.SourceID, &i.Objective, &i.Status,
-		&i.Policy, &i.Metadata, &i.CreatedByType, &i.CreatedByID, &i.CreatedAt, &i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getActiveOrchestrationPlanBySource = `-- name: GetActiveOrchestrationPlanBySource :one
-SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at
-FROM orchestration_plan
-WHERE source_type = $1 AND source_id = $2
-  AND status NOT IN ('completed', 'failed', 'cancelled')
-ORDER BY created_at DESC
-LIMIT 1
-`
-
-type GetActiveOrchestrationPlanBySourceParams struct {
-	SourceType string      `json:"source_type"`
-	SourceID   pgtype.UUID `json:"source_id"`
-}
-
-func (q *Queries) GetActiveOrchestrationPlanBySource(ctx context.Context, arg GetActiveOrchestrationPlanBySourceParams) (OrchestrationPlan, error) {
-	row := q.db.QueryRow(ctx, getActiveOrchestrationPlanBySource, arg.SourceType, arg.SourceID)
-	var i OrchestrationPlan
-	err := row.Scan(
-		&i.ID, &i.WorkspaceID, &i.SourceType, &i.SourceID, &i.Objective, &i.Status,
-		&i.Policy, &i.Metadata, &i.CreatedByType, &i.CreatedByID, &i.CreatedAt, &i.UpdatedAt,
-	)
-	return i, err
-}
-
-const listOrchestrationPlansBySource = `-- name: ListOrchestrationPlansBySource :many
-SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at
-FROM orchestration_plan
-WHERE source_type = $1 AND source_id = $2
-ORDER BY created_at DESC
-`
-
-type ListOrchestrationPlansBySourceParams struct {
-	SourceType string      `json:"source_type"`
-	SourceID   pgtype.UUID `json:"source_id"`
-}
-
-func (q *Queries) ListOrchestrationPlansBySource(ctx context.Context, arg ListOrchestrationPlansBySourceParams) ([]OrchestrationPlan, error) {
-	rows, err := q.db.Query(ctx, listOrchestrationPlansBySource, arg.SourceType, arg.SourceID)
+func (q *Queries) CancelActiveOrchestrationNodesByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationNode, error) {
+	rows, err := q.db.Query(ctx, cancelActiveOrchestrationNodesByPlan, planID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []OrchestrationPlan
+	items := []OrchestrationNode{}
 	for rows.Next() {
-		var i OrchestrationPlan
+		var i OrchestrationNode
 		if err := rows.Scan(
-			&i.ID, &i.WorkspaceID, &i.SourceType, &i.SourceID, &i.Objective, &i.Status,
-			&i.Policy, &i.Metadata, &i.CreatedByType, &i.CreatedByID, &i.CreatedAt, &i.UpdatedAt,
+			&i.ID,
+			&i.PlanID,
+			&i.Type,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.AssigneeAgentID,
+			&i.InputContract,
+			&i.OutputContract,
+			&i.EvaluatorPolicy,
+			&i.RetryPolicy,
+			&i.RuntimeConstraints,
+			&i.AttemptCount,
+			&i.MaxAttempts,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -103,67 +57,51 @@ func (q *Queries) ListOrchestrationPlansBySource(ctx context.Context, arg ListOr
 	return items, nil
 }
 
-const createOrchestrationNode = `-- name: CreateOrchestrationNode :one
-INSERT INTO orchestration_node (
-    plan_id, type, title, description, status, assignee_agent_id,
-    input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints,
-    max_attempts
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-RETURNING id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
+const cancelActiveOrchestrationTasksByPlan = `-- name: CancelActiveOrchestrationTasksByPlan :many
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now()
+WHERE orchestration_plan_id = $1 AND status IN ('queued', 'dispatched', 'running')
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, orchestration_plan_id, orchestration_node_id, orchestration_run_id
 `
 
-type CreateOrchestrationNodeParams struct {
-	PlanID             pgtype.UUID `json:"plan_id"`
-	Type               string      `json:"type"`
-	Title              string      `json:"title"`
-	Description        pgtype.Text `json:"description"`
-	Status             string      `json:"status"`
-	AssigneeAgentID    pgtype.UUID `json:"assignee_agent_id"`
-	InputContract      []byte      `json:"input_contract"`
-	OutputContract     []byte      `json:"output_contract"`
-	EvaluatorPolicy    []byte      `json:"evaluator_policy"`
-	RetryPolicy        []byte      `json:"retry_policy"`
-	RuntimeConstraints []byte      `json:"runtime_constraints"`
-	MaxAttempts        int32       `json:"max_attempts"`
-}
-
-func (q *Queries) CreateOrchestrationNode(ctx context.Context, arg CreateOrchestrationNodeParams) (OrchestrationNode, error) {
-	row := q.db.QueryRow(ctx, createOrchestrationNode,
-		arg.PlanID, arg.Type, arg.Title, arg.Description, arg.Status, arg.AssigneeAgentID,
-		arg.InputContract, arg.OutputContract, arg.EvaluatorPolicy, arg.RetryPolicy, arg.RuntimeConstraints,
-		arg.MaxAttempts,
-	)
-	return scanOrchestrationNode(row)
-}
-
-const getOrchestrationNode = `-- name: GetOrchestrationNode :one
-SELECT id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
-FROM orchestration_node
-WHERE id = $1
-`
-
-func (q *Queries) GetOrchestrationNode(ctx context.Context, id pgtype.UUID) (OrchestrationNode, error) {
-	row := q.db.QueryRow(ctx, getOrchestrationNode, id)
-	return scanOrchestrationNode(row)
-}
-
-const listOrchestrationNodesByPlan = `-- name: ListOrchestrationNodesByPlan :many
-SELECT id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
-FROM orchestration_node
-WHERE plan_id = $1
-ORDER BY created_at ASC
-`
-
-func (q *Queries) ListOrchestrationNodesByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationNode, error) {
-	rows, err := q.db.Query(ctx, listOrchestrationNodesByPlan, planID)
+func (q *Queries) CancelActiveOrchestrationTasksByPlan(ctx context.Context, orchestrationPlanID pgtype.UUID) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, cancelActiveOrchestrationTasksByPlan, orchestrationPlanID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []OrchestrationNode
+	items := []AgentTaskQueue{}
 	for rows.Next() {
-		i, err := scanOrchestrationNode(rows)
-		if err != nil {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.OrchestrationPlanID,
+			&i.OrchestrationNodeID,
+			&i.OrchestrationRunID,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -172,6 +110,61 @@ func (q *Queries) ListOrchestrationNodesByPlan(ctx context.Context, planID pgtyp
 		return nil, err
 	}
 	return items, nil
+}
+
+const completeOrchestrationNode = `-- name: CompleteOrchestrationNode :exec
+UPDATE orchestration_node
+SET status = 'completed', completed_at = now(), updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) CompleteOrchestrationNode(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, completeOrchestrationNode, id)
+	return err
+}
+
+const createOrchestrationArtifact = `-- name: CreateOrchestrationArtifact :one
+INSERT INTO orchestration_artifact (plan_id, node_id, task_id, type, uri, content, metadata, content_hash)
+VALUES ($1, $5, $6, $2, $7, $3, $4, $8)
+RETURNING id, plan_id, node_id, task_id, type, uri, content, metadata, content_hash, created_at
+`
+
+type CreateOrchestrationArtifactParams struct {
+	PlanID      pgtype.UUID `json:"plan_id"`
+	Type        string      `json:"type"`
+	Content     []byte      `json:"content"`
+	Metadata    []byte      `json:"metadata"`
+	NodeID      pgtype.UUID `json:"node_id"`
+	TaskID      pgtype.UUID `json:"task_id"`
+	Uri         pgtype.Text `json:"uri"`
+	ContentHash pgtype.Text `json:"content_hash"`
+}
+
+func (q *Queries) CreateOrchestrationArtifact(ctx context.Context, arg CreateOrchestrationArtifactParams) (OrchestrationArtifact, error) {
+	row := q.db.QueryRow(ctx, createOrchestrationArtifact,
+		arg.PlanID,
+		arg.Type,
+		arg.Content,
+		arg.Metadata,
+		arg.NodeID,
+		arg.TaskID,
+		arg.Uri,
+		arg.ContentHash,
+	)
+	var i OrchestrationArtifact
+	err := row.Scan(
+		&i.ID,
+		&i.PlanID,
+		&i.NodeID,
+		&i.TaskID,
+		&i.Type,
+		&i.Uri,
+		&i.Content,
+		&i.Metadata,
+		&i.ContentHash,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const createOrchestrationEdge = `-- name: CreateOrchestrationEdge :one
@@ -189,79 +182,106 @@ type CreateOrchestrationEdgeParams struct {
 }
 
 func (q *Queries) CreateOrchestrationEdge(ctx context.Context, arg CreateOrchestrationEdgeParams) (OrchestrationEdge, error) {
-	row := q.db.QueryRow(ctx, createOrchestrationEdge, arg.PlanID, arg.FromNodeID, arg.ToNodeID, arg.Type, arg.Metadata)
+	row := q.db.QueryRow(ctx, createOrchestrationEdge,
+		arg.PlanID,
+		arg.FromNodeID,
+		arg.ToNodeID,
+		arg.Type,
+		arg.Metadata,
+	)
 	var i OrchestrationEdge
-	err := row.Scan(&i.ID, &i.PlanID, &i.FromNodeID, &i.ToNodeID, &i.Type, &i.Metadata, &i.CreatedAt)
-	return i, err
-}
-
-const listOrchestrationEdgesByPlan = `-- name: ListOrchestrationEdgesByPlan :many
-SELECT id, plan_id, from_node_id, to_node_id, type, metadata, created_at
-FROM orchestration_edge
-WHERE plan_id = $1
-ORDER BY created_at ASC
-`
-
-func (q *Queries) ListOrchestrationEdgesByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationEdge, error) {
-	rows, err := q.db.Query(ctx, listOrchestrationEdgesByPlan, planID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []OrchestrationEdge
-	for rows.Next() {
-		var i OrchestrationEdge
-		if err := rows.Scan(&i.ID, &i.PlanID, &i.FromNodeID, &i.ToNodeID, &i.Type, &i.Metadata, &i.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getOrchestrationPlan = `-- name: GetOrchestrationPlan :one
-SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at
-FROM orchestration_plan
-WHERE id = $1
-`
-
-func (q *Queries) GetOrchestrationPlan(ctx context.Context, id pgtype.UUID) (OrchestrationPlan, error) {
-	row := q.db.QueryRow(ctx, getOrchestrationPlan, id)
-	var i OrchestrationPlan
 	err := row.Scan(
-		&i.ID, &i.WorkspaceID, &i.SourceType, &i.SourceID, &i.Objective, &i.Status,
-		&i.Policy, &i.Metadata, &i.CreatedByType, &i.CreatedByID, &i.CreatedAt, &i.UpdatedAt,
+		&i.ID,
+		&i.PlanID,
+		&i.FromNodeID,
+		&i.ToNodeID,
+		&i.Type,
+		&i.Metadata,
+		&i.CreatedAt,
 	)
 	return i, err
 }
 
-const updateOrchestrationPlanStatus = `-- name: UpdateOrchestrationPlanStatus :exec
-UPDATE orchestration_plan SET status = $2, updated_at = now()
-WHERE id = $1
+const createOrchestrationEvent = `-- name: CreateOrchestrationEvent :one
+INSERT INTO orchestration_event (plan_id, node_id, task_id, event_type, actor_type, actor_id, payload)
+VALUES ($1, $5, $6, $2, $3, $7, $4)
+RETURNING id, plan_id, node_id, task_id, event_type, actor_type, actor_id, payload, created_at
 `
 
-type UpdateOrchestrationPlanStatusParams struct {
-	ID     pgtype.UUID `json:"id"`
-	Status string      `json:"status"`
+type CreateOrchestrationEventParams struct {
+	PlanID    pgtype.UUID `json:"plan_id"`
+	EventType string      `json:"event_type"`
+	ActorType string      `json:"actor_type"`
+	Payload   []byte      `json:"payload"`
+	NodeID    pgtype.UUID `json:"node_id"`
+	TaskID    pgtype.UUID `json:"task_id"`
+	ActorID   pgtype.UUID `json:"actor_id"`
 }
 
-func (q *Queries) UpdateOrchestrationPlanStatus(ctx context.Context, arg UpdateOrchestrationPlanStatusParams) error {
-	_, err := q.db.Exec(ctx, updateOrchestrationPlanStatus, arg.ID, arg.Status)
-	return err
+func (q *Queries) CreateOrchestrationEvent(ctx context.Context, arg CreateOrchestrationEventParams) (OrchestrationEvent, error) {
+	row := q.db.QueryRow(ctx, createOrchestrationEvent,
+		arg.PlanID,
+		arg.EventType,
+		arg.ActorType,
+		arg.Payload,
+		arg.NodeID,
+		arg.TaskID,
+		arg.ActorID,
+	)
+	var i OrchestrationEvent
+	err := row.Scan(
+		&i.ID,
+		&i.PlanID,
+		&i.NodeID,
+		&i.TaskID,
+		&i.EventType,
+		&i.ActorType,
+		&i.ActorID,
+		&i.Payload,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
-const markOrchestrationNodeDispatched = `-- name: MarkOrchestrationNodeDispatched :one
-UPDATE orchestration_node
-SET status = 'dispatched', attempt_count = attempt_count + 1, updated_at = now()
-WHERE id = $1
+const createOrchestrationNode = `-- name: CreateOrchestrationNode :one
+INSERT INTO orchestration_node (
+    plan_id, type, title, description, status, assignee_agent_id,
+    input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints,
+    max_attempts
+) VALUES ($1, $2, $3, $11, $4, $12, $5, $6, $7, $8, $9, $10)
 RETURNING id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
 `
 
-func (q *Queries) MarkOrchestrationNodeDispatched(ctx context.Context, id pgtype.UUID) (OrchestrationNode, error) {
-	row := q.db.QueryRow(ctx, markOrchestrationNodeDispatched, id)
+type CreateOrchestrationNodeParams struct {
+	PlanID             pgtype.UUID `json:"plan_id"`
+	Type               string      `json:"type"`
+	Title              string      `json:"title"`
+	Status             string      `json:"status"`
+	InputContract      []byte      `json:"input_contract"`
+	OutputContract     []byte      `json:"output_contract"`
+	EvaluatorPolicy    []byte      `json:"evaluator_policy"`
+	RetryPolicy        []byte      `json:"retry_policy"`
+	RuntimeConstraints []byte      `json:"runtime_constraints"`
+	MaxAttempts        int32       `json:"max_attempts"`
+	Description        pgtype.Text `json:"description"`
+	AssigneeAgentID    pgtype.UUID `json:"assignee_agent_id"`
+}
+
+func (q *Queries) CreateOrchestrationNode(ctx context.Context, arg CreateOrchestrationNodeParams) (OrchestrationNode, error) {
+	row := q.db.QueryRow(ctx, createOrchestrationNode,
+		arg.PlanID,
+		arg.Type,
+		arg.Title,
+		arg.Status,
+		arg.InputContract,
+		arg.OutputContract,
+		arg.EvaluatorPolicy,
+		arg.RetryPolicy,
+		arg.RuntimeConstraints,
+		arg.MaxAttempts,
+		arg.Description,
+		arg.AssigneeAgentID,
+	)
 	var i OrchestrationNode
 	err := row.Scan(
 		&i.ID,
@@ -286,177 +306,6 @@ func (q *Queries) MarkOrchestrationNodeDispatched(ctx context.Context, id pgtype
 	return i, err
 }
 
-const markOrchestrationNodeRunning = `-- name: MarkOrchestrationNodeRunning :exec
-UPDATE orchestration_node
-SET status = 'running', started_at = COALESCE(started_at, now()), updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) MarkOrchestrationNodeRunning(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, markOrchestrationNodeRunning, id)
-	return err
-}
-
-const markOrchestrationNodeEvaluating = `-- name: MarkOrchestrationNodeEvaluating :exec
-UPDATE orchestration_node
-SET status = 'evaluating', updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) MarkOrchestrationNodeEvaluating(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, markOrchestrationNodeEvaluating, id)
-	return err
-}
-
-const completeOrchestrationNode = `-- name: CompleteOrchestrationNode :exec
-UPDATE orchestration_node
-SET status = 'completed', completed_at = now(), updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) CompleteOrchestrationNode(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, completeOrchestrationNode, id)
-	return err
-}
-
-const failOrchestrationNode = `-- name: FailOrchestrationNode :exec
-UPDATE orchestration_node
-SET status = 'failed', completed_at = now(), updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) FailOrchestrationNode(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, failOrchestrationNode, id)
-	return err
-}
-
-const readyOrchestrationNode = `-- name: ReadyOrchestrationNode :exec
-UPDATE orchestration_node
-SET status = 'ready', updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) ReadyOrchestrationNode(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, readyOrchestrationNode, id)
-	return err
-}
-
-const waitOrchestrationNodeForHuman = `-- name: WaitOrchestrationNodeForHuman :exec
-UPDATE orchestration_node
-SET status = 'waiting_human', updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) WaitOrchestrationNodeForHuman(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, waitOrchestrationNodeForHuman, id)
-	return err
-}
-
-const createOrchestrationEvent = `-- name: CreateOrchestrationEvent :one
-INSERT INTO orchestration_event (plan_id, node_id, task_id, event_type, actor_type, actor_id, payload)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, plan_id, node_id, task_id, event_type, actor_type, actor_id, payload, created_at
-`
-
-type CreateOrchestrationEventParams struct {
-	PlanID    pgtype.UUID `json:"plan_id"`
-	NodeID    pgtype.UUID `json:"node_id"`
-	TaskID    pgtype.UUID `json:"task_id"`
-	EventType string      `json:"event_type"`
-	ActorType string      `json:"actor_type"`
-	ActorID   pgtype.UUID `json:"actor_id"`
-	Payload   []byte      `json:"payload"`
-}
-
-func (q *Queries) CreateOrchestrationEvent(ctx context.Context, arg CreateOrchestrationEventParams) (OrchestrationEvent, error) {
-	row := q.db.QueryRow(ctx, createOrchestrationEvent,
-		arg.PlanID, arg.NodeID, arg.TaskID, arg.EventType, arg.ActorType, arg.ActorID, arg.Payload,
-	)
-	var i OrchestrationEvent
-	err := row.Scan(&i.ID, &i.PlanID, &i.NodeID, &i.TaskID, &i.EventType, &i.ActorType, &i.ActorID, &i.Payload, &i.CreatedAt)
-	return i, err
-}
-
-const listOrchestrationEventsByPlan = `-- name: ListOrchestrationEventsByPlan :many
-SELECT id, plan_id, node_id, task_id, event_type, actor_type, actor_id, payload, created_at
-FROM orchestration_event
-WHERE plan_id = $1
-ORDER BY created_at ASC
-`
-
-func (q *Queries) ListOrchestrationEventsByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationEvent, error) {
-	rows, err := q.db.Query(ctx, listOrchestrationEventsByPlan, planID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []OrchestrationEvent
-	for rows.Next() {
-		var i OrchestrationEvent
-		if err := rows.Scan(&i.ID, &i.PlanID, &i.NodeID, &i.TaskID, &i.EventType, &i.ActorType, &i.ActorID, &i.Payload, &i.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const createOrchestrationArtifact = `-- name: CreateOrchestrationArtifact :one
-INSERT INTO orchestration_artifact (plan_id, node_id, task_id, type, uri, content, metadata, content_hash)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, plan_id, node_id, task_id, type, uri, content, metadata, content_hash, created_at
-`
-
-type CreateOrchestrationArtifactParams struct {
-	PlanID      pgtype.UUID `json:"plan_id"`
-	NodeID      pgtype.UUID `json:"node_id"`
-	TaskID      pgtype.UUID `json:"task_id"`
-	Type        string      `json:"type"`
-	Uri         pgtype.Text `json:"uri"`
-	Content     []byte      `json:"content"`
-	Metadata    []byte      `json:"metadata"`
-	ContentHash pgtype.Text `json:"content_hash"`
-}
-
-func (q *Queries) CreateOrchestrationArtifact(ctx context.Context, arg CreateOrchestrationArtifactParams) (OrchestrationArtifact, error) {
-	row := q.db.QueryRow(ctx, createOrchestrationArtifact,
-		arg.PlanID, arg.NodeID, arg.TaskID, arg.Type, arg.Uri, arg.Content, arg.Metadata, arg.ContentHash,
-	)
-	var i OrchestrationArtifact
-	err := row.Scan(&i.ID, &i.PlanID, &i.NodeID, &i.TaskID, &i.Type, &i.Uri, &i.Content, &i.Metadata, &i.ContentHash, &i.CreatedAt)
-	return i, err
-}
-
-const listOrchestrationArtifactsByPlan = `-- name: ListOrchestrationArtifactsByPlan :many
-SELECT id, plan_id, node_id, task_id, type, uri, content, metadata, content_hash, created_at
-FROM orchestration_artifact
-WHERE plan_id = $1
-ORDER BY created_at ASC
-`
-
-func (q *Queries) ListOrchestrationArtifactsByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationArtifact, error) {
-	rows, err := q.db.Query(ctx, listOrchestrationArtifactsByPlan, planID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []OrchestrationArtifact
-	for rows.Next() {
-		var i OrchestrationArtifact
-		if err := rows.Scan(&i.ID, &i.PlanID, &i.NodeID, &i.TaskID, &i.Type, &i.Uri, &i.Content, &i.Metadata, &i.ContentHash, &i.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const createOrchestrationNodeTask = `-- name: CreateOrchestrationNodeTask :one
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context,
@@ -464,7 +313,7 @@ INSERT INTO agent_task_queue (
     force_fresh_session
 )
 VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, COALESCE($9::boolean, FALSE))
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, orchestration_plan_id, orchestration_node_id, orchestration_run_id
 `
 
 type CreateOrchestrationNodeTaskParams struct {
@@ -517,20 +366,536 @@ func (q *Queries) CreateOrchestrationNodeTask(ctx context.Context, arg CreateOrc
 		&i.FailureReason,
 		&i.TriggerSummary,
 		&i.ForceFreshSession,
+		&i.OrchestrationPlanID,
+		&i.OrchestrationNodeID,
+		&i.OrchestrationRunID,
 	)
 	return i, err
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
+const createOrchestrationPlan = `-- name: CreateOrchestrationPlan :one
+INSERT INTO orchestration_plan (
+    workspace_id, source_type, source_id, objective, status,
+    policy, metadata, created_by_type, created_by_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at
+`
+
+type CreateOrchestrationPlanParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	SourceType    string      `json:"source_type"`
+	SourceID      pgtype.UUID `json:"source_id"`
+	Objective     string      `json:"objective"`
+	Status        string      `json:"status"`
+	Policy        []byte      `json:"policy"`
+	Metadata      []byte      `json:"metadata"`
+	CreatedByType pgtype.Text `json:"created_by_type"`
+	CreatedByID   pgtype.UUID `json:"created_by_id"`
 }
 
-func scanOrchestrationNode(row rowScanner) (OrchestrationNode, error) {
+func (q *Queries) CreateOrchestrationPlan(ctx context.Context, arg CreateOrchestrationPlanParams) (OrchestrationPlan, error) {
+	row := q.db.QueryRow(ctx, createOrchestrationPlan,
+		arg.WorkspaceID,
+		arg.SourceType,
+		arg.SourceID,
+		arg.Objective,
+		arg.Status,
+		arg.Policy,
+		arg.Metadata,
+		arg.CreatedByType,
+		arg.CreatedByID,
+	)
+	var i OrchestrationPlan
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceType,
+		&i.SourceID,
+		&i.Objective,
+		&i.Status,
+		&i.Policy,
+		&i.Metadata,
+		&i.CreatedByType,
+		&i.CreatedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const failOrchestrationNode = `-- name: FailOrchestrationNode :exec
+UPDATE orchestration_node
+SET status = 'failed', completed_at = now(), updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) FailOrchestrationNode(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, failOrchestrationNode, id)
+	return err
+}
+
+const getActiveOrchestrationPlanBySource = `-- name: GetActiveOrchestrationPlanBySource :one
+SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at FROM orchestration_plan
+WHERE source_type = $1 AND source_id = $2
+  AND status NOT IN ('completed', 'failed', 'cancelled')
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetActiveOrchestrationPlanBySourceParams struct {
+	SourceType string      `json:"source_type"`
+	SourceID   pgtype.UUID `json:"source_id"`
+}
+
+func (q *Queries) GetActiveOrchestrationPlanBySource(ctx context.Context, arg GetActiveOrchestrationPlanBySourceParams) (OrchestrationPlan, error) {
+	row := q.db.QueryRow(ctx, getActiveOrchestrationPlanBySource, arg.SourceType, arg.SourceID)
+	var i OrchestrationPlan
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceType,
+		&i.SourceID,
+		&i.Objective,
+		&i.Status,
+		&i.Policy,
+		&i.Metadata,
+		&i.CreatedByType,
+		&i.CreatedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getOrchestrationNode = `-- name: GetOrchestrationNode :one
+SELECT id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at FROM orchestration_node
+WHERE id = $1
+`
+
+func (q *Queries) GetOrchestrationNode(ctx context.Context, id pgtype.UUID) (OrchestrationNode, error) {
+	row := q.db.QueryRow(ctx, getOrchestrationNode, id)
 	var i OrchestrationNode
 	err := row.Scan(
-		&i.ID, &i.PlanID, &i.Type, &i.Title, &i.Description, &i.Status, &i.AssigneeAgentID,
-		&i.InputContract, &i.OutputContract, &i.EvaluatorPolicy, &i.RetryPolicy, &i.RuntimeConstraints,
-		&i.AttemptCount, &i.MaxAttempts, &i.StartedAt, &i.CompletedAt, &i.CreatedAt, &i.UpdatedAt,
+		&i.ID,
+		&i.PlanID,
+		&i.Type,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.AssigneeAgentID,
+		&i.InputContract,
+		&i.OutputContract,
+		&i.EvaluatorPolicy,
+		&i.RetryPolicy,
+		&i.RuntimeConstraints,
+		&i.AttemptCount,
+		&i.MaxAttempts,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getOrchestrationPlan = `-- name: GetOrchestrationPlan :one
+SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at FROM orchestration_plan
+WHERE id = $1
+`
+
+func (q *Queries) GetOrchestrationPlan(ctx context.Context, id pgtype.UUID) (OrchestrationPlan, error) {
+	row := q.db.QueryRow(ctx, getOrchestrationPlan, id)
+	var i OrchestrationPlan
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceType,
+		&i.SourceID,
+		&i.Objective,
+		&i.Status,
+		&i.Policy,
+		&i.Metadata,
+		&i.CreatedByType,
+		&i.CreatedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listOrchestrationArtifactsByPlan = `-- name: ListOrchestrationArtifactsByPlan :many
+SELECT id, plan_id, node_id, task_id, type, uri, content, metadata, content_hash, created_at FROM orchestration_artifact
+WHERE plan_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListOrchestrationArtifactsByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationArtifact, error) {
+	rows, err := q.db.Query(ctx, listOrchestrationArtifactsByPlan, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrchestrationArtifact{}
+	for rows.Next() {
+		var i OrchestrationArtifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlanID,
+			&i.NodeID,
+			&i.TaskID,
+			&i.Type,
+			&i.Uri,
+			&i.Content,
+			&i.Metadata,
+			&i.ContentHash,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrchestrationEdgesByPlan = `-- name: ListOrchestrationEdgesByPlan :many
+SELECT id, plan_id, from_node_id, to_node_id, type, metadata, created_at FROM orchestration_edge
+WHERE plan_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListOrchestrationEdgesByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationEdge, error) {
+	rows, err := q.db.Query(ctx, listOrchestrationEdgesByPlan, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrchestrationEdge{}
+	for rows.Next() {
+		var i OrchestrationEdge
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlanID,
+			&i.FromNodeID,
+			&i.ToNodeID,
+			&i.Type,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrchestrationEventsByPlan = `-- name: ListOrchestrationEventsByPlan :many
+SELECT id, plan_id, node_id, task_id, event_type, actor_type, actor_id, payload, created_at FROM orchestration_event
+WHERE plan_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListOrchestrationEventsByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationEvent, error) {
+	rows, err := q.db.Query(ctx, listOrchestrationEventsByPlan, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrchestrationEvent{}
+	for rows.Next() {
+		var i OrchestrationEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlanID,
+			&i.NodeID,
+			&i.TaskID,
+			&i.EventType,
+			&i.ActorType,
+			&i.ActorID,
+			&i.Payload,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrchestrationNodesByPlan = `-- name: ListOrchestrationNodesByPlan :many
+SELECT id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at FROM orchestration_node
+WHERE plan_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListOrchestrationNodesByPlan(ctx context.Context, planID pgtype.UUID) ([]OrchestrationNode, error) {
+	rows, err := q.db.Query(ctx, listOrchestrationNodesByPlan, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrchestrationNode{}
+	for rows.Next() {
+		var i OrchestrationNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlanID,
+			&i.Type,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.AssigneeAgentID,
+			&i.InputContract,
+			&i.OutputContract,
+			&i.EvaluatorPolicy,
+			&i.RetryPolicy,
+			&i.RuntimeConstraints,
+			&i.AttemptCount,
+			&i.MaxAttempts,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrchestrationPlansBySource = `-- name: ListOrchestrationPlansBySource :many
+SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at FROM orchestration_plan
+WHERE source_type = $1 AND source_id = $2
+ORDER BY created_at DESC
+`
+
+type ListOrchestrationPlansBySourceParams struct {
+	SourceType string      `json:"source_type"`
+	SourceID   pgtype.UUID `json:"source_id"`
+}
+
+func (q *Queries) ListOrchestrationPlansBySource(ctx context.Context, arg ListOrchestrationPlansBySourceParams) ([]OrchestrationPlan, error) {
+	rows, err := q.db.Query(ctx, listOrchestrationPlansBySource, arg.SourceType, arg.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrchestrationPlan{}
+	for rows.Next() {
+		var i OrchestrationPlan
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.SourceType,
+			&i.SourceID,
+			&i.Objective,
+			&i.Status,
+			&i.Policy,
+			&i.Metadata,
+			&i.CreatedByType,
+			&i.CreatedByID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrchestrationTasksByPlan = `-- name: ListOrchestrationTasksByPlan :many
+SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, orchestration_plan_id, orchestration_node_id, orchestration_run_id
+FROM agent_task_queue
+WHERE orchestration_plan_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListOrchestrationTasksByPlan(ctx context.Context, orchestrationPlanID pgtype.UUID) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, listOrchestrationTasksByPlan, orchestrationPlanID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.OrchestrationPlanID,
+			&i.OrchestrationNodeID,
+			&i.OrchestrationRunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockActiveOrchestrationPlanBySource = `-- name: LockActiveOrchestrationPlanBySource :one
+SELECT id, workspace_id, source_type, source_id, objective, status, policy, metadata, created_by_type, created_by_id, created_at, updated_at FROM orchestration_plan
+WHERE source_type = $1 AND source_id = $2
+  AND status NOT IN ('completed', 'failed', 'cancelled')
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE
+`
+
+type LockActiveOrchestrationPlanBySourceParams struct {
+	SourceType string      `json:"source_type"`
+	SourceID   pgtype.UUID `json:"source_id"`
+}
+
+func (q *Queries) LockActiveOrchestrationPlanBySource(ctx context.Context, arg LockActiveOrchestrationPlanBySourceParams) (OrchestrationPlan, error) {
+	row := q.db.QueryRow(ctx, lockActiveOrchestrationPlanBySource, arg.SourceType, arg.SourceID)
+	var i OrchestrationPlan
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceType,
+		&i.SourceID,
+		&i.Objective,
+		&i.Status,
+		&i.Policy,
+		&i.Metadata,
+		&i.CreatedByType,
+		&i.CreatedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markOrchestrationNodeDispatched = `-- name: MarkOrchestrationNodeDispatched :one
+UPDATE orchestration_node
+SET status = 'dispatched', attempt_count = attempt_count + 1, updated_at = now()
+WHERE id = $1
+RETURNING id, plan_id, type, title, description, status, assignee_agent_id, input_contract, output_contract, evaluator_policy, retry_policy, runtime_constraints, attempt_count, max_attempts, started_at, completed_at, created_at, updated_at
+`
+
+func (q *Queries) MarkOrchestrationNodeDispatched(ctx context.Context, id pgtype.UUID) (OrchestrationNode, error) {
+	row := q.db.QueryRow(ctx, markOrchestrationNodeDispatched, id)
+	var i OrchestrationNode
+	err := row.Scan(
+		&i.ID,
+		&i.PlanID,
+		&i.Type,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.AssigneeAgentID,
+		&i.InputContract,
+		&i.OutputContract,
+		&i.EvaluatorPolicy,
+		&i.RetryPolicy,
+		&i.RuntimeConstraints,
+		&i.AttemptCount,
+		&i.MaxAttempts,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markOrchestrationNodeEvaluating = `-- name: MarkOrchestrationNodeEvaluating :exec
+UPDATE orchestration_node
+SET status = 'evaluating', updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) MarkOrchestrationNodeEvaluating(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markOrchestrationNodeEvaluating, id)
+	return err
+}
+
+const markOrchestrationNodeRunning = `-- name: MarkOrchestrationNodeRunning :exec
+UPDATE orchestration_node
+SET status = 'running', started_at = COALESCE(started_at, now()), updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) MarkOrchestrationNodeRunning(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markOrchestrationNodeRunning, id)
+	return err
+}
+
+const readyOrchestrationNode = `-- name: ReadyOrchestrationNode :exec
+UPDATE orchestration_node
+SET status = 'ready', updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) ReadyOrchestrationNode(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, readyOrchestrationNode, id)
+	return err
+}
+
+const updateOrchestrationPlanStatus = `-- name: UpdateOrchestrationPlanStatus :exec
+UPDATE orchestration_plan SET status = $2, updated_at = now()
+WHERE id = $1
+`
+
+type UpdateOrchestrationPlanStatusParams struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
+}
+
+func (q *Queries) UpdateOrchestrationPlanStatus(ctx context.Context, arg UpdateOrchestrationPlanStatusParams) error {
+	_, err := q.db.Exec(ctx, updateOrchestrationPlanStatus, arg.ID, arg.Status)
+	return err
+}
+
+const waitOrchestrationNodeForHuman = `-- name: WaitOrchestrationNodeForHuman :exec
+UPDATE orchestration_node
+SET status = 'waiting_human', updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) WaitOrchestrationNodeForHuman(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, waitOrchestrationNodeForHuman, id)
+	return err
 }

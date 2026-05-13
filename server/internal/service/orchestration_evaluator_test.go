@@ -11,7 +11,7 @@ import (
 func TestHardCheckEvaluatorInvalidValidationFails(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node: db.OrchestrationNode{Type: "implement"},
+		Node: db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{
 			Valid:  false,
 			Errors: []ValidationError{{Code: "missing_status", Field: "status", Message: "status is required"}},
@@ -20,10 +20,10 @@ func TestHardCheckEvaluatorInvalidValidationFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if eval.Pass || eval.RecommendedAction != "retry" || eval.Reason != "invalid_result" {
+	if eval.Pass || eval.RecommendedAction != "retry" || eval.Reason != "evidence_insufficient" {
 		t.Fatalf("unexpected eval: %#v", eval)
 	}
-	if eval.Status != "invalid_result" || eval.ReasonDetail == "" {
+	if eval.Status != "evidence_insufficient" || eval.ReasonDetail == "" {
 		t.Fatalf("expected observability fields for invalid result, got %#v", eval)
 	}
 }
@@ -31,7 +31,7 @@ func TestHardCheckEvaluatorInvalidValidationFails(t *testing.T) {
 func TestHardCheckEvaluatorImplementRequiresEvidence(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "implement"},
+		Node:       db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{Valid: true},
 		Result: AgentStructuredResult{
 			Status:           "completed",
@@ -50,7 +50,7 @@ func TestHardCheckEvaluatorImplementRequiresEvidence(t *testing.T) {
 func TestHardCheckEvaluatorTestRequiresPassingTestResult(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "test"},
+		Node:       db.OrchestrationNode{Type: "verify"},
 		Validation: ResultValidation{Valid: true},
 		Result: AgentStructuredResult{
 			Status:           "completed",
@@ -70,7 +70,7 @@ func TestHardCheckEvaluatorTestRequiresPassingTestResult(t *testing.T) {
 func TestHardCheckEvaluatorNeedsHuman(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "implement"},
+		Node:       db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{Valid: true},
 		Result: AgentStructuredResult{
 			Status:      "needs_human",
@@ -86,10 +86,34 @@ func TestHardCheckEvaluatorNeedsHuman(t *testing.T) {
 	}
 }
 
+func TestHardCheckEvaluatorCompletedResultWithRisksAsksHuman(t *testing.T) {
+	evaluator := HardCheckEvaluator{}
+	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
+		Node:       db.OrchestrationNode{Type: "execute"},
+		Validation: ResultValidation{Valid: true},
+		Result: AgentStructuredResult{
+			Status:           "completed",
+			Summary:          "done",
+			ChangedFiles:     []string{"a.go"},
+			CriteriaEvidence: []CriteriaEvidence{{Criterion: "c", Evidence: "e"}},
+			Risks:            []string{"Migration needs operator approval."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eval.Pass || eval.RecommendedAction != "ask_human" || eval.Reason != "risk_requires_approval" {
+		t.Fatalf("unexpected eval: %#v", eval)
+	}
+	if len(eval.Risks) != 1 {
+		t.Fatalf("expected risk details to be preserved, got %#v", eval)
+	}
+}
+
 func TestHardCheckEvaluatorAcceptanceCriteriaRequireEvidence(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "implement"},
+		Node:       db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{Valid: true},
 		AcceptanceCriteria: []AcceptanceCriterion{
 			{Criterion: "must include tests"},
@@ -111,7 +135,7 @@ func TestHardCheckEvaluatorAcceptanceCriteriaRequireEvidence(t *testing.T) {
 func TestHardCheckEvaluatorMismatchedCriteriaEvidenceFails(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "implement"},
+		Node:       db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{Valid: true},
 		AcceptanceCriteria: []AcceptanceCriterion{
 			{Criterion: "must include tests"},
@@ -136,7 +160,7 @@ func TestHardCheckEvaluatorMismatchedCriteriaEvidenceFails(t *testing.T) {
 func TestHardCheckEvaluatorLowConfidenceFailureAsksHuman(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "implement"},
+		Node:       db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{Valid: true},
 		Result: AgentStructuredResult{
 			Status:           "completed",
@@ -156,7 +180,7 @@ func TestHardCheckEvaluatorLowConfidenceFailureAsksHuman(t *testing.T) {
 func TestHardCheckEvaluatorMalformedAcceptanceCriteriaFailClosed(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:               db.OrchestrationNode{Type: "implement"},
+		Node:               db.OrchestrationNode{Type: "execute"},
 		Validation:         ResultValidation{Valid: true},
 		AcceptanceCriteria: ParseAcceptanceCriteria(json.RawMessage(`[{}]`)),
 		Result: AgentStructuredResult{
@@ -179,7 +203,7 @@ func TestHardCheckEvaluatorMalformedAcceptanceCriteriaFailClosed(t *testing.T) {
 func TestHardCheckEvaluatorPassesImplementWithChangedFilesAndEvidence(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 	eval, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node:       db.OrchestrationNode{Type: "implement"},
+		Node:       db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{Valid: true},
 		AcceptanceCriteria: []AcceptanceCriterion{
 			{Criterion: "must include tests"},
@@ -207,7 +231,7 @@ func TestHardCheckEvaluatorInvalidResultMapsToRetry(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 
 	result, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node: db.OrchestrationNode{Type: "implement"},
+		Node: db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{
 			Valid:  false,
 			Errors: []ValidationError{{Code: "missing_summary", Message: "missing summary"}},
@@ -216,8 +240,8 @@ func TestHardCheckEvaluatorInvalidResultMapsToRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate returned error: %v", err)
 	}
-	if result.Reason != "invalid_result" {
-		t.Fatalf("expected invalid_result, got %q", result.Reason)
+	if result.Reason != "evidence_insufficient" {
+		t.Fatalf("expected evidence_insufficient, got %q", result.Reason)
 	}
 	if result.RecommendedAction != "retry" {
 		t.Fatalf("expected retry action, got %q", result.RecommendedAction)
@@ -228,7 +252,7 @@ func TestHardCheckEvaluatorMissingEvidenceMapsToRetry(t *testing.T) {
 	evaluator := HardCheckEvaluator{}
 
 	result, err := evaluator.Evaluate(context.Background(), EvaluationInput{
-		Node: db.OrchestrationNode{Type: "implement"},
+		Node: db.OrchestrationNode{Type: "execute"},
 		Validation: ResultValidation{
 			Valid: true,
 		},

@@ -1,6 +1,6 @@
 # Run cancellation and node recovery preserve audit history
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: High
 
@@ -12,12 +12,12 @@ Cancellation should stop active execution without deleting history.
 
 ## Acceptance criteria
 
-- [ ] Cancelling an Orchestration Run cancels active nodes and linked queued/dispatched/running Agent Tasks.
-- [ ] Moving an Issue to `cancelled` cancels its Active Run and linked active execution.
-- [ ] Completed tasks, Kernel Events, and Node Evidence remain available after cancellation.
-- [ ] A lightweight recovery scan can detect a linked Agent Task that completed or failed while advancement was interrupted and safely advance or block the node.
-- [ ] Recovery does not rerun completed nodes or create duplicate Agent Tasks for an existing node attempt.
-- [ ] Tests cover run cancellation, Issue cancellation, task cancellation integration, completed-history preservation, recovery scan repair, and unrecoverable run failure.
+- [x] Cancelling an Orchestration Run cancels active nodes and linked queued/dispatched/running Agent Tasks.
+- [x] Moving an Issue to `cancelled` cancels its Active Run and linked active execution.
+- [x] Completed tasks, Kernel Events, and Node Evidence remain available after cancellation.
+- [x] A lightweight recovery scan can detect a linked Agent Task that completed or failed while advancement was interrupted and safely advance or block the node.
+- [x] Recovery does not rerun completed nodes or create duplicate Agent Tasks for an existing node attempt.
+- [x] Tests cover run cancellation, Issue cancellation, task cancellation integration, completed-history preservation, recovery scan repair, and unrecoverable run failure.
 
 ## Agent / human ownership
 

@@ -157,6 +157,9 @@ export function useRealtimeSync(
         const wsId = getCurrentWsId();
         if (wsId) qc.invalidateQueries({ queryKey: autopilotKeys.all(wsId) });
       },
+      orchestration: () => {
+        qc.invalidateQueries({ queryKey: ["issues", "orchestration"] });
+      },
       // Powers the agent presence cache: any task lifecycle change
       // (dispatch / completed / failed / cancelled) refreshes the
       // workspace-wide agent-task-snapshot query so per-agent presence

@@ -67,101 +67,33 @@ type AgentSkill struct {
 }
 
 type AgentTaskQueue struct {
-	ID                pgtype.UUID        `json:"id"`
-	AgentID           pgtype.UUID        `json:"agent_id"`
-	IssueID           pgtype.UUID        `json:"issue_id"`
-	Status            string             `json:"status"`
-	Priority          int32              `json:"priority"`
-	DispatchedAt      pgtype.Timestamptz `json:"dispatched_at"`
-	StartedAt         pgtype.Timestamptz `json:"started_at"`
-	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
-	Result            []byte             `json:"result"`
-	Error             pgtype.Text        `json:"error"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	Context           []byte             `json:"context"`
-	RuntimeID         pgtype.UUID        `json:"runtime_id"`
-	SessionID         pgtype.Text        `json:"session_id"`
-	WorkDir           pgtype.Text        `json:"work_dir"`
-	TriggerCommentID  pgtype.UUID        `json:"trigger_comment_id"`
-	ChatSessionID     pgtype.UUID        `json:"chat_session_id"`
-	AutopilotRunID    pgtype.UUID        `json:"autopilot_run_id"`
-	Attempt           int32              `json:"attempt"`
-	MaxAttempts       int32              `json:"max_attempts"`
-	ParentTaskID      pgtype.UUID        `json:"parent_task_id"`
-	FailureReason     pgtype.Text        `json:"failure_reason"`
-	TriggerSummary    pgtype.Text        `json:"trigger_summary"`
-	ForceFreshSession bool               `json:"force_fresh_session"`
-}
-
-type OrchestrationPlan struct {
-	ID            pgtype.UUID        `json:"id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	SourceType    string             `json:"source_type"`
-	SourceID      pgtype.UUID        `json:"source_id"`
-	Objective     string             `json:"objective"`
-	Status        string             `json:"status"`
-	Policy        []byte             `json:"policy"`
-	Metadata      []byte             `json:"metadata"`
-	CreatedByType pgtype.Text        `json:"created_by_type"`
-	CreatedByID   pgtype.UUID        `json:"created_by_id"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
-}
-
-type OrchestrationNode struct {
-	ID                 pgtype.UUID        `json:"id"`
-	PlanID             pgtype.UUID        `json:"plan_id"`
-	Type               string             `json:"type"`
-	Title              string             `json:"title"`
-	Description        pgtype.Text        `json:"description"`
-	Status             string             `json:"status"`
-	AssigneeAgentID    pgtype.UUID        `json:"assignee_agent_id"`
-	InputContract      []byte             `json:"input_contract"`
-	OutputContract     []byte             `json:"output_contract"`
-	EvaluatorPolicy    []byte             `json:"evaluator_policy"`
-	RetryPolicy        []byte             `json:"retry_policy"`
-	RuntimeConstraints []byte             `json:"runtime_constraints"`
-	AttemptCount       int32              `json:"attempt_count"`
-	MaxAttempts        int32              `json:"max_attempts"`
-	StartedAt          pgtype.Timestamptz `json:"started_at"`
-	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
-}
-
-type OrchestrationEdge struct {
-	ID         pgtype.UUID        `json:"id"`
-	PlanID     pgtype.UUID        `json:"plan_id"`
-	FromNodeID pgtype.UUID        `json:"from_node_id"`
-	ToNodeID   pgtype.UUID        `json:"to_node_id"`
-	Type       string             `json:"type"`
-	Metadata   []byte             `json:"metadata"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-}
-
-type OrchestrationEvent struct {
-	ID        pgtype.UUID        `json:"id"`
-	PlanID    pgtype.UUID        `json:"plan_id"`
-	NodeID    pgtype.UUID        `json:"node_id"`
-	TaskID    pgtype.UUID        `json:"task_id"`
-	EventType string             `json:"event_type"`
-	ActorType string             `json:"actor_type"`
-	ActorID   pgtype.UUID        `json:"actor_id"`
-	Payload   []byte             `json:"payload"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-}
-
-type OrchestrationArtifact struct {
-	ID          pgtype.UUID        `json:"id"`
-	PlanID      pgtype.UUID        `json:"plan_id"`
-	NodeID      pgtype.UUID        `json:"node_id"`
-	TaskID      pgtype.UUID        `json:"task_id"`
-	Type        string             `json:"type"`
-	Uri         pgtype.Text        `json:"uri"`
-	Content     []byte             `json:"content"`
-	Metadata    []byte             `json:"metadata"`
-	ContentHash pgtype.Text        `json:"content_hash"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID                  pgtype.UUID        `json:"id"`
+	AgentID             pgtype.UUID        `json:"agent_id"`
+	IssueID             pgtype.UUID        `json:"issue_id"`
+	Status              string             `json:"status"`
+	Priority            int32              `json:"priority"`
+	DispatchedAt        pgtype.Timestamptz `json:"dispatched_at"`
+	StartedAt           pgtype.Timestamptz `json:"started_at"`
+	CompletedAt         pgtype.Timestamptz `json:"completed_at"`
+	Result              []byte             `json:"result"`
+	Error               pgtype.Text        `json:"error"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	Context             []byte             `json:"context"`
+	RuntimeID           pgtype.UUID        `json:"runtime_id"`
+	SessionID           pgtype.Text        `json:"session_id"`
+	WorkDir             pgtype.Text        `json:"work_dir"`
+	TriggerCommentID    pgtype.UUID        `json:"trigger_comment_id"`
+	ChatSessionID       pgtype.UUID        `json:"chat_session_id"`
+	AutopilotRunID      pgtype.UUID        `json:"autopilot_run_id"`
+	Attempt             int32              `json:"attempt"`
+	MaxAttempts         int32              `json:"max_attempts"`
+	ParentTaskID        pgtype.UUID        `json:"parent_task_id"`
+	FailureReason       pgtype.Text        `json:"failure_reason"`
+	TriggerSummary      pgtype.Text        `json:"trigger_summary"`
+	ForceFreshSession   bool               `json:"force_fresh_session"`
+	OrchestrationPlanID pgtype.UUID        `json:"orchestration_plan_id"`
+	OrchestrationNodeID pgtype.UUID        `json:"orchestration_node_id"`
+	OrchestrationRunID  pgtype.UUID        `json:"orchestration_run_id"`
 }
 
 type Attachment struct {
@@ -402,6 +334,77 @@ type NotificationPreference struct {
 	UserID      pgtype.UUID        `json:"user_id"`
 	Preferences []byte             `json:"preferences"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type OrchestrationArtifact struct {
+	ID          pgtype.UUID        `json:"id"`
+	PlanID      pgtype.UUID        `json:"plan_id"`
+	NodeID      pgtype.UUID        `json:"node_id"`
+	TaskID      pgtype.UUID        `json:"task_id"`
+	Type        string             `json:"type"`
+	Uri         pgtype.Text        `json:"uri"`
+	Content     []byte             `json:"content"`
+	Metadata    []byte             `json:"metadata"`
+	ContentHash pgtype.Text        `json:"content_hash"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type OrchestrationEdge struct {
+	ID         pgtype.UUID        `json:"id"`
+	PlanID     pgtype.UUID        `json:"plan_id"`
+	FromNodeID pgtype.UUID        `json:"from_node_id"`
+	ToNodeID   pgtype.UUID        `json:"to_node_id"`
+	Type       string             `json:"type"`
+	Metadata   []byte             `json:"metadata"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type OrchestrationEvent struct {
+	ID        pgtype.UUID        `json:"id"`
+	PlanID    pgtype.UUID        `json:"plan_id"`
+	NodeID    pgtype.UUID        `json:"node_id"`
+	TaskID    pgtype.UUID        `json:"task_id"`
+	EventType string             `json:"event_type"`
+	ActorType string             `json:"actor_type"`
+	ActorID   pgtype.UUID        `json:"actor_id"`
+	Payload   []byte             `json:"payload"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type OrchestrationNode struct {
+	ID                 pgtype.UUID        `json:"id"`
+	PlanID             pgtype.UUID        `json:"plan_id"`
+	Type               string             `json:"type"`
+	Title              string             `json:"title"`
+	Description        pgtype.Text        `json:"description"`
+	Status             string             `json:"status"`
+	AssigneeAgentID    pgtype.UUID        `json:"assignee_agent_id"`
+	InputContract      []byte             `json:"input_contract"`
+	OutputContract     []byte             `json:"output_contract"`
+	EvaluatorPolicy    []byte             `json:"evaluator_policy"`
+	RetryPolicy        []byte             `json:"retry_policy"`
+	RuntimeConstraints []byte             `json:"runtime_constraints"`
+	AttemptCount       int32              `json:"attempt_count"`
+	MaxAttempts        int32              `json:"max_attempts"`
+	StartedAt          pgtype.Timestamptz `json:"started_at"`
+	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+}
+
+type OrchestrationPlan struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	SourceType    string             `json:"source_type"`
+	SourceID      pgtype.UUID        `json:"source_id"`
+	Objective     string             `json:"objective"`
+	Status        string             `json:"status"`
+	Policy        []byte             `json:"policy"`
+	Metadata      []byte             `json:"metadata"`
+	CreatedByType pgtype.Text        `json:"created_by_type"`
+	CreatedByID   pgtype.UUID        `json:"created_by_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type PersonalAccessToken struct {

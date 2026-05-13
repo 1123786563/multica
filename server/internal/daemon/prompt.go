@@ -55,6 +55,14 @@ func buildOrchestrationNodePrompt(task Task) string {
 	b.WriteString(formatRawJSON(ctx.InputContract))
 	b.WriteString("\n\nOutput Contract:\n")
 	b.WriteString(formatRawJSON(ctx.OutputContract))
+	if strings.TrimSpace(ctx.PriorEvidenceSummary) != "" {
+		b.WriteString("\n\nPrior Evidence Summary:\n")
+		b.WriteString(ctx.PriorEvidenceSummary)
+	}
+	if strings.TrimSpace(ctx.ChangeRequest) != "" {
+		b.WriteString("\n\nChange Request For This Retry:\n")
+		b.WriteString(ctx.ChangeRequest)
+	}
 	b.WriteString("\n\nAcceptance Criteria:\n")
 	b.WriteString(formatRawJSON(ctx.AcceptanceCriteria))
 	b.WriteString("\n\nContext Refs:\n")
@@ -69,6 +77,7 @@ func buildOrchestrationNodePrompt(task Task) string {
 	b.WriteString("7. Do not add any prose before or after the JSON.\n\n")
 	b.WriteString("Required final JSON shape:\n")
 	b.WriteString(`{
+  "schema_version": 1,
   "status": "completed",
   "summary": "What you did.",
   "artifacts": [{"type": "diff|file|log|test_result|decision|command_output|summary", "uri": "", "content": {}, "metadata": {}}],

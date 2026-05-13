@@ -106,17 +106,26 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
     mutationFn: (nodeId: string) => api.retryOrchestrationNode(nodeId),
     onSuccess: refresh,
   });
-  const cancelRun = useMutation({
-    mutationFn: (runId: string) => api.cancelOrchestrationPlan(runId),
+  const approveNode = useMutation({
+    mutationFn: (nodeId: string) => api.approveOrchestrationNode(nodeId),
     onSuccess: refresh,
   });
-  const run = data?.run;
-  if (!run) return null;
+  const requestChangesNode = useMutation({
+    mutationFn: ({ nodeId, changeRequest }: { nodeId: string; changeRequest: string }) =>
+      api.requestChangesOrchestrationNode(nodeId, changeRequest),
+    onSuccess: refresh,
+  });
+  const cancelRun = useMutation({
+    mutationFn: (planId: string) => api.cancelOrchestrationPlan(planId),
+    onSuccess: refresh,
+  });
+  const plan = data?.plans[0];
+  if (!plan) return null;
   const nodes = data?.nodes ?? [];
   const currentNode =
     nodes.find((node) => !["completed", "skipped", "cancelled"].includes(node.status)) ??
     nodes[nodes.length - 1];
-  const evidence = data?.evidence ?? [];
+  const artifacts = data?.artifacts ?? [];
   const events = data?.events ?? [];
   const latestNodeEvent = [...events]
     .reverse()
@@ -127,9 +136,9 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
         "node.failed",
         "node.approved",
         "node.retried",
-      ].includes(event.type),
+      ].includes(event.event_type),
     );
-  const latestNodeMessage = latestNodeEvent?.message ?? null;
+  const latestNodeMessage = latestNodeEvent ? orchestrationEventMessage(latestNodeEvent.payload) : null;
   const formatTimestamp = (value: string | null | undefined) => {
     if (!value) return "—";
     return new Date(value).toLocaleString("en-US", {
@@ -142,7 +151,16 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
   const canRetry = currentNode
     ? ["failed"].includes(currentNode.status)
     : false;
-  const canCancel = !["succeeded", "failed", "cancelled"].includes(run.status);
+  const canApprove = Boolean(
+    currentNode?.permissions?.can_approve &&
+      currentNode?.summary?.recommended_action === "approve",
+  );
+  const canRequestChanges = Boolean(
+    currentNode?.permissions?.can_request_changes &&
+      currentNode?.summary?.recommended_action === "approve",
+  );
+  const canCancel = !["completed", "failed", "cancelled"].includes(plan.status);
+  const latestApprovalHistory = currentNode?.approval_history?.[currentNode.approval_history.length - 1];
 
   return (
     <div>
@@ -157,31 +175,65 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
       {open && (
         <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pl-2">
           <PropRow label={t(($) => $.orchestration.status)}>
-            <span className="text-muted-foreground">{run.status}</span>
+            <span className="text-muted-foreground">{plan.status}</span>
           </PropRow>
           {currentNode && (
             <>
               <PropRow label={t(($) => $.orchestration.current_node)}>
-                <span className="truncate text-muted-foreground">{currentNode.key}</span>
+                <span className="truncate text-muted-foreground">{currentNode.title || currentNode.type}</span>
               </PropRow>
               <PropRow label={t(($) => $.orchestration.current_status)}>
                 <span className="truncate text-muted-foreground">{currentNode.status}</span>
               </PropRow>
               <PropRow label={t(($) => $.orchestration.attempts)}>
                 <span className="text-muted-foreground">
-                  {currentNode.attempt}
+                  {currentNode.attempt_count}
                 </span>
               </PropRow>
             </>
           )}
           <PropRow label={t(($) => $.orchestration.artifacts)}>
             <span className="truncate text-muted-foreground">
-              {evidence.length > 0 ? evidence.length : "0"}
+              {artifacts.length > 0 ? artifacts.length : "0"}
             </span>
           </PropRow>
           {latestNodeMessage && (
             <PropRow label={t(($) => $.orchestration.latest_event)}>
               <span className="truncate text-muted-foreground">{latestNodeMessage}</span>
+            </PropRow>
+          )}
+          {currentNode?.summary && (
+            <>
+              <PropRow label={t(($) => $.orchestration.why_this_state)}>
+                <span className="text-muted-foreground">
+                  {t(($) => $.orchestration.reason[currentNode.summary?.reason_code as keyof typeof $.orchestration.reason]) || currentNode.summary.reason_title}
+                </span>
+              </PropRow>
+              <PropRow label={t(($) => $.orchestration.recommended_action)}>
+                <span className="text-muted-foreground">
+                  {t(($) => $.orchestration.action[currentNode.summary?.recommended_action as keyof typeof $.orchestration.action]) || currentNode.summary.recommended_action}
+                </span>
+              </PropRow>
+              {currentNode.summary.latest_agent_summary && (
+                <PropRow label={t(($) => $.orchestration.latest_agent_summary)}>
+                  <span className="whitespace-pre-wrap text-muted-foreground">{currentNode.summary.latest_agent_summary}</span>
+                </PropRow>
+              )}
+              {currentNode.summary.reason_detail && (
+                <PropRow label={t(($) => $.orchestration.reason_detail)}>
+                  <span className="whitespace-pre-wrap text-muted-foreground">{currentNode.summary.reason_detail}</span>
+                </PropRow>
+              )}
+            </>
+          )}
+          {currentNode?.summary?.prior_evidence_summary && (
+            <PropRow label={t(($) => $.orchestration.prior_evidence_summary)}>
+              <span className="whitespace-pre-wrap text-muted-foreground">{currentNode.summary.prior_evidence_summary}</span>
+            </PropRow>
+          )}
+          {latestApprovalHistory?.change_request && (
+            <PropRow label={t(($) => $.orchestration.change_request)}>
+              <span className="whitespace-pre-wrap text-muted-foreground">{latestApprovalHistory.change_request}</span>
             </PropRow>
           )}
           {nodes.length > 0 && (
@@ -194,13 +246,21 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
                   <div key={node.id} className="rounded-md border border-border/60 px-2.5 py-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="truncate text-xs font-medium text-foreground">{node.key}</div>
+                        <div className="truncate text-xs font-medium text-foreground">{node.title || node.type}</div>
                         <div className="text-[11px] text-muted-foreground">
-                          {node.kind} · {node.status}
+                          {node.type} · {node.status}
+                        </div>
+                        {node.linked_task_id && (
+                          <div className="text-[11px] text-muted-foreground">
+                            {node.linked_task_id}
+                          </div>
+                        )}
+                        <div className="text-[11px] text-muted-foreground">
+                          {node.artifact_count ?? 0} {node.artifact_count === 1 ? "evidence" : "evidence"}
                         </div>
                       </div>
                       <div className="shrink-0 text-[11px] text-muted-foreground">
-                        {node.attempt}
+                        {node.attempt_count}
                       </div>
                     </div>
                   </div>
@@ -218,9 +278,9 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
                   <div key={event.id} className="rounded-md border border-border/60 px-2.5 py-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="truncate text-xs font-medium text-foreground">{event.type}</div>
+                        <div className="truncate text-xs font-medium text-foreground">{event.event_type}</div>
                         <div className="text-[11px] text-muted-foreground">
-                          {event.message ?? (event.node_id ? `${t(($) => $.orchestration.node_ref)} ${event.node_id}` : t(($) => $.orchestration.plan_scope))}
+                          {orchestrationEventMessage(event.payload) ?? (event.node_id ? `${t(($) => $.orchestration.node_ref)} ${event.node_id}` : t(($) => $.orchestration.plan_scope))}
                         </div>
                       </div>
                       <div className="shrink-0 text-[11px] text-muted-foreground">
@@ -232,19 +292,19 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
               </div>
             </div>
           )}
-          {evidence.length > 0 && (
+          {artifacts.length > 0 && (
             <div className="col-span-2 mt-3 space-y-1.5">
               <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {t(($) => $.orchestration.artifact_list)}
               </div>
               <div className="space-y-1.5">
-                {evidence.map((item) => (
+                {artifacts.map((item) => (
                   <div key={item.id} className="rounded-md border border-border/60 px-2.5 py-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="truncate text-xs font-medium text-foreground">{item.kind}</div>
+                        <div className="truncate text-xs font-medium text-foreground">{item.type}</div>
                         <div className="text-[11px] text-muted-foreground">
-                          {item.summary ?? (item.node_id ? `${t(($) => $.orchestration.node_ref)} ${item.node_id}` : t(($) => $.orchestration.plan_scope))}
+                          {orchestrationArtifactSummary(item.content) ?? (item.node_id ? `${t(($) => $.orchestration.node_ref)} ${item.node_id}` : t(($) => $.orchestration.plan_scope))}
                         </div>
                       </div>
                       <div className="shrink-0 text-[11px] text-muted-foreground">
@@ -256,16 +316,36 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
               </div>
             </div>
           )}
-          {(canRetry || canCancel) && (
+          {(canApprove || canRequestChanges || canRetry || canCancel) && (
             <div className="col-span-2 mt-2 flex flex-wrap gap-1.5">
+              {canApprove && currentNode && (
+                <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => approveNode.mutate(currentNode.id)} disabled={approveNode.isPending}>
+                  {t(($) => $.orchestration.approve)}
+                </Button>
+              )}
+              {canRequestChanges && currentNode && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1 px-2 text-xs"
+                  onClick={() => {
+                    const changeRequest = window.prompt(t(($) => $.orchestration.request_changes_prompt));
+                    if (!changeRequest || !changeRequest.trim()) return;
+                    requestChangesNode.mutate({ nodeId: currentNode.id, changeRequest: changeRequest.trim() });
+                  }}
+                  disabled={requestChangesNode.isPending}
+                >
+                  {t(($) => $.orchestration.request_changes)}
+                </Button>
+              )}
               {canRetry && currentNode && (
                 <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => retryNode.mutate(currentNode.id)} disabled={retryNode.isPending}>
                   <RotateCcw className="h-3.5 w-3.5" />
                   {t(($) => $.orchestration.retry)}
                 </Button>
               )}
-              {canCancel && run && (
-                <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs text-muted-foreground" onClick={() => cancelRun.mutate(run.id)} disabled={cancelRun.isPending}>
+              {canCancel && plan && (
+                <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs text-muted-foreground" onClick={() => cancelRun.mutate(plan.id)} disabled={cancelRun.isPending}>
                   <XCircle className="h-3.5 w-3.5" />
                   {t(($) => $.orchestration.cancel)}
                 </Button>
@@ -276,6 +356,16 @@ function OrchestrationSection({ issueId, open, onOpenChange }: { issueId: string
       )}
     </div>
   );
+}
+
+function orchestrationEventMessage(payload: Record<string, unknown>): string | null {
+  const message = payload.message ?? payload.summary ?? payload.reason;
+  return typeof message === "string" && message.trim() ? message : null;
+}
+
+function orchestrationArtifactSummary(content: Record<string, unknown>): string | null {
+  const summary = content.summary ?? content.message;
+  return typeof summary === "string" && summary.trim() ? summary : null;
 }
 
 function formatActivity(

@@ -797,6 +797,13 @@ export class ApiClient {
     await this.fetch(`/api/orchestration/nodes/${nodeId}/approve`, { method: "POST" });
   }
 
+  async requestChangesOrchestrationNode(nodeId: string, change_request: string): Promise<AgentTask> {
+    return this.fetch(`/api/orchestration/nodes/${nodeId}/request-changes`, {
+      method: "POST",
+      body: JSON.stringify({ change_request }),
+    });
+  }
+
   async retryOrchestrationNode(nodeId: string): Promise<AgentTask> {
     return this.fetch(`/api/orchestration/nodes/${nodeId}/retry`, { method: "POST" });
   }

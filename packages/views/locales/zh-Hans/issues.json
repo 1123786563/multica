@@ -239,6 +239,8 @@
     "evaluator": "评估",
     "latest_event": "最新事件",
     "latest_agent_summary": "最新智能体摘要",
+    "prior_evidence_summary": "上一轮证据摘要",
+    "change_request": "修改要求",
     "reason_detail": "原因详情",
     "last_updated": "最近更新",
     "nodes": "节点",
@@ -246,6 +248,8 @@
     "node_ref": "节点",
     "plan_scope": "计划",
     "approve": "批准",
+    "request_changes": "要求修改",
+    "request_changes_prompt": "请输入修改要求",
     "retry": "重试",
     "cancel": "取消",
     "action": {

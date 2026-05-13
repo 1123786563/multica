@@ -1,6 +1,6 @@
 # WebSocket refresh keeps Issue Detail orchestration state current
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: Medium
 
@@ -12,12 +12,12 @@ This slice should integrate with the existing realtime conventions and avoid dup
 
 ## Acceptance criteria
 
-- [ ] The server emits `orchestration:updated` after committed orchestration changes that affect Issue Detail.
-- [ ] The event payload includes at least `issue_id`, `run_id`, and `changed_at`.
-- [ ] The frontend/core realtime layer invalidates the issue orchestration query when the event arrives.
-- [ ] Existing `task:message` behavior remains responsible for live Agent Task messages.
-- [ ] No run/node/event/evidence server state is stored in Zustand; only local UI state may be stored there.
-- [ ] Tests cover server event emission after commit, client query invalidation, and no direct Zustand writes for orchestration facts.
+- [x] The server emits `orchestration:updated` after committed orchestration changes that affect Issue Detail.
+- [x] The event payload includes at least `issue_id`, `run_id`, and `changed_at`.
+- [x] The frontend/core realtime layer invalidates the issue orchestration query when the event arrives.
+- [x] Existing `task:message` behavior remains responsible for live Agent Task messages.
+- [x] No run/node/event/evidence server state is stored in Zustand; only local UI state may be stored there.
+- [x] Tests cover server event emission after commit, client query invalidation, and no direct Zustand writes for orchestration facts.
 
 ## Agent / human ownership
 

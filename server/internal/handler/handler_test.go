@@ -79,6 +79,26 @@ func TestMain(m *testing.M) {
 }
 
 func setupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, string, error) {
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM orchestration_artifact;
+		DELETE FROM orchestration_event;
+		DELETE FROM orchestration_edge;
+		DELETE FROM orchestration_node;
+		DELETE FROM orchestration_plan;
+	`); err != nil {
+		return "", "", err
+	}
+
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE orchestration_node
+		    DROP CONSTRAINT IF EXISTS orchestration_node_type_check;
+		ALTER TABLE orchestration_node
+		    ADD CONSTRAINT orchestration_node_type_check
+		    CHECK (type IN ('plan', 'execute', 'verify'));
+	`); err != nil {
+		return "", "", err
+	}
+
 	if err := cleanupHandlerTestFixture(ctx, pool); err != nil {
 		return "", "", err
 	}
@@ -94,8 +114,8 @@ func setupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, s
 
 	var workspaceID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO workspace (name, slug, description, issue_prefix)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO workspace (name, slug, description, issue_prefix, settings)
+		VALUES ($1, $2, $3, $4, '{"orchestration_enabled": true}'::jsonb)
 		RETURNING id
 	`, "Handler Tests", handlerTestWorkspaceSlug, "Temporary workspace for handler tests", "HAN").Scan(&workspaceID); err != nil {
 		return "", "", err
@@ -721,6 +741,10 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 
 	ctx := context.Background()
 	agentID := createHandlerTestAgent(t, "Orchestration Test Agent", []byte(`{}`))
+	skillID := insertHandlerTestSkill(t, "orchestration-runtime-adapter-skill", "# Runtime adapter skill\nUse existing task lifecycle.")
+	if _, err := testPool.Exec(ctx, `INSERT INTO agent_skill (agent_id, skill_id) VALUES ($1, $2)`, agentID, skillID); err != nil {
+		t.Fatalf("attach skill to orchestration agent: %v", err)
+	}
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
@@ -764,7 +788,7 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 		t.Fatalf("list orchestration nodes: %v", err)
 	}
 	if len(nodes) != 3 {
-		t.Fatalf("expected inspect/implement/test nodes, got %d", len(nodes))
+		t.Fatalf("expected plan/execute/verify nodes, got %d", len(nodes))
 	}
 	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
 		t.Helper()
@@ -776,14 +800,14 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 		t.Fatalf("missing %s node", nodeType)
 		return db.OrchestrationNode{}
 	}
-	inspectNode := nodeByType(nodes, "inspect")
-	implementNode := nodeByType(nodes, "implement")
-	testNode := nodeByType(nodes, "test")
-	if inspectNode.Status != "dispatched" || inspectNode.AttemptCount != 1 {
-		t.Fatalf("expected dispatched inspect node with one attempt, got status=%q attempts=%d", inspectNode.Status, inspectNode.AttemptCount)
+	planNode := nodeByType(nodes, "plan")
+	executeNode := nodeByType(nodes, "execute")
+	verifyNode := nodeByType(nodes, "verify")
+	if planNode.Status != "dispatched" || planNode.AttemptCount != 1 {
+		t.Fatalf("expected dispatched plan node with one attempt, got status=%q attempts=%d", planNode.Status, planNode.AttemptCount)
 	}
-	if implementNode.Status != "pending" || testNode.Status != "pending" {
-		t.Fatalf("downstream nodes should wait on graph dependencies, got %q/%q", implementNode.Status, testNode.Status)
+	if executeNode.Status != "pending" || verifyNode.Status != "pending" {
+		t.Fatalf("downstream nodes should wait on graph dependencies, got %q/%q", executeNode.Status, verifyNode.Status)
 	}
 
 	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
@@ -797,8 +821,20 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 	if !ok {
 		t.Fatalf("queued task does not carry orchestration context: %s", string(tasks[0].Context))
 	}
-	if taskCtx.OrchestrationPlanID != uuidToString(plans[0].ID) || taskCtx.OrchestrationNodeID != uuidToString(inspectNode.ID) {
+	if taskCtx.OrchestrationPlanID != uuidToString(plans[0].ID) || taskCtx.OrchestrationNodeID != uuidToString(planNode.ID) {
 		t.Fatalf("task context does not point to created plan/node: %#v", taskCtx)
+	}
+	if taskCtx.OrchestrationRunID == "" {
+		t.Fatalf("task context should include orchestration run id: %#v", taskCtx)
+	}
+	if taskCtx.NodeType != "plan" || taskCtx.Attempt != 1 {
+		t.Fatalf("task context should identify node type and attempt, got node_type=%q attempt=%d", taskCtx.NodeType, taskCtx.Attempt)
+	}
+	if len(taskCtx.ExpectedResultSchema) == 0 {
+		t.Fatalf("task context should include expected result schema")
+	}
+	if !json.Valid(taskCtx.ExpectedResultSchema) {
+		t.Fatalf("expected result schema should be valid JSON: %s", string(taskCtx.ExpectedResultSchema))
 	}
 
 	assertOrchestrationEvents := func(required []string) {
@@ -818,12 +854,43 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 		}
 	}
 
-	claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, tasks[0].RuntimeID)
-	if err != nil {
-		t.Fatalf("claim orchestration task: %v", err)
+	claimW := httptest.NewRecorder()
+	claimReq := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+uuidToString(tasks[0].RuntimeID)+"/claim", nil, testWorkspaceID, "test-orchestration-claim")
+	claimReq = withURLParam(claimReq, "runtimeId", uuidToString(tasks[0].RuntimeID))
+	testHandler.ClaimTaskByRuntime(claimW, claimReq)
+	if claimW.Code != http.StatusOK {
+		t.Fatalf("ClaimTaskByRuntime: expected 200, got %d: %s", claimW.Code, claimW.Body.String())
 	}
-	if claimed == nil || uuidToString(claimed.ID) != uuidToString(tasks[0].ID) {
-		t.Fatalf("claim orchestration task: expected %s, got %#v", uuidToString(tasks[0].ID), claimed)
+	var claimResp struct {
+		Task *struct {
+			ID    string `json:"id"`
+			Agent *struct {
+				Skills []struct {
+					Name    string `json:"name"`
+					Content string `json:"content"`
+				} `json:"skills"`
+			} `json:"agent"`
+			Orchestration service.OrchestrationTaskContext `json:"orchestration"`
+		} `json:"task"`
+	}
+	if err := json.NewDecoder(claimW.Body).Decode(&claimResp); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+	if claimResp.Task == nil || claimResp.Task.ID != uuidToString(tasks[0].ID) {
+		t.Fatalf("claim orchestration task: expected %s, got %#v", uuidToString(tasks[0].ID), claimResp.Task)
+	}
+	if claimResp.Task.Orchestration.OrchestrationNodeID != uuidToString(planNode.ID) || claimResp.Task.Orchestration.Attempt != 1 {
+		t.Fatalf("claim response should include orchestration node context, got %#v", claimResp.Task.Orchestration)
+	}
+	if claimResp.Task.Agent == nil || len(claimResp.Task.Agent.Skills) == 0 {
+		t.Fatalf("claim response should include agent-bound skill context")
+	}
+	if !strings.HasPrefix(claimResp.Task.Agent.Skills[0].Name, "orchestration-runtime-adapter-skill") {
+		t.Fatalf("unexpected claim skill context: %#v", claimResp.Task.Agent.Skills)
+	}
+	claimed, err := testHandler.Queries.GetAgentTask(ctx, tasks[0].ID)
+	if err != nil {
+		t.Fatalf("reload claimed orchestration task: %v", err)
 	}
 	started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
 	if err != nil {
@@ -845,9 +912,9 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload orchestration nodes: %v", err)
 	}
-	inspectNode = nodeByType(nodes, "inspect")
-	if inspectNode.Status != "dispatched" || inspectNode.AttemptCount != 2 {
-		t.Fatalf("failed evaluation should schedule retry, got status=%q attempts=%d", inspectNode.Status, inspectNode.AttemptCount)
+	planNode = nodeByType(nodes, "plan")
+	if planNode.Status != "dispatched" || planNode.AttemptCount != 2 {
+		t.Fatalf("failed evaluation should schedule retry, got status=%q attempts=%d", planNode.Status, planNode.AttemptCount)
 	}
 	plansAfterRetry, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
 		SourceType: "issue",
@@ -894,35 +961,46 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 	if claimedRetry == nil || uuidToString(claimedRetry.ID) != uuidToString(retryTask.ID) {
 		t.Fatalf("claim retry task: expected %s, got %#v", uuidToString(retryTask.ID), claimedRetry)
 	}
+	retryTaskCtx, ok := service.ParseOrchestrationTaskContext(claimedRetry.Context)
+	if !ok {
+		t.Fatalf("retry task does not carry orchestration context: %s", string(claimedRetry.Context))
+	}
+	if !strings.Contains(retryTaskCtx.PriorEvidenceSummary, "Kernel reason: evidence_insufficient") {
+		t.Fatalf("retry task should include prior evidence summary, got %#v", retryTaskCtx)
+	}
+	if !strings.Contains(retryTaskCtx.ChangeRequest, "Structured result payload did not satisfy the orchestration result contract.") {
+		t.Fatalf("retry task should include change request, got %#v", retryTaskCtx)
+	}
 	startedRetry, err := testHandler.TaskService.StartTask(ctx, claimedRetry.ID)
 	if err != nil {
 		t.Fatalf("start retry task: %v", err)
 	}
-	inspectResult := []byte(`{
+	planResult := []byte(`{
+		"schema_version": 1,
 		"status": "completed",
-		"summary": "Inspected the issue context and identified the implementation path.",
+		"summary": "Planned the issue context and identified the implementation path.",
 		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Structured result includes changed files and passing tests"}],
 		"confidence": 0.82
 	}`)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, startedRetry.ID, inspectResult, "", ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, startedRetry.ID, planResult, "", ""); err != nil {
 		t.Fatalf("complete orchestration task after structured result: %v", err)
 	}
 
 	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
 	if err != nil {
-		t.Fatalf("reload nodes after inspect completion: %v", err)
+		t.Fatalf("reload nodes after plan completion: %v", err)
 	}
-	inspectNode = nodeByType(nodes, "inspect")
-	implementNode = nodeByType(nodes, "implement")
-	testNode = nodeByType(nodes, "test")
-	if inspectNode.Status != "completed" || implementNode.Status != "dispatched" || testNode.Status != "pending" {
-		t.Fatalf("inspect completion should dispatch implement only, got %q/%q/%q", inspectNode.Status, implementNode.Status, testNode.Status)
+	planNode = nodeByType(nodes, "plan")
+	executeNode = nodeByType(nodes, "execute")
+	verifyNode = nodeByType(nodes, "verify")
+	if planNode.Status != "completed" || executeNode.Status != "dispatched" || verifyNode.Status != "pending" {
+		t.Fatalf("plan completion should dispatch execute only, got %q/%q/%q", planNode.Status, executeNode.Status, verifyNode.Status)
 	}
-	issueAfterInspect, err := testHandler.Queries.GetIssue(ctx, issueID)
+	issueAfterPlan, err := testHandler.Queries.GetIssue(ctx, issueID)
 	if err != nil {
-		t.Fatalf("reload issue after inspect: %v", err)
+		t.Fatalf("reload issue after plan: %v", err)
 	}
-	if issueAfterInspect.Status == "done" {
+	if issueAfterPlan.Status == "done" {
 		t.Fatal("issue must stay open until all plan nodes pass evaluation")
 	}
 
@@ -959,32 +1037,34 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 		}
 	}
 
-	implementResult := []byte(`{
+	executeResult := []byte(`{
+		"schema_version": 1,
 		"status": "completed",
 		"summary": "Implemented the requested orchestration behavior.",
 		"changed_files": ["server/internal/service/orchestrator.go"],
 		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Implementation result includes changed files"}],
 		"confidence": 0.82
 	}`)
-	completeQueuedNode(implementNode, implementResult)
+	completeQueuedNode(executeNode, executeResult)
 	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
 	if err != nil {
-		t.Fatalf("reload nodes after implement completion: %v", err)
+		t.Fatalf("reload nodes after execute completion: %v", err)
 	}
-	implementNode = nodeByType(nodes, "implement")
-	testNode = nodeByType(nodes, "test")
-	if implementNode.Status != "completed" || testNode.Status != "dispatched" {
-		t.Fatalf("implement completion should dispatch test, got implement=%q test=%q", implementNode.Status, testNode.Status)
+	executeNode = nodeByType(nodes, "execute")
+	verifyNode = nodeByType(nodes, "verify")
+	if executeNode.Status != "completed" || verifyNode.Status != "dispatched" {
+		t.Fatalf("execute completion should dispatch verify, got execute=%q verify=%q", executeNode.Status, verifyNode.Status)
 	}
 
-	testResult := []byte(`{
+	verifyResult := []byte(`{
+		"schema_version": 1,
 		"status": "completed",
 		"summary": "Verified the implementation against the acceptance criteria.",
 		"test_result": {"status": "passed", "passed": true},
 		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Test node reports passing test evidence"}],
 		"confidence": 0.82
 	}`)
-	completeQueuedNode(testNode, testResult)
+	completeQueuedNode(verifyNode, verifyResult)
 
 	finalPlan, err := testHandler.Queries.GetOrchestrationPlan(ctx, plans[0].ID)
 	if err != nil {
@@ -1006,14 +1086,53 @@ func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload final issue: %v", err)
 	}
-	if finalIssue.Status != "done" {
-		t.Fatalf("expected kernel to close issue after evaluator approval, got %q", finalIssue.Status)
+	if finalIssue.Status != "in_review" {
+		t.Fatalf("expected kernel to move issue to review after evaluator approval, got %q", finalIssue.Status)
+	}
+	if finalIssue.Status == "done" {
+		t.Fatal("kernel verification must not automatically mark issue done")
 	}
 	assertOrchestrationEvents([]string{
 		"evaluation.passed",
 		"node.completed",
 		"plan.completed",
 	})
+
+	getReq := withURLParam(newRequest(http.MethodGet, "/api/issues/"+created.ID+"/orchestration", nil), "id", created.ID)
+	getW := httptest.NewRecorder()
+	testHandler.GetIssueOrchestration(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("GetIssueOrchestration: expected 200, got %d: %s", getW.Code, getW.Body.String())
+	}
+	var orchestrationResp IssueOrchestrationResponse
+	if err := json.NewDecoder(getW.Body).Decode(&orchestrationResp); err != nil {
+		t.Fatalf("decode orchestration response: %v", err)
+	}
+	if len(orchestrationResp.Artifacts) == 0 {
+		t.Fatal("expected persisted node evidence artifacts in orchestration read API")
+	}
+	hasSummary, hasChangedFiles, hasTestResult, hasLinkedTask := false, false, false, false
+	for _, artifact := range orchestrationResp.Artifacts {
+		if artifact.TaskID != nil {
+			hasLinkedTask = true
+		}
+		switch artifact.Type {
+		case "summary":
+			hasSummary = true
+		case "diff":
+			var content struct {
+				ChangedFiles []string `json:"changed_files"`
+			}
+			if err := json.Unmarshal(artifact.Content, &content); err == nil && len(content.ChangedFiles) > 0 {
+				hasChangedFiles = true
+			}
+		case "test_result":
+			hasTestResult = true
+		}
+	}
+	if !hasSummary || !hasChangedFiles || !hasTestResult || !hasLinkedTask {
+		t.Fatalf("orchestration read API missing evidence fields: summary=%v changed_files=%v test_result=%v linked_task=%v artifacts=%+v", hasSummary, hasChangedFiles, hasTestResult, hasLinkedTask, orchestrationResp.Artifacts)
+	}
 }
 
 func TestDaemonCompleteTask_UsesExplicitStructuredResultForOrchestration(t *testing.T) {
@@ -1062,15 +1181,15 @@ func TestDaemonCompleteTask_UsesExplicitStructuredResultForOrchestration(t *test
 	if err != nil {
 		t.Fatalf("list orchestration nodes: %v", err)
 	}
-	var inspectNode db.OrchestrationNode
+	var planNode db.OrchestrationNode
 	for _, node := range nodes {
-		if node.Type == "inspect" {
-			inspectNode = node
+		if node.Type == "plan" {
+			planNode = node
 			break
 		}
 	}
-	if !inspectNode.ID.Valid {
-		t.Fatal("missing inspect node")
+	if !planNode.ID.Valid {
+		t.Fatal("missing plan node")
 	}
 
 	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
@@ -1092,8 +1211,9 @@ func TestDaemonCompleteTask_UsesExplicitStructuredResultForOrchestration(t *test
 	daemonReq := newDaemonTokenRequest("POST", "/api/daemon/tasks/"+uuidToString(started.ID)+"/complete", map[string]any{
 		"output": "human-readable terminal text",
 		"result": map[string]any{
+			"schema_version":    1,
 			"status":            "completed",
-			"summary":           "Inspected the issue context and identified the implementation path.",
+			"summary":           "Planned the issue context and identified the implementation path.",
 			"criteria_evidence": []map[string]any{{"criterion": "Structured result protocol is used", "evidence": "Explicit result payload satisfied the evaluator."}},
 			"confidence":        0.82,
 		},
@@ -1112,8 +1232,8 @@ func TestDaemonCompleteTask_UsesExplicitStructuredResultForOrchestration(t *test
 		t.Fatalf("reload nodes: %v", err)
 	}
 	for _, node := range nodes {
-		if node.ID == inspectNode.ID && node.Status != "completed" {
-			t.Fatalf("expected inspect node to complete from explicit result payload, got %q", node.Status)
+		if node.ID == planNode.ID && node.Status != "completed" {
+			t.Fatalf("expected plan node to complete from explicit result payload, got %q", node.Status)
 		}
 	}
 }
@@ -1126,14 +1246,12 @@ func TestIssueAssignedToAgent_OrchestrationFlagOffStillUsesOrchestrationPath(t *
 	ctx := context.Background()
 	agentID := createHandlerTestAgent(t, "Legacy Path Agent", []byte(`{}`))
 
-	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
-		t.Fatalf("disable orchestration setting: %v", err)
-	}
+	setHandlerTestOrchestrationEnabled(t, false)
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Orchestration path without flag",
-		"description":   "New agent-assigned issues should still create orchestration plans.",
+		"title":         "Legacy path without flag",
+		"description":   "Disabled workspaces should keep the existing direct task path.",
 		"status":        "todo",
 		"priority":      "medium",
 		"assignee_type": "agent",
@@ -1169,7 +1287,7 @@ func TestIssueAssignedToAgent_OrchestrationFlagOffStillUsesOrchestrationPath(t *
 		t.Fatalf("expected one orchestration task, got %d", len(tasks))
 	}
 	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("task should carry orchestration context even when flag is off: %s", string(tasks[0].Context))
+		t.Fatalf("orchestration task should carry orchestration context: %s", string(tasks[0].Context))
 	}
 }
 
@@ -1321,33 +1439,33 @@ func TestCreateIssueStopsAfterRetryExhaustionByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list orchestration nodes: %v", err)
 	}
-	inspectNode := nodeByType(nodes, "inspect")
-	completeQueuedNode(uuidToString(inspectNode.ID))
+	planNode := nodeByType(nodes, "plan")
+	completeQueuedNode(uuidToString(planNode.ID))
 
 	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
 	if err != nil {
 		t.Fatalf("reload nodes after first attempt: %v", err)
 	}
-	inspectNode = nodeByType(nodes, "inspect")
-	if inspectNode.AttemptCount != 2 {
-		t.Fatalf("expected retry to increment attempt count to 2, got %d", inspectNode.AttemptCount)
+	planNode = nodeByType(nodes, "plan")
+	if planNode.AttemptCount != 2 {
+		t.Fatalf("expected retry to increment attempt count to 2, got %d", planNode.AttemptCount)
 	}
-	if inspectNode.Status != "dispatched" {
-		t.Fatalf("expected inspect node dispatched after first failed evaluation, got %q", inspectNode.Status)
+	if planNode.Status != "dispatched" {
+		t.Fatalf("expected plan node dispatched after first failed evaluation, got %q", planNode.Status)
 	}
 
-	completeQueuedNode(uuidToString(inspectNode.ID))
+	completeQueuedNode(uuidToString(planNode.ID))
 
 	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
 	if err != nil {
 		t.Fatalf("reload nodes after retry exhaustion: %v", err)
 	}
-	inspectNode = nodeByType(nodes, "inspect")
-	if inspectNode.AttemptCount != inspectNode.MaxAttempts {
-		t.Fatalf("attempt_count=%d max_attempts=%d", inspectNode.AttemptCount, inspectNode.MaxAttempts)
+	planNode = nodeByType(nodes, "plan")
+	if planNode.AttemptCount != planNode.MaxAttempts {
+		t.Fatalf("attempt_count=%d max_attempts=%d", planNode.AttemptCount, planNode.MaxAttempts)
 	}
-	if inspectNode.Status != "failed" {
-		t.Fatalf("expected node failed after retry exhaustion, got %s", inspectNode.Status)
+	if planNode.Status != "failed" {
+		t.Fatalf("expected node failed after retry exhaustion, got %s", planNode.Status)
 	}
 
 	finalPlan, err := testHandler.Queries.GetOrchestrationPlan(ctx, plans[0].ID)
@@ -1363,22 +1481,55 @@ func TestCreateIssueStopsAfterRetryExhaustionByDefault(t *testing.T) {
 		t.Fatalf("list issue tasks after retry exhaustion: %v", err)
 	}
 	queuedCount := 0
-	queuedForInspect := 0
+	queuedForPlan := 0
 	for _, task := range tasks {
 		if task.Status != "queued" {
 			continue
 		}
 		queuedCount++
 		taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
-		if ok && taskCtx.OrchestrationNodeID == uuidToString(inspectNode.ID) {
-			queuedForInspect++
+		if ok && taskCtx.OrchestrationNodeID == uuidToString(planNode.ID) {
+			queuedForPlan++
 		}
 	}
-	if queuedForInspect != 0 {
-		t.Fatalf("expected no queued retry task after exhaustion, got %d", queuedForInspect)
+	if queuedForPlan != 0 {
+		t.Fatalf("expected no queued retry task after exhaustion, got %d", queuedForPlan)
 	}
 	if queuedCount != 0 {
 		t.Fatalf("expected no queued tasks after exhaustion, got %d", queuedCount)
+	}
+
+	getReq := withURLParam(newRequest(http.MethodGet, "/api/issues/"+created.ID+"/orchestration", nil), "id", created.ID)
+	getW := httptest.NewRecorder()
+	testHandler.GetIssueOrchestration(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("GetIssueOrchestration: expected 200, got %d: %s", getW.Code, getW.Body.String())
+	}
+	var orchestrationResp IssueOrchestrationResponse
+	if err := json.NewDecoder(getW.Body).Decode(&orchestrationResp); err != nil {
+		t.Fatalf("decode orchestration response after retry exhaustion: %v", err)
+	}
+	var planSummary *NodeSummaryDTO
+	for _, node := range orchestrationResp.Nodes {
+		if node.ID == uuidToString(planNode.ID) {
+			planSummary = node.Summary
+			break
+		}
+	}
+	if planSummary == nil {
+		t.Fatal("expected plan node summary after retry exhaustion")
+	}
+	if planSummary.ReasonCode != "retry_exhausted" {
+		t.Fatalf("expected retry_exhausted reason code, got %q", planSummary.ReasonCode)
+	}
+	if planSummary.LatestEvaluationStatus != "evidence_insufficient" {
+		t.Fatalf("expected evidence_insufficient latest evaluation status, got %q", planSummary.LatestEvaluationStatus)
+	}
+	if planSummary.RecommendedAction != "retry" {
+		t.Fatalf("expected retry recommended action, got %q", planSummary.RecommendedAction)
+	}
+	if !strings.Contains(planSummary.PriorEvidenceSummary, "Kernel reason: evidence_insufficient") {
+		t.Fatalf("expected prior evidence summary in read API, got %#v", planSummary)
 	}
 }
 
@@ -1465,12 +1616,12 @@ func TestOrchestrationFailTaskRoutesThroughKernelRetry(t *testing.T) {
 	if len(nodes) == 0 {
 		t.Fatal("expected orchestration nodes")
 	}
-	inspectNode := nodeByType(nodes, "inspect")
-	if inspectNode.AttemptCount != 2 {
-		t.Fatalf("expected failed attempt to consume retry budget, got attempt_count=%d", inspectNode.AttemptCount)
+	planNode := nodeByType(nodes, "plan")
+	if planNode.AttemptCount != 2 {
+		t.Fatalf("expected failed attempt to consume retry budget, got attempt_count=%d", planNode.AttemptCount)
 	}
-	if inspectNode.Status != "dispatched" {
-		t.Fatalf("expected retry node to be dispatched, got %q", inspectNode.Status)
+	if planNode.Status != "dispatched" {
+		t.Fatalf("expected retry node to be dispatched, got %q", planNode.Status)
 	}
 
 	events, err := testHandler.Queries.ListOrchestrationEventsByPlan(ctx, plans[0].ID)
@@ -1652,9 +1803,7 @@ func TestUpdateIssueAssignAgent_FlagOffStillUsesOrchestrationPath(t *testing.T) 
 	ctx := context.Background()
 	agentID := createHandlerTestAgent(t, "Update Orchestration Agent", []byte(`{}`))
 
-	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
-		t.Fatalf("disable orchestration setting: %v", err)
-	}
+	setHandlerTestOrchestrationEnabled(t, false)
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
@@ -1703,7 +1852,7 @@ func TestUpdateIssueAssignAgent_FlagOffStillUsesOrchestrationPath(t *testing.T) 
 		t.Fatalf("expected one orchestration task after agent assignment, got %d", len(tasks))
 	}
 	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("task should carry orchestration context after agent assignment: %s", string(tasks[0].Context))
+		t.Fatalf("orchestration task should carry orchestration context after agent assignment: %s", string(tasks[0].Context))
 	}
 }
 
@@ -1715,9 +1864,7 @@ func TestBatchUpdateIssuesAssignAgent_FlagOffStillUsesOrchestrationPath(t *testi
 	ctx := context.Background()
 	agentID := createHandlerTestAgent(t, "Batch Update Orchestration Agent", []byte(`{}`))
 
-	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
-		t.Fatalf("disable orchestration setting: %v", err)
-	}
+	setHandlerTestOrchestrationEnabled(t, false)
 
 	createIssue := func(title string) string {
 		t.Helper()
@@ -1775,7 +1922,7 @@ func TestBatchUpdateIssuesAssignAgent_FlagOffStillUsesOrchestrationPath(t *testi
 			t.Fatalf("expected one orchestration task for %s after batch assignment, got %d", rawID, len(tasks))
 		}
 		if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-			t.Fatalf("task should carry orchestration context for %s after batch assignment: %s", rawID, string(tasks[0].Context))
+			t.Fatalf("orchestration task should carry orchestration context for %s after batch assignment: %s", rawID, string(tasks[0].Context))
 		}
 	}
 }
@@ -3057,9 +3204,7 @@ func TestCommentTriggerAssignedAgent_FlagOffStillUsesOrchestrationPath(t *testin
 	ctx := context.Background()
 	agentID := createHandlerTestAgent(t, "On Comment Orchestration Agent", []byte(`{"triggers":["on_comment"]}`))
 
-	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
-		t.Fatalf("disable orchestration setting: %v", err)
-	}
+	setHandlerTestOrchestrationEnabled(t, false)
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
@@ -3125,7 +3270,7 @@ func TestCommentTriggerAssignedAgent_FlagOffStillUsesOrchestrationPath(t *testin
 		t.Fatalf("list issue tasks: %v", err)
 	}
 	if len(tasks) != 1 {
-		t.Fatalf("expected one task after comment trigger, got %d", len(tasks))
+		t.Fatalf("expected one orchestration task after comment trigger, got %d", len(tasks))
 	}
 	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
 		t.Fatalf("comment-triggered task should carry orchestration context: %s", string(tasks[0].Context))

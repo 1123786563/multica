@@ -1,6 +1,6 @@
 # Completed Agent Task records Node Evidence and verifies successfully
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: High
 
@@ -12,12 +12,12 @@ This slice should make `summary`, `changed_files`, `artifacts`, `tests`, and `ri
 
 ## Acceptance criteria
 
-- [ ] A completed linked Agent Task with `schema_version: 1` and valid evidence fields creates persisted Node Evidence.
-- [ ] Hard Check Verification succeeds when the result schema is valid, required fields are present, and risks do not require approval.
-- [ ] The execute/verify nodes and run reach successful terminal states with corresponding Kernel Events.
-- [ ] The Issue can move to `in_review`, but is not automatically moved to `done`.
-- [ ] The issue-scoped read API exposes evidence summary, latest summary, tests, artifacts, changed files, linked task id, and terminal run state.
-- [ ] Tests cover valid result parsing, evidence persistence, verification success, transaction consistency between state and Kernel Events, and Issue status coordination.
+- [x] A completed linked Agent Task with `schema_version: 1` and valid evidence fields creates persisted Node Evidence.
+- [x] Hard Check Verification succeeds when the result schema is valid, required fields are present, and risks do not require approval.
+- [x] The execute/verify nodes and run reach successful terminal states with corresponding Kernel Events.
+- [x] The Issue can move to `in_review`, but is not automatically moved to `done`.
+- [x] The issue-scoped read API exposes evidence summary, latest summary, tests, artifacts, changed files, linked task id, and terminal run state.
+- [x] Tests cover valid result parsing, evidence persistence, verification success, transaction consistency between state and Kernel Events, and Issue status coordination.
 
 ## Agent / human ownership
 

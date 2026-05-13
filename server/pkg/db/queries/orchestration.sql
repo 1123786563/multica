@@ -21,6 +21,14 @@ WHERE source_type = $1 AND source_id = $2
 ORDER BY created_at DESC
 LIMIT 1;
 
+-- name: LockActiveOrchestrationPlanBySource :one
+SELECT * FROM orchestration_plan
+WHERE source_type = $1 AND source_id = $2
+  AND status NOT IN ('completed', 'failed', 'cancelled')
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE;
+
 -- name: UpdateOrchestrationPlanStatus :exec
 UPDATE orchestration_plan SET status = $2, updated_at = now()
 WHERE id = $1;
@@ -88,6 +96,12 @@ UPDATE orchestration_node
 SET status = 'waiting_human', updated_at = now()
 WHERE id = $1;
 
+-- name: CancelActiveOrchestrationNodesByPlan :many
+UPDATE orchestration_node
+SET status = 'cancelled', completed_at = COALESCE(completed_at, now()), updated_at = now()
+WHERE plan_id = $1 AND status IN ('pending', 'ready', 'dispatched', 'running', 'evaluating', 'blocked', 'waiting_human')
+RETURNING *;
+
 -- name: CreateOrchestrationEvent :one
 INSERT INTO orchestration_event (plan_id, node_id, task_id, event_type, actor_type, actor_id, payload)
 VALUES ($1, sqlc.narg('node_id'), sqlc.narg('task_id'), $2, $3, sqlc.narg('actor_id'), $4)
@@ -115,4 +129,16 @@ INSERT INTO agent_task_queue (
     force_fresh_session
 )
 VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, COALESCE(sqlc.narg('force_fresh_session')::boolean, FALSE))
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session;
+RETURNING *;
+
+-- name: CancelActiveOrchestrationTasksByPlan :many
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now()
+WHERE orchestration_plan_id = $1 AND status IN ('queued', 'dispatched', 'running')
+RETURNING *;
+
+-- name: ListOrchestrationTasksByPlan :many
+SELECT *
+FROM agent_task_queue
+WHERE orchestration_plan_id = $1
+ORDER BY created_at ASC;

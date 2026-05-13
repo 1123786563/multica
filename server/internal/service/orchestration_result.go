@@ -50,6 +50,7 @@ type AgentResultArtifact struct {
 }
 
 type AgentStructuredResult struct {
+	SchemaVersion    int                   `json:"schema_version"`
 	Status           string                `json:"status"`
 	Summary          string                `json:"summary"`
 	Artifacts        []AgentResultArtifact `json:"artifacts"`
@@ -96,13 +97,20 @@ func ParseAgentResultPayload(raw []byte, opts ResultParseOptions) ResultValidati
 	result.Status = strings.TrimSpace(result.Status)
 
 	validation.Result = result
-	validation.Errors = validateAgentStructuredResult(result)
+	validation.Errors = validateAgentStructuredResult(result, validation.CompatibilityMode)
 	validation.Valid = len(validation.Errors) == 0
 	return validation
 }
 
-func validateAgentStructuredResult(result AgentStructuredResult) []ValidationError {
+func validateAgentStructuredResult(result AgentStructuredResult, compatibilityMode bool) []ValidationError {
 	var errs []ValidationError
+	if !compatibilityMode {
+		if result.SchemaVersion == 0 {
+			errs = append(errs, validationError("missing_schema_version", "schema_version", "schema_version is required"))
+		} else if result.SchemaVersion != 1 {
+			errs = append(errs, validationError("unsupported_schema_version", "schema_version", fmt.Sprintf("unsupported schema_version %d", result.SchemaVersion)))
+		}
+	}
 	status := strings.TrimSpace(result.Status)
 	if status == "" {
 		errs = append(errs, validationError("missing_status", "status", "status is required"))

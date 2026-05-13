@@ -62,18 +62,22 @@ type Task struct {
 }
 
 type OrchestrationContext struct {
-	Type                string          `json:"type,omitempty"`
-	OrchestrationPlanID string          `json:"orchestration_plan_id,omitempty"`
-	OrchestrationNodeID string          `json:"orchestration_node_id,omitempty"`
-	OrchestrationRunID  string          `json:"orchestration_run_id,omitempty"`
-	NodeType            string          `json:"node_type,omitempty"`
-	Objective           string          `json:"objective,omitempty"`
-	NodeTitle           string          `json:"node_title,omitempty"`
-	NodeDescription     string          `json:"node_description,omitempty"`
-	InputContract       json.RawMessage `json:"input_contract,omitempty"`
-	OutputContract      json.RawMessage `json:"output_contract,omitempty"`
-	AcceptanceCriteria  json.RawMessage `json:"acceptance_criteria,omitempty"`
-	ContextRefs         json.RawMessage `json:"context_refs,omitempty"`
+	Type                 string          `json:"type,omitempty"`
+	OrchestrationPlanID  string          `json:"orchestration_plan_id,omitempty"`
+	OrchestrationNodeID  string          `json:"orchestration_node_id,omitempty"`
+	OrchestrationRunID   string          `json:"orchestration_run_id,omitempty"`
+	NodeType             string          `json:"node_type,omitempty"`
+	Attempt              int32           `json:"attempt,omitempty"`
+	Objective            string          `json:"objective,omitempty"`
+	NodeTitle            string          `json:"node_title,omitempty"`
+	NodeDescription      string          `json:"node_description,omitempty"`
+	InputContract        json.RawMessage `json:"input_contract,omitempty"`
+	OutputContract       json.RawMessage `json:"output_contract,omitempty"`
+	ExpectedResultSchema json.RawMessage `json:"expected_result_schema,omitempty"`
+	PriorEvidenceSummary string          `json:"prior_evidence_summary,omitempty"`
+	ChangeRequest        string          `json:"change_request,omitempty"`
+	AcceptanceCriteria   json.RawMessage `json:"acceptance_criteria,omitempty"`
+	ContextRefs          json.RawMessage `json:"context_refs,omitempty"`
 }
 
 // AgentData holds agent details returned by the claim endpoint.

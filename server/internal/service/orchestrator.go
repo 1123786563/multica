@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -25,29 +28,35 @@ type Orchestrator struct {
 }
 
 type OrchestrationTaskContext struct {
-	Type                string          `json:"type"`
-	OrchestrationPlanID string          `json:"orchestration_plan_id"`
-	OrchestrationNodeID string          `json:"orchestration_node_id"`
-	OrchestrationRunID  string          `json:"orchestration_run_id"`
-	NodeType            string          `json:"node_type"`
-	Objective           string          `json:"objective"`
-	NodeTitle           string          `json:"node_title"`
-	NodeDescription     string          `json:"node_description,omitempty"`
-	InputContract       json.RawMessage `json:"input_contract,omitempty"`
-	OutputContract      json.RawMessage `json:"output_contract,omitempty"`
-	AcceptanceCriteria  json.RawMessage `json:"acceptance_criteria,omitempty"`
-	ContextRefs         json.RawMessage `json:"context_refs,omitempty"`
+	Type                 string          `json:"type"`
+	OrchestrationPlanID  string          `json:"orchestration_plan_id"`
+	OrchestrationNodeID  string          `json:"orchestration_node_id"`
+	OrchestrationRunID   string          `json:"orchestration_run_id"`
+	NodeType             string          `json:"node_type"`
+	Attempt              int32           `json:"attempt"`
+	Objective            string          `json:"objective"`
+	NodeTitle            string          `json:"node_title"`
+	NodeDescription      string          `json:"node_description,omitempty"`
+	InputContract        json.RawMessage `json:"input_contract,omitempty"`
+	OutputContract       json.RawMessage `json:"output_contract,omitempty"`
+	ExpectedResultSchema json.RawMessage `json:"expected_result_schema,omitempty"`
+	PriorEvidenceSummary string          `json:"prior_evidence_summary,omitempty"`
+	ChangeRequest        string          `json:"change_request,omitempty"`
+	AcceptanceCriteria   json.RawMessage `json:"acceptance_criteria,omitempty"`
+	ContextRefs          json.RawMessage `json:"context_refs,omitempty"`
 }
 
 type dispatchNodeInput struct {
-	Plan               db.OrchestrationPlan
-	Node               db.OrchestrationNode
-	Agent              db.Agent
-	IssueID            pgtype.UUID
-	Priority           int32
-	AcceptanceCriteria json.RawMessage
-	ContextRefs        json.RawMessage
-	ForceFreshSession  bool
+	Plan                 db.OrchestrationPlan
+	Node                 db.OrchestrationNode
+	Agent                db.Agent
+	IssueID              pgtype.UUID
+	Priority             int32
+	AcceptanceCriteria   json.RawMessage
+	ContextRefs          json.RawMessage
+	ForceFreshSession    bool
+	PriorEvidenceSummary string
+	ChangeRequest        string
 }
 
 type planNodeSpec struct {
@@ -103,7 +112,7 @@ func (o *Orchestrator) RerunIssue(ctx context.Context, issue db.Issue) (*db.Agen
 		SourceType: "issue",
 		SourceID:   issue.ID,
 	}); err == nil && existing.ID.Valid {
-		if err := o.CancelPlan(ctx, existing.ID); err != nil {
+		if err := o.CancelPlan(ctx, existing.ID, "kernel", pgtype.UUID{}); err != nil {
 			return nil, fmt.Errorf("cancel active plan: %w", err)
 		}
 	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -146,6 +155,21 @@ func (o *Orchestrator) startIssuePlan(ctx context.Context, issue db.Issue, force
 
 	var queuedTasks []db.AgentTaskQueue
 	err = o.runInTx(ctx, func(qtx *db.Queries) error {
+		// Lock any existing active plan row to prevent concurrent plan creation.
+		existing, err := qtx.LockActiveOrchestrationPlanBySource(ctx, db.LockActiveOrchestrationPlanBySourceParams{
+			SourceType: "issue",
+			SourceID:   issue.ID,
+		})
+		if err == nil && existing.ID.Valid {
+			o.Logger.Info("orchestration: active plan already exists (locked), skipping",
+				"plan_id", util.UUIDToString(existing.ID),
+				"issue_id", util.UUIDToString(issue.ID),
+			)
+			return nil
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lock active plan: %w", err)
+		}
+
 		plan, err := qtx.CreateOrchestrationPlan(ctx, db.CreateOrchestrationPlanParams{
 			WorkspaceID:   issue.WorkspaceID,
 			SourceType:    "issue",
@@ -158,6 +182,13 @@ func (o *Orchestrator) startIssuePlan(ctx context.Context, issue db.Issue, force
 			CreatedByID:   issue.CreatorID,
 		})
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				o.Logger.Info("orchestration: concurrent plan creation detected, skipping",
+					"issue_id", util.UUIDToString(issue.ID),
+				)
+				return nil
+			}
 			return fmt.Errorf("create plan: %w", err)
 		}
 		o.Logger.Info("orchestration: plan created",
@@ -431,7 +462,7 @@ func (o *Orchestrator) OnTaskFailedTx(ctx context.Context, qtx *db.Queries, task
 	return nil, nil
 }
 
-func (o *Orchestrator) RetryNode(ctx context.Context, nodeID pgtype.UUID) (*db.AgentTaskQueue, error) {
+func (o *Orchestrator) RetryNode(ctx context.Context, nodeID pgtype.UUID, actorType string, actorID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	node, err := o.Queries.GetOrchestrationNode(ctx, nodeID)
 	if err != nil {
 		return nil, err
@@ -471,7 +502,8 @@ func (o *Orchestrator) RetryNode(ctx context.Context, nodeID pgtype.UUID) (*db.A
 			NodeID:    node.ID,
 			TaskID:    task.ID,
 			EventType: "node.retry_requested",
-			ActorType: "kernel",
+			ActorType: actorType,
+			ActorID:   actorID,
 			Payload:   mustJSON(map[string]any{"task_id": util.UUIDToString(task.ID)}),
 		})
 		return err
@@ -483,7 +515,7 @@ func (o *Orchestrator) RetryNode(ctx context.Context, nodeID pgtype.UUID) (*db.A
 	return &task, nil
 }
 
-func (o *Orchestrator) ApproveNode(ctx context.Context, nodeID pgtype.UUID) error {
+func (o *Orchestrator) ApproveNode(ctx context.Context, nodeID pgtype.UUID, actorType string, actorID pgtype.UUID) error {
 	node, err := o.Queries.GetOrchestrationNode(ctx, nodeID)
 	if err != nil {
 		return err
@@ -501,7 +533,8 @@ func (o *Orchestrator) ApproveNode(ctx context.Context, nodeID pgtype.UUID) erro
 			PlanID:    plan.ID,
 			NodeID:    node.ID,
 			EventType: "node.approved",
-			ActorType: "kernel",
+			ActorType: actorType,
+			ActorID:   actorID,
 			Payload:   mustJSON(map[string]any{"reason": "manual_approval"}),
 		}); err != nil {
 			return err
@@ -522,7 +555,7 @@ func (o *Orchestrator) ApproveNode(ctx context.Context, nodeID pgtype.UUID) erro
 			return err
 		}
 		if plan.SourceType == "issue" {
-			if _, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: plan.SourceID, Status: "done"}); err != nil {
+			if _, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: plan.SourceID, Status: "in_review"}); err != nil {
 				return err
 			}
 		}
@@ -538,25 +571,198 @@ func (o *Orchestrator) ApproveNode(ctx context.Context, nodeID pgtype.UUID) erro
 	if err != nil {
 		return err
 	}
+	o.publishOrchestrationUpdated(ctx, plan)
 	for _, task := range downstreamTasks {
 		o.notifyTaskQueued(ctx, task)
 	}
 	return nil
 }
 
-func (o *Orchestrator) CancelPlan(ctx context.Context, planID pgtype.UUID) error {
-	return o.runInTx(ctx, func(qtx *db.Queries) error {
+func (o *Orchestrator) RequestNodeChanges(ctx context.Context, nodeID pgtype.UUID, changeRequest string, actorType string, actorID pgtype.UUID) (*db.AgentTaskQueue, error) {
+	node, err := o.Queries.GetOrchestrationNode(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := o.Queries.GetOrchestrationPlan(ctx, node.PlanID)
+	if err != nil {
+		return nil, err
+	}
+	if !node.AssigneeAgentID.Valid {
+		return nil, fmt.Errorf("node has no assignee")
+	}
+	agent, err := o.Queries.GetAgent(ctx, node.AssigneeAgentID)
+	if err != nil {
+		return nil, err
+	}
+	if !agent.RuntimeID.Valid {
+		return nil, fmt.Errorf("agent has no runtime")
+	}
+	changeRequest = strings.TrimSpace(changeRequest)
+	if changeRequest == "" {
+		return nil, fmt.Errorf("change_request is required")
+	}
+
+	var task db.AgentTaskQueue
+	err = o.runInTx(ctx, func(qtx *db.Queries) error {
+		if err := qtx.ReadyOrchestrationNode(ctx, nodeID); err != nil {
+			return err
+		}
+		t, err := o.dispatchNodeTask(ctx, qtx, dispatchNodeInput{
+			Plan:          plan,
+			Node:          node,
+			Agent:         agent,
+			IssueID:       plan.SourceID,
+			Priority:      0,
+			ChangeRequest: changeRequest,
+		})
+		if err != nil {
+			return err
+		}
+		task = t
+		if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+			PlanID:    plan.ID,
+			NodeID:    node.ID,
+			TaskID:    task.ID,
+			EventType: "node.change_requested",
+			ActorType: actorType,
+			ActorID:   actorID,
+			Payload: mustJSON(map[string]any{
+				"task_id":            util.UUIDToString(task.ID),
+				"change_request":     changeRequest,
+				"recommended_action": "request_changes",
+			}),
+		}); err != nil {
+			return err
+		}
+		return qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: plan.ID, Status: "running"})
+	})
+	if err != nil {
+		return nil, err
+	}
+	o.publishOrchestrationUpdated(ctx, plan)
+	o.notifyTaskQueued(ctx, task)
+	return &task, nil
+}
+
+func (o *Orchestrator) CancelPlan(ctx context.Context, planID pgtype.UUID, actorType string, actorID pgtype.UUID) error {
+	plan, err := o.Queries.GetOrchestrationPlan(ctx, planID)
+	if err != nil {
+		return err
+	}
+	var cancelledTasks []db.AgentTaskQueue
+	if err := o.runInTx(ctx, func(qtx *db.Queries) error {
 		if err := qtx.UpdateOrchestrationPlanStatus(ctx, db.UpdateOrchestrationPlanStatusParams{ID: planID, Status: "cancelled"}); err != nil {
 			return err
 		}
-		_, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+		nodes, err := qtx.CancelActiveOrchestrationNodesByPlan(ctx, planID)
+		if err != nil {
+			return err
+		}
+		for _, node := range nodes {
+			if _, err := qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
+				PlanID:    planID,
+				NodeID:    node.ID,
+				EventType: "node.cancelled",
+				ActorType: actorType,
+				ActorID:   actorID,
+				Payload: mustJSON(map[string]any{
+					"node_type": node.Type,
+				}),
+			}); err != nil {
+				return err
+			}
+		}
+		cancelledTasks, err = qtx.CancelActiveOrchestrationTasksByPlan(ctx, planID)
+		if err != nil {
+			return err
+		}
+		_, err = qtx.CreateOrchestrationEvent(ctx, db.CreateOrchestrationEventParams{
 			PlanID:    planID,
 			EventType: "plan.cancelled",
-			ActorType: "kernel",
-			Payload:   []byte(`{}`),
+			ActorType: actorType,
+			ActorID:   actorID,
+			Payload: mustJSON(map[string]any{
+				"cancelled_nodes": len(nodes),
+				"cancelled_tasks": len(cancelledTasks),
+			}),
 		})
 		return err
+	}); err != nil {
+		return err
+	}
+	if o.TaskSvc != nil {
+		o.TaskSvc.BroadcastCancelledTasks(ctx, cancelledTasks)
+	}
+	o.publishOrchestrationUpdated(ctx, plan)
+	return nil
+}
+
+func (o *Orchestrator) CancelActivePlanForIssue(ctx context.Context, issueID pgtype.UUID, actorType string, actorID pgtype.UUID) error {
+	plan, err := o.Queries.GetActiveOrchestrationPlanBySource(ctx, db.GetActiveOrchestrationPlanBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
 	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	return o.CancelPlan(ctx, plan.ID, actorType, actorID)
+}
+
+func (o *Orchestrator) RecoverPlan(ctx context.Context, planID pgtype.UUID) error {
+	plan, err := o.Queries.GetOrchestrationPlan(ctx, planID)
+	if err != nil {
+		return err
+	}
+	nodes, err := o.Queries.ListOrchestrationNodesByPlan(ctx, planID)
+	if err != nil {
+		return err
+	}
+	nodeByID := make(map[string]db.OrchestrationNode, len(nodes))
+	for _, node := range nodes {
+		nodeByID[util.UUIDToString(node.ID)] = node
+	}
+	tasks, err := o.Queries.ListOrchestrationTasksByPlan(ctx, planID)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		taskCtx, ok := ParseOrchestrationTaskContext(task.Context)
+		if !ok {
+			continue
+		}
+		node := nodeByID[taskCtx.OrchestrationNodeID]
+		if orchestrationNodeTerminal(node.Status) {
+			continue
+		}
+		switch task.Status {
+		case "completed":
+			if err := o.OnTaskCompleted(ctx, task, task.Result); err != nil {
+				return err
+			}
+		case "failed":
+			failureReason := task.FailureReason.String
+			if failureReason == "" {
+				failureReason = "recovery_failed_task"
+			}
+			if err := o.OnTaskFailed(ctx, task, failureReason); err != nil {
+				return err
+			}
+		}
+	}
+	o.publishOrchestrationUpdated(ctx, plan)
+	return nil
+}
+
+func orchestrationNodeTerminal(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "skipped", "waiting_human":
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQueue, rawResult []byte) error {
@@ -568,6 +774,10 @@ func (o *Orchestrator) OnTaskCompleted(ctx context.Context, task db.AgentTaskQue
 	}); err != nil {
 		return err
 	}
+	if task.IssueID.Valid {
+		o.publishOrchestrationUpdatedFromIssue(ctx, task.IssueID)
+	}
+	o.createAttentionCommentIfNeeded(ctx, task)
 	for _, task := range queuedTasks {
 		o.notifyTaskQueued(ctx, task)
 	}
@@ -754,7 +964,7 @@ func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, t
 			return nil, err
 		}
 		if task.IssueID.Valid {
-			if _, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: task.IssueID, Status: "done"}); err != nil {
+			if _, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: task.IssueID, Status: "in_review"}); err != nil {
 				return nil, err
 			}
 		}
@@ -825,13 +1035,15 @@ func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, t
 		}
 		agent := db.Agent{ID: task.AgentID, RuntimeID: task.RuntimeID}
 		next, err := o.dispatchNodeTask(ctx, qtx, dispatchNodeInput{
-			Plan:               db.OrchestrationPlan{ID: planID, Objective: taskCtx.Objective},
-			Node:               node,
-			Agent:              agent,
-			IssueID:            task.IssueID,
-			Priority:           task.Priority,
-			AcceptanceCriteria: taskCtx.AcceptanceCriteria,
-			ContextRefs:        taskCtx.ContextRefs,
+			Plan:                 db.OrchestrationPlan{ID: planID, Objective: taskCtx.Objective},
+			Node:                 node,
+			Agent:                agent,
+			IssueID:              task.IssueID,
+			Priority:             task.Priority,
+			AcceptanceCriteria:   taskCtx.AcceptanceCriteria,
+			ContextRefs:          taskCtx.ContextRefs,
+			PriorEvidenceSummary: buildRetryEvidenceSummary(result, validation, eval),
+			ChangeRequest:        buildRetryChangeRequest(eval),
 		})
 		if err != nil {
 			return nil, err
@@ -844,9 +1056,10 @@ func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, t
 			EventType: "node.retry_scheduled",
 			ActorType: "kernel",
 			Payload: mustJSON(map[string]any{
-				"previous_task_id": util.UUIDToString(task.ID),
-				"next_task_id":     util.UUIDToString(next.ID),
-				"reason":           reason,
+				"previous_task_id":       util.UUIDToString(task.ID),
+				"next_task_id":           util.UUIDToString(next.ID),
+				"reason":                 reason,
+				"prior_evidence_summary": buildRetryEvidenceSummary(result, validation, eval),
 			}),
 		})
 		return queuedTasks, err
@@ -887,34 +1100,26 @@ func (o *Orchestrator) OnTaskCompletedTx(ctx context.Context, qtx *db.Queries, t
 
 func buildPlanNodeSpecs(issue db.Issue, defaultOutputContract []byte) []planNodeSpec {
 	description := issue.Description
-	if issue.Priority == "urgent" || jsonHasContent(issue.AcceptanceCriteria) {
-		return []planNodeSpec{
-			{
-				Type:           "inspect",
-				Title:          "Inspect issue context: " + issue.Title,
-				Description:    description,
-				OutputContract: []byte(`{"required":["summary","criteria_evidence"]}`),
-			},
-			{
-				Type:           "implement",
-				Title:          "Implement issue: " + issue.Title,
-				Description:    description,
-				OutputContract: defaultOutputContract,
-			},
-			{
-				Type:           "test",
-				Title:          "Verify issue acceptance: " + issue.Title,
-				Description:    description,
-				OutputContract: []byte(`{"required":["summary","test_result","criteria_evidence"]}`),
-			},
-		}
+	return []planNodeSpec{
+		{
+			Type:           "plan",
+			Title:          "Plan issue: " + issue.Title,
+			Description:    description,
+			OutputContract: []byte(`{"required":["summary","criteria_evidence"]}`),
+		},
+		{
+			Type:           "execute",
+			Title:          "Execute issue: " + issue.Title,
+			Description:    description,
+			OutputContract: defaultOutputContract,
+		},
+		{
+			Type:           "verify",
+			Title:          "Verify issue: " + issue.Title,
+			Description:    description,
+			OutputContract: []byte(`{"required":["summary","test_result","criteria_evidence"]}`),
+		},
 	}
-	return []planNodeSpec{{
-		Type:           "implement",
-		Title:          "Implement issue: " + issue.Title,
-		Description:    description,
-		OutputContract: defaultOutputContract,
-	}}
 }
 
 func jsonHasContent(raw []byte) bool {
@@ -1029,19 +1234,24 @@ func (o *Orchestrator) dispatchNodeTask(ctx context.Context, qtx *db.Queries, in
 		return db.AgentTaskQueue{}, err
 	}
 	runID := pgtype.UUID{Bytes: runUUID, Valid: true}
+	attempt := in.Node.AttemptCount + 1
 	taskContext, err := json.Marshal(OrchestrationTaskContext{
-		Type:                orchestrationContextType,
-		OrchestrationPlanID: util.UUIDToString(in.Plan.ID),
-		OrchestrationNodeID: util.UUIDToString(in.Node.ID),
-		OrchestrationRunID:  util.UUIDToString(runID),
-		NodeType:            in.Node.Type,
-		Objective:           in.Plan.Objective,
-		NodeTitle:           in.Node.Title,
-		NodeDescription:     in.Node.Description.String,
-		InputContract:       json.RawMessage(in.Node.InputContract),
-		OutputContract:      json.RawMessage(in.Node.OutputContract),
-		AcceptanceCriteria:  in.AcceptanceCriteria,
-		ContextRefs:         in.ContextRefs,
+		Type:                 orchestrationContextType,
+		OrchestrationPlanID:  util.UUIDToString(in.Plan.ID),
+		OrchestrationNodeID:  util.UUIDToString(in.Node.ID),
+		OrchestrationRunID:   util.UUIDToString(runID),
+		NodeType:             in.Node.Type,
+		Attempt:              attempt,
+		Objective:            in.Plan.Objective,
+		NodeTitle:            in.Node.Title,
+		NodeDescription:      in.Node.Description.String,
+		InputContract:        json.RawMessage(in.Node.InputContract),
+		OutputContract:       json.RawMessage(in.Node.OutputContract),
+		ExpectedResultSchema: expectedResultSchemaForNode(in.Node),
+		PriorEvidenceSummary: strings.TrimSpace(in.PriorEvidenceSummary),
+		ChangeRequest:        strings.TrimSpace(in.ChangeRequest),
+		AcceptanceCriteria:   in.AcceptanceCriteria,
+		ContextRefs:          in.ContextRefs,
 	})
 	if err != nil {
 		return db.AgentTaskQueue{}, err
@@ -1129,9 +1339,200 @@ func nodeDispatchedPayload(taskID, runID string, attemptCount, maxAttempts int32
 	}
 }
 
+func expectedResultSchemaForNode(node db.OrchestrationNode) json.RawMessage {
+	if len(node.OutputContract) > 0 && json.Valid(node.OutputContract) {
+		return json.RawMessage(node.OutputContract)
+	}
+	return json.RawMessage(`{"required":["summary"]}`)
+}
+
+func buildRetryEvidenceSummary(result AgentStructuredResult, validation ResultValidation, eval EvaluationResult) string {
+	parts := make([]string, 0, 4)
+	if summary := strings.TrimSpace(result.Summary); summary != "" {
+		parts = append(parts, "Previous agent summary: "+summary)
+	}
+	if reason := strings.TrimSpace(eval.Reason); reason != "" {
+		parts = append(parts, "Kernel reason: "+reason)
+	}
+	if detail := strings.TrimSpace(eval.ReasonDetail); detail != "" {
+		parts = append(parts, "Kernel detail: "+detail)
+	}
+	if len(validation.Errors) > 0 {
+		errParts := make([]string, 0, len(validation.Errors))
+		for _, err := range validation.Errors {
+			msg := strings.TrimSpace(err.Code)
+			if field := strings.TrimSpace(err.Field); field != "" {
+				msg += "@" + field
+			}
+			if text := strings.TrimSpace(err.Message); text != "" {
+				if msg != "" {
+					msg += ": "
+				}
+				msg += text
+			}
+			if msg != "" {
+				errParts = append(errParts, msg)
+			}
+		}
+		if len(errParts) > 0 {
+			parts = append(parts, "Validation errors: "+strings.Join(errParts, "; "))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func buildRetryChangeRequest(eval EvaluationResult) string {
+	if detail := strings.TrimSpace(eval.ReasonDetail); detail != "" {
+		return detail
+	}
+	if reason := strings.TrimSpace(eval.Reason); reason != "" {
+		return "Address kernel evaluation failure: " + reason
+	}
+	return ""
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func (o *Orchestrator) createAttentionCommentIfNeeded(ctx context.Context, task db.AgentTaskQueue) {
+	if o == nil || o.TaskSvc == nil || !task.IssueID.Valid {
+		return
+	}
+	issue, err := o.Queries.GetIssue(ctx, task.IssueID)
+	if err != nil {
+		return
+	}
+	taskCtx, ok := ParseOrchestrationTaskContext(task.Context)
+	if !ok {
+		return
+	}
+	nodeID, err := util.ParseUUID(taskCtx.OrchestrationNodeID)
+	if err != nil {
+		return
+	}
+	node, err := o.Queries.GetOrchestrationNode(ctx, nodeID)
+	if err != nil {
+		return
+	}
+	events, err := o.Queries.ListOrchestrationEventsByPlan(ctx, node.PlanID)
+	if err != nil {
+		return
+	}
+	summary := BuildNodeSummaryFromRecords(node, events)
+	switch summary.ReasonCode {
+	case "waiting_for_approval":
+		var b strings.Builder
+		b.WriteString("Approval required\n\n")
+		b.WriteString("Recommended action: Approve\n\n")
+		if msg := strings.TrimSpace(summary.LatestAgentSummary); msg != "" {
+			b.WriteString(msg)
+			b.WriteString("\n\n")
+		}
+		if detail := strings.TrimSpace(summary.ReasonDetail); detail != "" {
+			b.WriteString(detail)
+		}
+		o.TaskSvc.createAgentComment(ctx, task.IssueID, task.AgentID, b.String(), "system", pgtype.UUID{})
+		o.ensureAttentionAudience(ctx, issue)
+	case "runtime_failed":
+		var b strings.Builder
+		b.WriteString("Runtime failed\n\n")
+		b.WriteString("Recommended action: Retry\n\n")
+		if msg := strings.TrimSpace(summary.LatestAgentSummary); msg != "" {
+			b.WriteString(msg)
+			b.WriteString("\n\n")
+		}
+		if detail := strings.TrimSpace(summary.ReasonDetail); detail != "" {
+			b.WriteString(detail)
+		}
+		o.TaskSvc.createAgentComment(ctx, task.IssueID, task.AgentID, b.String(), "system", pgtype.UUID{})
+		o.ensureAttentionAudience(ctx, issue)
+	case "retry_exhausted":
+		var b strings.Builder
+		b.WriteString("Retries exhausted\n\n")
+		b.WriteString("Recommended action: Retry\n\n")
+		if msg := strings.TrimSpace(summary.LatestAgentSummary); msg != "" {
+			b.WriteString(msg)
+			b.WriteString("\n\n")
+		}
+		if detail := strings.TrimSpace(summary.ReasonDetail); detail != "" {
+			b.WriteString(detail)
+		}
+		o.TaskSvc.createAgentComment(ctx, task.IssueID, task.AgentID, b.String(), "system", pgtype.UUID{})
+		o.ensureAttentionAudience(ctx, issue)
+	default:
+		return
+	}
+}
+
+func (o *Orchestrator) ensureAttentionAudience(ctx context.Context, issue db.Issue) {
+	if o == nil {
+		return
+	}
+	addMember := func(userID pgtype.UUID, reason string) {
+		if !userID.Valid {
+			return
+		}
+		_ = o.Queries.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
+			IssueID:  issue.ID,
+			UserType: "member",
+			UserID:   userID,
+			Reason:   reason,
+		})
+	}
+
+	if issue.CreatorType == "member" {
+		addMember(issue.CreatorID, "creator")
+	}
+	if issue.AssigneeType.Valid && issue.AssigneeType.String == "member" {
+		addMember(issue.AssigneeID, "assignee")
+	}
+
+	subscribers, err := o.Queries.ListIssueSubscribers(ctx, issue.ID)
+	if err != nil {
+		return
+	}
+	for _, subscriber := range subscribers {
+		if subscriber.UserType != "member" {
+			continue
+		}
+		addMember(subscriber.UserID, subscriber.Reason)
+	}
+}
+
+func (o *Orchestrator) publishOrchestrationUpdated(ctx context.Context, plan db.OrchestrationPlan) {
+	if o == nil || o.TaskSvc == nil || o.TaskSvc.Bus == nil {
+		return
+	}
+	if !plan.SourceID.Valid {
+		return
+	}
+	o.TaskSvc.Bus.Publish(events.Event{
+		Type:        "orchestration:updated",
+		WorkspaceID: util.UUIDToString(plan.WorkspaceID),
+		ActorType:   "system",
+		ActorID:     "",
+		Payload: map[string]any{
+			"issue_id":   util.UUIDToString(plan.SourceID),
+			"run_id":     util.UUIDToString(plan.ID),
+			"changed_at": time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+}
+
+func (o *Orchestrator) publishOrchestrationUpdatedFromIssue(ctx context.Context, issueID pgtype.UUID) {
+	if !issueID.Valid {
+		return
+	}
+	plan, err := o.Queries.GetActiveOrchestrationPlanBySource(ctx, db.GetActiveOrchestrationPlanBySourceParams{
+		SourceType: "issue",
+		SourceID:   issueID,
+	})
+	if err != nil {
+		return
+	}
+	o.publishOrchestrationUpdated(ctx, plan)
 }

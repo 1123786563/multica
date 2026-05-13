@@ -491,6 +491,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			r.Route("/api/orchestration", func(r chi.Router) {
 				r.Post("/nodes/{nodeId}/approve", h.ApproveOrchestrationNode)
+				r.Post("/nodes/{nodeId}/request-changes", h.RequestChangesOrchestrationNode)
 				r.Post("/nodes/{nodeId}/retry", h.RetryOrchestrationNode)
 				r.Post("/plans/{planId}/cancel", h.CancelOrchestrationPlan)
 			})

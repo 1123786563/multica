@@ -47,8 +47,8 @@ func (HardCheckEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (
 	if !input.Validation.Valid {
 		return EvaluationResult{
 			Pass:              false,
-			Status:            "invalid_result",
-			Reason:            "invalid_result",
+			Status:            "evidence_insufficient",
+			Reason:            "evidence_insufficient",
 			ReasonDetail:      "Structured result payload did not satisfy the orchestration result contract.",
 			RecommendedAction: "retry",
 			Score:             0,
@@ -93,6 +93,17 @@ func (HardCheckEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (
 			ReasonDetail: "Completed orchestration results must include a summary.",
 		}), nil
 	}
+	if len(result.Risks) > 0 {
+		return EvaluationResult{
+			Pass:              false,
+			Status:            "waiting_human",
+			Reason:            "risk_requires_approval",
+			ReasonDetail:      "Structured result reported risks that require human approval before orchestration can continue.",
+			RecommendedAction: "ask_human",
+			Risks:             result.Risks,
+			Score:             result.Confidence,
+		}, nil
+	}
 	if testResultFailed(result.TestResult) || artifactTestResultFailed(result.Artifacts) {
 		return retryableEvaluation(result, EvaluationResult{
 			Pass:         false,
@@ -112,7 +123,7 @@ func (HardCheckEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (
 	}
 
 	switch input.Node.Type {
-	case "implement", "fix":
+	case "execute":
 		if len(result.ChangedFiles) == 0 && !hasArtifactType(result.Artifacts, "diff") && !hasArtifactType(result.Artifacts, "file") {
 			return retryableEvaluation(result, EvaluationResult{
 				Pass:             false,
@@ -122,7 +133,7 @@ func (HardCheckEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (
 				MissingArtifacts: []string{"diff", "file"},
 			}), nil
 		}
-	case "test":
+	case "verify":
 		if len(result.TestResult) == 0 && !hasArtifactType(result.Artifacts, "test_result") {
 			return retryableEvaluation(result, EvaluationResult{
 				Pass:             false,
@@ -132,17 +143,7 @@ func (HardCheckEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (
 				MissingArtifacts: []string{"test_result"},
 			}), nil
 		}
-	case "review":
-		if !hasArtifactType(result.Artifacts, "review_result") {
-			return retryableEvaluation(result, EvaluationResult{
-				Pass:             false,
-				Status:           "failed",
-				Reason:           "missing_review_result",
-				ReasonDetail:     "Review nodes must include a review_result artifact.",
-				MissingArtifacts: []string{"review_result"},
-			}), nil
-		}
-	case "design":
+	case "plan":
 		if !hasArtifactType(result.Artifacts, "decision") && len(result.CriteriaEvidence) == 0 {
 			return retryableEvaluation(result, EvaluationResult{
 				Pass:             false,

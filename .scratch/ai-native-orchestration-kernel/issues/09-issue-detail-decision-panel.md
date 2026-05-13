@@ -1,6 +1,6 @@
 # Issue Detail renders the orchestration Decision Panel
 
-Status: ready-for-human
+Status: done
 Type: HITL
 Risk: Medium
 
@@ -12,12 +12,12 @@ This slice should use shared `packages/views` UI so web and desktop share behavi
 
 ## Acceptance criteria
 
-- [ ] Issue Detail shows a Decision Panel when orchestration data exists for the Issue.
-- [ ] Each node displays status, reason code, recommended action, latest summary, attempts, evidence count, and linked task status.
-- [ ] Users can expand node details to inspect Kernel Events, Node Evidence, and linked task/message references.
-- [ ] Approval controls render only when the server says the user has permission and a matching recommended action exists.
-- [ ] The UI uses shared views and respects existing package boundaries; web/desktop do not duplicate orchestration logic.
-- [ ] Frontend tests cover normal state, waiting approval, evidence insufficient, completed state, missing optional fields, and approval-control visibility.
+- [x] Issue Detail shows a Decision Panel when orchestration data exists for the Issue.
+- [x] Each node displays status, reason code, recommended action, latest summary, attempts, evidence count, and linked task status.
+- [x] Users can expand node details to inspect Kernel Events, Node Evidence, and linked task/message references.
+- [x] Approval controls render only when the server says the user has permission and a matching recommended action exists.
+- [x] The UI uses shared views and respects existing package boundaries; web/desktop do not duplicate orchestration logic.
+- [x] Frontend tests cover normal state, waiting approval, evidence insufficient, completed state, missing optional fields, and approval-control visibility.
 
 ## Agent / human ownership
 

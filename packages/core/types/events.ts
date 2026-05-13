@@ -64,6 +64,7 @@ export type WSEventType =
   | "pin:created"
   | "pin:deleted"
   | "pin:reordered"
+  | "orchestration:updated"
   | "invitation:created"
   | "invitation:accepted"
   | "invitation:declined"
@@ -325,4 +326,10 @@ export interface InvitationDeclinedPayload {
 export interface InvitationRevokedPayload {
   invitation_id: string;
   invitee_email: string;
+}
+
+export interface OrchestrationUpdatedPayload {
+  issue_id: string;
+  plan_id: string;
+  changed_at: string;
 }

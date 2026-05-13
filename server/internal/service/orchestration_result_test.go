@@ -4,6 +4,7 @@ import "testing"
 
 func TestParseAgentResultPayloadStructuredValid(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"completed",
 		"summary":"Implemented kernel evidence checks.",
 		"changed_files":["server/internal/service/orchestrator.go"],
@@ -24,6 +25,7 @@ func TestParseAgentResultPayloadStructuredValid(t *testing.T) {
 
 func TestParseAgentResultPayloadRejectsUnknownArtifactType(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"completed",
 		"summary":"done",
 		"artifacts":[{"type":"mystery","content":{}}],
@@ -40,6 +42,7 @@ func TestParseAgentResultPayloadRejectsUnknownArtifactType(t *testing.T) {
 
 func TestParseAgentResultPayloadRejectsInvalidConfidence(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"completed",
 		"summary":"done",
 		"confidence":1.2,
@@ -56,6 +59,7 @@ func TestParseAgentResultPayloadRejectsInvalidConfidence(t *testing.T) {
 
 func TestParseAgentResultPayloadRejectsCompletedWithoutSummary(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"completed",
 		"changed_files":["a.go"],
 		"criteria_evidence":[{"criterion":"c","evidence":"e"}]
@@ -94,8 +98,38 @@ func TestParseAgentResultPayloadRejectsLegacyWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestParseAgentResultPayloadRequiresSchemaVersionOne(t *testing.T) {
+	missing := ParseAgentResultPayload([]byte(`{
+		"status":"completed",
+		"summary":"done",
+		"changed_files":["a.go"],
+		"criteria_evidence":[{"criterion":"c","evidence":"e"}]
+	}`), ResultParseOptions{})
+	if missing.Valid {
+		t.Fatal("structured orchestration result without schema_version should be invalid")
+	}
+	if !hasValidationCode(missing.Errors, "missing_schema_version") {
+		t.Fatalf("expected missing_schema_version, got %#v", missing.Errors)
+	}
+
+	unknown := ParseAgentResultPayload([]byte(`{
+		"schema_version":2,
+		"status":"completed",
+		"summary":"done",
+		"changed_files":["a.go"],
+		"criteria_evidence":[{"criterion":"c","evidence":"e"}]
+	}`), ResultParseOptions{})
+	if unknown.Valid {
+		t.Fatal("unknown schema_version should be invalid")
+	}
+	if !hasValidationCode(unknown.Errors, "unsupported_schema_version") {
+		t.Fatalf("expected unsupported_schema_version, got %#v", unknown.Errors)
+	}
+}
+
 func TestParseAgentResultPayloadNeedsHumanRequiresNextActionOrRisk(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"needs_human",
 		"summary":"Need product confirmation."
 	}`), ResultParseOptions{AllowLegacyCompatibility: true})
@@ -110,6 +144,7 @@ func TestParseAgentResultPayloadNeedsHumanRequiresNextActionOrRisk(t *testing.T)
 
 func TestNormalizeArtifactsRejectsEmptyTypeForStructuredPayload(t *testing.T) {
 	validation := ParseAgentResultPayload([]byte(`{
+		"schema_version":1,
 		"status":"completed",
 		"summary":"done",
 		"artifacts":[{"content":{}}],

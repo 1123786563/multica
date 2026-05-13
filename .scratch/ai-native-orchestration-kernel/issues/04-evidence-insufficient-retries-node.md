@@ -1,6 +1,6 @@
 # Evidence-insufficient output retries the execute node safely
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Risk: Medium
 
@@ -12,12 +12,12 @@ This slice should prove that output-format failures are recoverable without losi
 
 ## Acceptance criteria
 
-- [ ] Missing, malformed, or unknown-version Result Schema produces `evidence_insufficient` instead of node success.
-- [ ] Recoverable evidence-insufficient output automatically schedules a new node attempt up to the configured max attempts.
-- [ ] Each retry creates a new linked Agent Task attempt while preserving prior Kernel Events and Node Evidence.
-- [ ] Retry exhaustion moves the run/node to the appropriate blocked state for human attention instead of looping indefinitely.
-- [ ] The read API shows attempts, reason code, recommended action, and prior evidence summary.
-- [ ] Tests cover malformed result parsing, unknown schema version, retry scheduling, max-attempt handling, and no duplicate task dispatch for the same attempt.
+- [x] Missing, malformed, or unknown-version Result Schema produces `evidence_insufficient` instead of node success.
+- [x] Recoverable evidence-insufficient output automatically schedules a new node attempt up to the configured max attempts.
+- [x] Each retry creates a new linked Agent Task attempt while preserving prior Kernel Events and Node Evidence.
+- [x] Retry exhaustion moves the run/node to the appropriate blocked state for human attention instead of looping indefinitely.
+- [x] The read API shows attempts, reason code, recommended action, and prior evidence summary.
+- [x] Tests cover malformed result parsing, unknown schema version, retry scheduling, max-attempt handling, and no duplicate task dispatch for the same attempt.
 
 ## Agent / human ownership
 

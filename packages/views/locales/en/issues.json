@@ -244,6 +244,8 @@
     "evaluator": "Evaluator",
     "latest_event": "Latest event",
     "latest_agent_summary": "Latest agent summary",
+    "prior_evidence_summary": "Prior evidence summary",
+    "change_request": "Change request",
     "reason_detail": "Reason detail",
     "last_updated": "Last updated",
     "nodes": "Nodes",
@@ -251,6 +253,8 @@
     "node_ref": "Node",
     "plan_scope": "Plan",
     "approve": "Approve",
+    "request_changes": "Request changes",
+    "request_changes_prompt": "Describe the requested changes",
     "retry": "Retry",
     "cancel": "Cancel",
     "action": {
