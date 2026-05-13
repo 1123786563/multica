@@ -1,571 +1,478 @@
-# AI-native Orchestration Kernel v1 设计与实施计划
+# AI-native Orchestration Kernel v1 Temporal MVP 实施计划
 
 ## 状态
 
-已确认需求，待实施。
+已完成 grilling，进入实施计划阶段。
 
-相关文档：
+日期：2026-05-14
 
-- `CONTEXT.md`：领域术语和边界
-- `docs/adr/0001-ai-native-orchestration-kernel-v1-boundary.md`：v1 架构取舍
+权威设计输入：
 
-## 目标
+- `CONTEXT.md`
+- `Multica_AI_native_Orchestration_Kernel_MVP_Design.md`
+- `docs/adr/0001-ai-native-orchestration-kernel-v1-boundary.md`
+- `docs/adr/0002-temporal-orchestration-source-of-truth.md`
+- `docs/adr/0003-agent-task-outcomes-signal-temporal.md`
+- `docs/adr/0004-reuse-orchestration-tables-as-temporal-projection.md`
+- `docs/adr/0005-eino-reasons-inside-fixed-workflow.md`
+- `docs/adr/0006-validate-result-is-deterministic-evidence-check.md`
+- `docs/adr/0007-eino-review-is-advisory.md`
+- `docs/adr/0008-complete-issue-hands-off-review.md`
+- `docs/adr/0009-temporal-runs-as-explicit-profile.md`
+- `docs/adr/0010-orchestration-fails-closed-without-temporal.md`
+- `docs/adr/0011-approval-gate-minimal-actions.md`
+- `docs/adr/0012-node-retry-policy-mvp.md`
+- `docs/adr/0013-run-workflow-identity-and-active-run-idempotency.md`
+- `docs/adr/0014-projection-side-effects-through-activities.md`
+- `docs/adr/0015-agent-task-outcome-signal-correlation.md`
+- `docs/adr/0016-signal-mismatch-events-are-low-noise-audit.md`
+- `docs/adr/0017-mvp-uses-linear-orchestration-panel.md`
+- `docs/adr/0018-approval-actions-require-human-authority.md`
+- `docs/adr/0019-attention-comments-target-issue-relevant-humans.md`
 
-在 Multica 现有 Issue、Agent、Runtime、Skill、daemon、Agent Task 模型之上，增加一个服务端拥有的 AI-native orchestration kernel。
+## MVP 目标
 
-v1 的核心目标不是重写执行层，而是补齐：
+在现有 Multica Issue、Agent、Runtime、Skill、daemon、Agent Task 模型之上，增加 Temporal-backed AI-native orchestration kernel。
 
-- Issue 级编排生命周期
-- 节点状态机
-- 持久 Kernel Event
-- 结构化 Node Evidence
-- node 级恢复和重试
-- 条件式 human approval
-- Issue Detail 内的 Decision Panel
+MVP 只证明一条端到端闭环：
+
+```text
+Issue -> Temporal Workflow -> Eino reasoning -> Agent Task execution
+      -> Agent Task outcome Signal -> deterministic validation
+      -> advisory review -> review handoff / approval / retry / failure
+      -> Multica projection + Issue Detail observability
+```
+
+Temporal 是 orchestration lifecycle source of truth。Multica 的 `orchestration_*` 表是产品侧 projection。Eino 做固定 workflow 内 reasoning。daemon-backed Agent Task 仍是代码执行单元。
 
 ## 非目标
 
-v1 明确不做：
+MVP 明确不做：
 
-- 不替换 `agent_task_queue`
-- 不新增 kernel-to-daemon 协议
-- 不直接运行 agent CLI
-- 不做完整并行 DAG scheduler
-- 不做 LLM planner
-- 不做 workspace-wide 自动 skill selection
-- 不默认派发 verifier agent
-- 不新增独立 Orchestration 页面
-- 不提供 run/node/event/evidence 通用 CRUD API
-- 不自动把 Issue 标记为 `done`
+- 不回落旧 direct Agent Task orchestration path。
+- 不新增 `workflow_*` 并行 projection 表。
+- 不让 Eino 生成、修改、重排、分支或循环 workflow topology。
+- 不在 Temporal Workflow 代码里直接写 DB、WS、comment、Agent Task side effects。
+- 不把 `validate_result` 做成第二个 daemon test runner。
+- 不让 Eino review 直接决定 workflow success。
+- 不自动把 Issue 标记为 done。
+- 不支持 `request changes`。
+- 不允许 agent 自批、自 retry、自 cancel。
+- 不做 DAG canvas、workflow designer、standalone orchestration page。
+- 不广播 workspace，不 mention agent assignee。
 
-## v1 边界
+## 核心实施约束
 
-Orchestration Kernel 是 Issue 上方的服务端决策层。它决定下一步应该发生什么、记录为什么发生、校验证据是否足够，然后通过现有 Agent Task 执行。
+### Temporal Boundary
 
-首版入口只绑定 Issue：
+- Temporal Workflow Execution 拥有 run lifecycle、retry、timeout、cancellation、replay、recovery。
+- API 和 worker 通过显式 Temporal 配置连接。
+- `make dev` 不默认启动 Temporal。
+- Temporal unavailable 时 orchestration entry points fail closed，不创建 direct Agent Task。
 
-- 一个 Issue 同一时间最多一个 Active Run
-- Chat、Autopilot、Quick Create 暂不进入 kernel
-- agent-assigned issue 默认先进入 kernel，再由 kernel 派发 Agent Task
-- `workspace.settings.orchestration_enabled` 只作为历史 rollout 残留保留，不再控制新 issue / 新 assignment 的执行路径
+### Projection Boundary
 
-## 核心模型
+- 复用并扩展 `orchestration_plan`、`orchestration_node`、`orchestration_event`、`orchestration_artifact`。
+- projection lag 或冲突时，以 Temporal history 为准，由 repair / reconciliation Activity 修复。
+- Workflow 代码只做 deterministic decision；projection writes、comment、WS、notification、Agent Task side effects 全部在 Activity 中执行。
 
-### Orchestration Run
+### Active Run and Workflow Identity
 
-Issue-scoped 编排实例。
+- 一个 Issue 同一时间最多一个 active `orchestration_plan`。
+- 重复 start 返回已有 active plan，不启动第二个 Temporal Workflow。
+- 每个 run 使用独立 Workflow ID：`multica/{workspace_id}/issue/{issue_id}/run/{plan_id}`。
+- completed / failed / cancelled 历史 run 保留，新 run 使用新 `plan_id`。
 
-建议状态：
+### Agent Task Signal Contract
 
-- `running`
-- `waiting_for_approval`
-- `succeeded`
-- `failed`
-- `cancelled`
+Agent Task outcome Signal 必须携带：
 
-约束：
-
-- 同一 Issue 同一时间最多一个非终态 run
-- 重复触发必须复用现有 Active Run
-- 终态 run 保留历史，可由手动 rerun 创建新 run
-
-### Orchestration Node
-
-Run 内的编排节点。Node State 独立于 Agent Task status。
-
-v1 node type：
-
-- `plan`
-- `execute`
-- `verify`
-
-建议 node state：
-
-- `pending`
-- `ready`
-- `dispatched`
-- `running`
-- `waiting_for_approval`
-- `succeeded`
-- `failed`
-- `skipped`
-- `cancelled`
-
-v1 schedule 是最小图模型，但运行语义是线性主链：
-
-```text
-plan -> execute -> verify
-```
-
-`approval` 和 `retry` 不是 node type，而是 node state / Kernel Event / user action。
-
-### Agent Task
-
-现有执行单元保持不变。
-
-execute node 通过 Runtime Adapter 派发 Agent Task：
-
-- node 记录 linked `task_id`
-- daemon 继续使用现有 claim/start/message/complete/fail API
-- kernel 读取 Agent Task outcome 后推进 node/run
-
-同一个 `run_id + node_id + attempt` 最多绑定一个 Agent Task。重复触发或 recovery scan 必须复用已有 task。
-
-### Kernel Event
-
-持久审计事实流，是 recovery、observability、audit 的 source of truth。
-
-WebSocket 只做提交后通知，不是状态来源。
-
-v1 event type 使用稳定枚举，建议包括：
-
-- `run_created`
-- `run_started`
-- `run_waiting_for_approval`
-- `run_succeeded`
-- `run_failed`
-- `run_cancelled`
-- `node_created`
-- `node_ready`
-- `node_dispatched`
-- `node_started`
-- `node_succeeded`
-- `node_failed`
-- `node_waiting_for_approval`
-- `node_retried`
-- `task_linked`
-- `evidence_recorded`
-- `approval_action_recorded`
-
-每次 run/node 状态变化必须和对应 Kernel Event 在同一个 DB 事务提交。
-
-### Node Evidence
-
-结构化证据独立于 `agent_task_queue.result` 持久化。
-
-建议字段：
-
-- `run_id`
+- `plan_id`
 - `node_id`
-- `task_id`
-- `kind`
-- `payload`
-- `created_at`
-
-verify、recovery、Decision Panel 读取 Node Evidence，而不是反复解析原始 task output。
-
-## Result Schema
-
-Agent Task 用于 orchestration 时必须提供版本化结构化结果。
-
-v1 schema：
-
-```json
-{
-  "schema_version": 1,
-  "summary": "",
-  "changed_files": [],
-  "artifacts": [],
-  "tests": [],
-  "risks": []
-}
-```
-
-规则：
-
-- 缺失或 malformed schema 不代表 task failed
-- task 可以保持 `completed`
-- 对应 node 不能直接 `succeeded`
-- verify 应输出 `evidence_insufficient`
-- 未知 `schema_version` 降级为 evidence insufficient
-
-## Verification
-
-verify node v1 使用 server-owned hard checks，不默认派发 verifier agent。
-
-最低校验：
-
-- execute node 有 linked `task_id`
-- linked Agent Task 已完成
-- result schema 有效
-- `summary` 非空
-- 必要 `changed_files`、`artifacts`、`tests` 字段存在
-- 没有未处理失败状态
-- Node Evidence 已记录
-- `risks` 为空或已进入 approval
-
-成功后：
-
-- verify node `succeeded`
-- run `succeeded`
-- Issue 可推进到 `in_review`
-- 不自动标记 Issue `done`
-
-## Retry 与 Recovery
-
-### Node Retry Policy
-
-v1 默认最多 2 次 node attempt。
-
-可自动重试：
-
-- runtime recovery
-- timeout
-- 结构化 result 缺失
-- result schema malformed
-- evidence insufficient 且属于输出格式问题
-
-不应自动重试：
-
-- 风险非空
-- 测试失败
-- 结果不可验证
-- 破坏性操作
-- retry exhausted
-
-这些情况进入 Approval Gate 或 failed。
-
-### Node Recovery
-
-恢复粒度是 node，不是整个 run。
-
-规则：
-
-- completed node 不重跑
-- Kernel Events 和 Node Evidence 保留
-- server restart 后根据 run/node/event/task_id 和 Agent Task 状态补齐推进
-- 只有 run 结构损坏或无法判定安全状态时，run 才进入 failed
-
-### Run Advancement
-
-不引入长期 scheduler worker。
-
-这些入口同步调用 `AdvanceRun()`，推进到下一个阻塞点：
-
-- run 创建
-- Agent Task completed
-- Agent Task failed
-- approval action
-- manual retry
-
-另加轻量 recovery scan，修复 task 已完成但 node 未推进等断点。
-
-`AdvanceRun()` 必须持有 run 级 DB lock，例如对 `orchestration_run` 行加 `FOR UPDATE`。
-
-## Human Approval
-
-Approval Gate 是条件式暂停点，不默认插入每个 run。
-
-进入 approval 的原因：
-
-- risks 非空
-- tests failed
-- unverifiable result
-- destructive operation
-- retry exhausted
-- explicit policy
-
-v1 Approval Action：
-
-- `approve`
-- `retry`
-- `request_changes`
-- `cancel`
-
-`request_changes` 记录为 Kernel Event，并作为下一次 node attempt 的 Orchestration Context，不自动改写 Issue 描述。
-
-### 权限
-
-读取 orchestration 跟随 Issue read permission。
-
-approval action 只允许：
-
-- workspace owner
-- workspace admin
-- Issue creator
-- Issue human assignee
-
-agent assignee 不能批准自己的 orchestration。
-
-## Runtime Adapter 与 Orchestration Context
-
-Runtime Adapter 只做生命周期桥接：
-
-```text
-node -> Agent Task -> node outcome
-```
-
-不新增 daemon 协议，不直接运行 CLI。
-
-派发 Agent Task 时，kernel 只追加小型 Orchestration Context：
-
-- `run_id`
-- `node_id`
-- `node_type`
 - `attempt`
-- `expected_result_schema`
-- `prior_evidence_summary`
-- `change_request`
+- `task_id`
+- `outcome_version`
+- `result_ref` 或 `result_json`
 
-现有 daemon prompt、Issue 获取、repo checkout、comment workflow、skill 注入继续保留。
+Workflow 只在 Signal 匹配当前 waiting node attempt 和 linked Agent Task 时推进。
 
-## Skill Discovery
+重复、过期、mismatched Signal 写入低噪声 audit event 或忽略，不推进 workflow：
 
-v1 只使用已绑定到 Agent 的 skills。
+- `signal.duplicate_ignored`
+- `signal.stale_ignored`
+- `signal.mismatched_rejected`
 
-kernel 可以记录 node 当时可用的 skill context，但不做：
+### Outcome Policy
 
-- workspace-wide skill search
-- runtime local skill 自动选择
-- 动态 skill planner
+- `validate_result` 只做 schema / evidence deterministic validation。
+- Eino `review_result` 是 advisory，不拥有 final verdict。
+- `complete_issue` 是 review handoff，不 auto done。
+- Node retry 最多 2 次 attempt。
+- 自动 Node retry 只覆盖 recoverable non-semantic failures。
+- failed tests、risks、high-risk review concern、unverifiable evidence 进入 Approval Gate。
 
-## Issue 状态与通知
+### Approval and Attention
 
-Issue status 与 Run State 独立。
+- Approval Gate 只支持 `approve`、`retry`、`cancel`。
+- Approval Action 只允许 authorized human actor：workspace owner/admin、Issue creator、human assignee。
+- agent assignee、发起 run 的 agent、执行 run 的 agent 禁止 approval action。
+- 每次 Approval Action 写 `approval.*` audit event，包含 `actor_id`、`actor_type=human`、`action`、`reason`、`plan_id`、`node_id`。
+- Attention comment 只在 `waiting_human`、run failed、retry exhausted、repair failed、Temporal unavailable 等异常状态创建。
+- Attention audience 只包含 Issue creator、human assignee、subscribers/watchers。
 
-有限联动：
+## 实施阶段
 
-- run started 时，可将 agent-assigned Issue 从 `todo/backlog` 推到 `in_progress`
-- verify succeeded 后，可将 Issue 推到 `in_review`
-- 不自动 `done`
+### Phase 0: Contract Baseline
 
-取消联动：
+目标：把已接受设计转成可测试的内部 contract，避免后续实现偏航。
 
-- 取消 run 会取消 active nodes 和 linked active Agent Tasks
-- Issue 变为 `cancelled` 时取消 Active Run
-- completed task、Kernel Events、Node Evidence 保留
+交付物：
 
-评论策略：
+- Go package 边界草案：workflow、activities、projection、daemon bridge、eino adapter、api。
+- Temporal config struct 和 disabled/unavailable error contract。
+- Projection DTO / API response contract。
+- Result Schema v1、Signal payload、Approval Action payload、Attention payload。
 
-- 成功不默认评论
-- `waiting_for_approval`、`retry_exhausted`、`run_failed` 等需要人类注意时创建 Attention Comment
+验收标准：
 
-通知目标：
+- 所有新增 contract 都能映射回 ADR 0002-0019。
+- 无 `workflow_*` 表设计。
+- 无 Workflow-side DB/HTTP/LLM/daemon direct call。
 
-- Issue creator
-- human assignee
-- subscribers
+测试重点：
 
-不 workspace-wide 广播，不自动 @mention agent assignee。
+- contract unit tests / enum validation。
+- unknown version / unknown enum fallback。
 
-## API Surface
+### Phase 1: Temporal Skeleton and Explicit Profile
 
-v1 只提供 Issue-scoped 查询和 action。
+目标：接入 Temporal client / worker / fixed workflow skeleton，但不触发真实 Agent Task。
 
-建议：
+交付物：
 
-```text
-GET  /api/issues/{id}/orchestration
-POST /api/issues/{id}/orchestration/actions
-```
+- Temporal client factory。
+- `make orchestration-worker` 或等价 worker 启动命令。
+- `IssueWorkflow` fixed chain skeleton。
+- mock Activities：load/analyze/dispatch/wait-signal/validate/review/summarize/complete。
+- API start path 在 Temporal configured 时启动 workflow。
+- Temporal unavailable 时 fail closed。
 
-`GET` 返回：
+验收标准：
 
-- latest/active run
-- nodes
-- node summaries
-- events
-- evidence summary
-- linked task ids
-- reason codes
-- recommended actions
-- permission flags
+- 显式配置 Temporal + worker 后，Issue 可以启动 workflow。
+- 未配置或不可达时返回 unavailable，不创建 direct Agent Task。
+- 默认 `make dev` 不要求 Temporal。
 
-`POST actions` 支持：
+测试重点：
 
-- `approve`
-- `retry`
-- `request_changes`
-- `cancel`
+- workflow unit test。
+- start fail-closed test。
+- no fallback Agent Task test。
 
-不暴露通用 run/node/event/evidence CRUD。
+### Phase 2: Projection Migration and Idempotent Start
 
-## WebSocket 与前端状态
+目标：把现有 `orchestration_*` 表扩展成 Temporal projection，并实现 Active Run 幂等 start。
 
-v1 只新增粗粒度 refresh event：
+交付物：
 
-```text
-orchestration:updated
-```
+- `orchestration_plan` 增加 `temporal_workflow_id`、`temporal_run_id`、`workflow_type`、`projection_version`、`last_synced_at`、`sync_error`。
+- `orchestration_node` 增加 `workflow_node_key`、`temporal_activity_id`、`signal_name`、projection metadata。
+- `orchestration_event` / `orchestration_artifact` 增加 source / temporal event metadata。
+- Temporal Workflow ID 生成：`multica/{workspace_id}/issue/{issue_id}/run/{plan_id}`。
+- duplicate start 返回 existing active plan。
+- `WorkflowAlreadyStarted` projection repair。
 
-payload 建议：
+验收标准：
 
-- `issue_id`
-- `run_id`
-- `changed_at`
+- 一个 Issue 同时只能有一个 active run。
+- terminal run 后可以创建新 run。
+- projection status 不作为 lifecycle source of truth。
 
-前端收到后 invalidate issue orchestration query。
+测试重点：
 
-前端数据所有权：
+- concurrent start race。
+- duplicate start。
+- terminal rerun。
+- WorkflowAlreadyStarted repair。
 
-- run/node/event/evidence 是 server state，走 React Query
-- Zustand 只保存 UI state，例如 expanded nodes、selected panel
-- `packages/views` 不放 store
-- web/desktop 不各自复制 orchestration 逻辑
+### Phase 3: Projection Activities and Event Stream
 
-## Decision Panel
-
-首版 UI 落在现有 Issue Detail。
-
-默认展示 node-centered summary：
-
-- node status
-- reason_code
-- recommended_action
-- latest summary
-- attempts
-- evidence count
-- linked task status
-
-raw Kernel Events、Node Evidence、task messages 作为展开详情。
-
-reason/action 由服务端派生，前端只负责展示和本地化。
-
-建议 reason code：
+目标：所有 Multica-visible side effects 通过 Activities 幂等写入。
 
-- `pending_dependencies`
-- `ready_to_run`
-- `running`
-- `waiting_for_approval`
-- `evidence_insufficient`
-- `retry_scheduled`
-- `runtime_failed`
-- `verification_failed`
-- `risk_requires_approval`
-- `retry_exhausted`
-- `completed`
-- `cancelled`
-
-建议 recommended action：
-
-- `none`
-- `wait`
-- `inspect_evidence`
-- `retry`
-- `approve`
-- `request_changes`
-- `cancel`
-- `update_runtime`
-
-## Persistence Plan
-
-v1 四张核心表：
-
-- `orchestration_run`
-- `orchestration_node`
-- `orchestration_event`
-- `orchestration_evidence`
-
-继续复用：
-
-- `workspace.settings`：orchestration feature flag
-- `agent_task_queue`：执行生命周期
-- `task_message`：agent live output
-- Issue/comment/activity/subscriber：产品上下文和通知
-
-## Implementation Plan
-
-### Phase 1: Persistence and generated DB layer
-
-- 增加四张 orchestration migration
-- 添加 active run 约束
-- 添加 node task link 和 attempt/idempotency 约束
-- 添加 event type、node type、node state、run state check constraints
-- 添加 sqlc queries
-- 运行 sqlc 和 Go 编译检查
-
-### Phase 2: Kernel service state machine
-
-- 新增 server-owned orchestration service
-- 实现 create/reuse active run
-- 实现 deterministic plan generation
-- 实现 `AdvanceRun()` 和 run lock
-- 实现 node dispatch idempotency
-- 实现 task completion/failure 回写
-- 实现 hard-check verification
-- 实现 node retry policy
-- 实现 recovery scan
-
-### Phase 3: Integration with existing task lifecycle
-
-- workspace orchestration flag 生效
-- agent-assigned Issue 走 kernel path
-- 未启用 workspace 继续 direct enqueue
-- `CompleteTask` / `FailTask` 后触发 run advancement
-- Issue cancel 级联 run cancellation
-- run success 推进 Issue 到 `in_review`
-
-### Phase 4: API and client contracts
-
-- 添加 issue-scoped orchestration read endpoint
-- 添加 approval action endpoint
-- 添加 core API client method 和 zod schema
-- 添加 malformed response fallback tests
-- 新增 `orchestration:updated` WS event 和 query invalidation
-
-### Phase 5: Issue Detail Decision Panel
-
-- 在 `packages/views` 的 Issue Detail 内渲染 Decision Panel
-- 展示 node summaries、reason、recommended action、attempt、evidence count
-- 展开显示 events/evidence/task link
-- approval action buttons 根据服务端 permission/action 渲染
-- web/desktop 复用同一 shared view
-
-### Phase 6: Notifications and attention comments
-
-- waiting approval / retry exhausted / failed 生成 Attention Comment
-- 通知 Issue creator、human assignee、subscribers
-- 避免 agent mention loop
-- 成功态不默认评论
-
-## Test Plan
-
-优先 Go service/state-machine tests。
-
-必须覆盖：
-
-- active run 幂等创建
-- deterministic plan/execute/verify node 创建
-- run lock 防并发推进
-- execute node dispatch 只创建一个 Agent Task
-- task completed 后 node/run 推进
-- malformed Result Schema 进入 evidence insufficient
-- evidence insufficient 自动 retry 一次
-- risks 非空进入 approval
-- approval approve/retry/request_changes/cancel
-- retry exhausted
-- server restart/recovery scan 补齐状态
-- Issue cancel 级联 run/task cancel
-- Kernel Event 与状态同事务一致
-- Node Evidence 保留跨 retry
-
-API tests：
-
-- read endpoint 权限跟随 Issue
-- approval action 权限更严格
-- malformed payload fallback
-- unknown enum fallback
-
-Frontend tests：
-
-- Decision Panel 渲染 node summary
-- reason/recommended action 本地展示
-- missing fields 不 white-screen
-- approval buttons 按权限显示
-- `orchestration:updated` invalidate query
-
-E2E 最小覆盖：
-
-- happy path：Issue assigned -> run -> execute task -> verify -> in_review
-- failure recovery path：malformed result -> retry -> approval 或 success
-
-## Open Follow-ups
-
-这些不阻塞 v1，但后续需要单独决策：
-
-- verifier agent 何时引入
-- LLM planner 何时替换 Default Plan Node
-- parallel DAG 何时启用
-- workspace-level orchestration policy 是否需要独立表
-- success comment 是否做 workspace 配置
-- risk taxonomy 是否从字符串升级为结构化 severity/category
+交付物：
+
+- `ProjectWorkflowStartedActivity`。
+- `ProjectNodeStarted/Completed/FailedActivity`。
+- `ProjectEventActivity`。
+- `ProjectArtifactActivity`。
+- `RepairProjectionActivity`。
+- coarse `orchestration:updated` WS refresh。
+
+验收标准：
+
+- Workflow replay 不重复写 projection、comment、notification、Agent Task side effects。
+- projection events 能展示 fixed chain 节点状态。
+- `signal.*_ignored` 和 `approval.*` event type 可写入。
+
+测试重点：
+
+- Activity idempotency。
+- Workflow replay determinism。
+- event ordering。
+- projection repair。
+
+### Phase 4: Eino Reasoning Activities
+
+目标：接入 Eino，但只作为固定 workflow 内 reasoning activity。
+
+交付物：
+
+- `EinoKernel` interface。
+- `AnalyzeIssueActivity`。
+- `ReviewResultActivity`。
+- `SummarizeResultActivity`。
+- output schema：`execution_advice`、`recommended_agent_prompt`、risk/review/summary。
+
+验收标准：
+
+- AnalyzeIssue 能生成 coding prompt 和 execution advice。
+- ReviewResult 只输出 advisory review，不输出 authoritative `is_success`。
+- SummarizeResult 生成 review handoff summary。
+- Eino 不创建/删除/重排 workflow node。
+
+测试重点：
+
+- mocked Eino output parsing。
+- advisory review cannot override failed tests / risks。
+- malformed Eino response handling。
+
+### Phase 5: DaemonBridge and Agent Task Outcome Signal
+
+目标：Temporal dispatch 现有 Agent Task，daemon completion 通过 Signal 回到 Workflow。
+
+交付物：
+
+- `DispatchDaemonAgentActivity`。
+- task link：`orchestration_plan_id`、`orchestration_node_id`、`attempt`、`task_id`、`temporal_workflow_id`。
+- completion/failure/cancellation API hook。
+- `AgentTaskCompleted/Failed/Cancelled` Signal sender。
+- Signal payload validation。
+- repair job 补发 Signal。
+
+验收标准：
+
+- Dispatch Activity 只创建/复用 Agent Task，不等待 task 完成。
+- Workflow wait Signal。
+- matching Signal 推进 workflow。
+- duplicate/stale/mismatched Signal 不推进 workflow，并写低噪声 audit event。
+
+测试重点：
+
+- dispatch idempotency。
+- completion Signal happy path。
+- duplicate Signal no-op。
+- stale attempt rejected。
+- wrong task / wrong node / wrong plan rejected。
+- repair-job Signal replay。
+
+### Phase 6: Validation, Retry, Outcome Policy
+
+目标：实现 deterministic validation、bounded retry、approval routing 和 final policy。
+
+交付物：
+
+- Result Schema v1 parser。
+- `ValidateResultActivity`。
+- `TemporalOutcomePolicy`。
+- Node retry attempt tracking。
+- evidence insufficient handling。
+- risks / failed tests / high-risk review -> Approval Gate。
+
+验收标准：
+
+- `validate_result` 不运行 shell、daemon、LLM。
+- automatic retry 只覆盖 schema/evidence/transient failures。
+- `max_node_attempts = 2`。
+- failed tests / risks 不自动 retry。
+- retry exhausted 进入 attention / approval 或 failed policy。
+
+测试重点：
+
+- schema malformed -> retry。
+- evidence insufficient -> retry。
+- retry exhausted。
+- failed tests -> approval。
+- risks non-empty -> approval。
+- positive Eino review cannot force success。
+
+### Phase 7: Approval, Cancellation, Attention
+
+目标：实现 MVP human gate 和 exceptional notification。
+
+交付物：
+
+- `POST /api/orchestration/nodes/{nodeId}/approve`。
+- `POST /api/orchestration/nodes/{nodeId}/retry`。
+- `POST /api/orchestration/plans/{planId}/cancel`。
+- Approval permission checker。
+- approval audit events。
+- cancellation propagation to active Agent Task。
+- attention comment generation and audience selection。
+
+验收标准：
+
+- 只允许 authorized human actor approval action。
+- agent assignee / executing agent / initiating agent 禁止 action。
+- approval action writes audit event before Temporal Signal/Update or cancellation request。
+- attention comment 只在 exceptional states 创建。
+- successful run 不创建 default attention comment。
+- attention audience 不包含 agent assignee，不 workspace broadcast。
+
+测试重点：
+
+- allowed owner/admin/creator/human assignee。
+- denied agent actors。
+- denied unrelated member。
+- approval audit payload。
+- cancel active task propagation。
+- attention audience selection。
+
+### Phase 8: API and Linear Orchestration Panel
+
+目标：把 orchestration projection 暴露到 Issue Detail，先做线性节点列表。
+
+交付物：
+
+- `GET /api/issues/{issueId}/orchestration` contract。
+- core API client / schema。
+- `orchestration:updated` query invalidation。
+- Issue Detail Linear Orchestration Panel。
+- node list fields：status、reason、recommended action、attempts、summary、evidence count、Agent Task link。
+- expanded events / evidence / artifacts / Signal Audit Events。
+- Approval buttons by server-projected permission/action。
+
+验收标准：
+
+- 不做 DAG canvas、workflow designer、standalone page。
+- server state 走 React Query。
+- Zustand 只保存 local expanded/selected UI state。
+- malformed or partial projection 不 white-screen。
+
+测试重点：
+
+- API read permission follows Issue visibility。
+- approval mutation permission stricter than read。
+- node summary render。
+- expanded events/evidence render。
+- Signal Audit Events only in expanded detail by default。
+- approval buttons by permission。
+
+### Phase 9: End-to-End Checkout Validation
+
+目标：用最小真实路径验证 Temporal -> Eino -> daemon -> projection -> UI 闭环。
+
+交付物：
+
+- explicit local Temporal setup doc / command。
+- checkout-specific smoke test script or E2E notes。
+- happy path fixture。
+- failure/retry/approval fixture。
+
+验收标准：
+
+- issue 可以启动 orchestration workflow。
+- worker 独立运行。
+- daemon 能执行 linked Agent Task。
+- task outcome Signal 推进 workflow。
+- issue detail 能看到 full trace。
+- fail-closed、retry、approval、attention 至少有 focused tests。
+
+测试重点：
+
+- Go workflow/activity tests。
+- backend API tests。
+- frontend component/contract tests。
+- one minimal E2E happy path。
+- one failure path：malformed result -> retry -> approval or success。
+
+## Implementation Order
+
+推荐按以下顺序落地，避免大爆炸：
+
+1. Phase 0 contract baseline。
+2. Phase 1 Temporal skeleton + fail-closed。
+3. Phase 2 projection migration + idempotent start。
+4. Phase 3 projection activities。
+5. Phase 5 DaemonBridge Signal happy path。
+6. Phase 6 validation/retry/policy。
+7. Phase 4 Eino reasoning activities。
+8. Phase 7 approval/cancel/attention。
+9. Phase 8 UI。
+10. Phase 9 E2E checkout validation。
+
+说明：Phase 4 可以和 Phase 5 局部并行，但真实 Eino 接入不应阻塞 Temporal/Signal skeleton。先用 mocked Eino output 打通 lifecycle，再接真实 provider。
+
+## Required Test Matrix
+
+Backend / workflow:
+
+- Temporal unavailable fail closed。
+- start idempotency。
+- concurrent start race。
+- workflow replay determinism。
+- projection Activity idempotency。
+- Signal matching advances workflow。
+- duplicate/stale/mismatched Signal does not advance workflow。
+- validate_result schema malformed / evidence insufficient。
+- failed tests / risks route Approval Gate。
+- retry max 2 attempts。
+- approval permissions and audit events。
+- cancellation propagation。
+- attention audience selection。
+
+Frontend / contracts:
+
+- read endpoint follows Issue visibility。
+- approval action endpoints require stricter human permission。
+- Linear Orchestration Panel renders node summary。
+- expanded detail renders events/evidence/artifacts。
+- Signal Audit Events are expanded detail by default。
+- malformed projection does not white-screen。
+- React Query owns server state; Zustand only local UI state。
+
+E2E:
+
+- happy path：start -> analyze -> dispatch -> signal completed -> validate -> review -> summarize -> review handoff。
+- fail closed：Temporal unavailable -> no direct Agent Task。
+- failure path：malformed/evidence insufficient -> retry or approval。
+
+## Cut Line
+
+MVP complete means:
+
+- Temporal-backed fixed workflow can orchestrate one Issue.
+- Existing daemon Agent Task executes coding work.
+- Agent Task outcome reaches Workflow through strict Signal contract.
+- `orchestration_*` projection powers API and Issue Detail panel.
+- deterministic validation, bounded retry, advisory review, approval, cancellation, and attention comments work under accepted constraints.
+
+MVP is not complete if:
+
+- lifecycle state is DB-owned instead of Temporal-owned;
+- orchestration silently falls back to direct Agent Task;
+- Workflow code performs projection side effects directly;
+- failed tests or risks auto-retry code work;
+- agents can approve their own work;
+- UI only shows top-line status without node/evidence process detail.
+
+## Deferred Work
+
+- DAG / graph visualization。
+- dynamic workflow topology。
+- Eino graph execution。
+- verifier agent。
+- workspace-level policy table。
+- structured risk taxonomy。
+- success comment workspace setting。
+- generalized orchestration CRUD。
+- chat/autopilot/quick-create orchestration entry points。
