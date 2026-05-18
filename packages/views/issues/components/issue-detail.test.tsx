@@ -208,6 +208,9 @@ const mockApiObj = vi.hoisted(() => ({
   getActiveTasksForIssue: vi.fn().mockResolvedValue({ tasks: [] }),
   listTasksByIssue: vi.fn().mockResolvedValue([]),
   getIssueOrchestration: vi.fn().mockResolvedValue({ plans: [] }),
+  approveOrchestrationNode: vi.fn().mockResolvedValue({}),
+  retryOrchestrationNode: vi.fn().mockResolvedValue({}),
+  cancelOrchestrationPlan: vi.fn().mockResolvedValue({}),
   listTaskMessages: vi.fn().mockResolvedValue([]),
   listChildIssues: vi.fn().mockResolvedValue({ issues: [] }),
   listIssues: vi.fn().mockResolvedValue({ issues: [], total: 0 }),
@@ -525,6 +528,7 @@ describe("IssueDetail (shared)", () => {
           created_at: "2026-01-20T00:00:00Z",
           updated_at: "2026-01-20T00:00:00Z",
           summary: { reason_code: "ready_to_run", recommended_action: "none" },
+          available_actions: [],
           nodes: [
             {
               id: "node-1",
@@ -534,6 +538,7 @@ describe("IssueDetail (shared)", () => {
               status: "completed",
               reason_code: "",
               recommended_action: "none",
+              available_actions: [],
               attempt: 1,
             },
             {
@@ -544,6 +549,7 @@ describe("IssueDetail (shared)", () => {
               status: "running",
               reason_code: "",
               recommended_action: "none",
+              available_actions: [],
               attempt: 1,
             },
           ],
@@ -568,8 +574,72 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("Analyze")).toBeInTheDocument();
     expect(screen.getByText("completed")).toBeInTheDocument();
     expect(screen.getByText("Dispatch agent task")).toBeInTheDocument();
-    expect(screen.getByText("Signal audit")).toBeInTheDocument();
+    expect(screen.getByText("Audit trail")).toBeInTheDocument();
     expect(screen.getByText("signal.mismatched_rejected")).toBeInTheDocument();
+  });
+
+  it("renders approval gate state with server-projected actions", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          issue_id: "issue-1",
+          status: "waiting_human",
+          workflow_type: "issue_mvp",
+          projection_version: 1,
+          temporal_workflow_id: "multica/ws-1/issue/issue-1/run/plan-1",
+          temporal_run_id: "run-1",
+          created_at: "2026-01-20T00:00:00Z",
+          updated_at: "2026-01-20T00:00:00Z",
+          summary: { reason_code: "tests_failed", recommended_action: "review" },
+          available_actions: ["cancel"],
+          nodes: [
+            {
+              id: "node-1",
+              node_key: "dispatch",
+              workflow_node_key: "dispatch",
+              title: "Dispatch agent task",
+              status: "waiting_human",
+              reason_code: "tests_failed",
+              recommended_action: "review",
+              available_actions: ["approve"],
+              attempt: 2,
+            },
+          ],
+          events: [
+            {
+              id: "event-1",
+              node_id: "node-1",
+              type: "workflow.waiting_human",
+              source: "system",
+              message: "structured result reported failed tests",
+              details: { failed_tests: ["go test ./..."], retry_budget: { used: 2, max: 2 } },
+            },
+            {
+              id: "event-2",
+              type: "approval.cancel",
+              source: "server",
+              message: "Approval action recorded",
+              details: { action: "cancel", reason: "operator stopped run" },
+            },
+          ],
+          artifacts: [],
+        },
+      ],
+    });
+
+    renderIssueDetail();
+
+    await screen.findAllByText("waiting_human");
+    expect(screen.getByText("tests_failed")).toBeInTheDocument();
+    expect(screen.getByText("approval.cancel")).toBeInTheDocument();
+    expect(screen.getByText("Approval action recorded")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request changes" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(mockApiObj.approveOrchestrationNode).toHaveBeenCalledWith("node-1"));
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(mockApiObj.cancelOrchestrationPlan).toHaveBeenCalledWith("plan-1"));
   });
 
   it("shows loading skeleton while data is loading", () => {

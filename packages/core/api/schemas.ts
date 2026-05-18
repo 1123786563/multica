@@ -187,6 +187,9 @@ const IssueOrchestrationSummarySchema = z.object({
   recommended_action: z.string().default("none"),
 }).loose();
 
+const emptyArrayOnNull = <T extends z.ZodType>(schema: T) =>
+  z.array(schema).nullable().default([]).transform((value) => value ?? []);
+
 const IssueOrchestrationNodeSchema = z.object({
   id: z.string(),
   node_key: z.string().default(""),
@@ -195,6 +198,7 @@ const IssueOrchestrationNodeSchema = z.object({
   status: z.string().default("pending"),
   reason_code: z.string().default(""),
   recommended_action: z.string().default("none"),
+  available_actions: emptyArrayOnNull(z.string()),
   attempt: z.number().default(1),
 }).loose();
 
@@ -217,9 +221,6 @@ const IssueOrchestrationArtifactSchema = z.object({
   data: z.record(z.string(), z.unknown()).default({}),
 }).loose();
 
-const emptyArrayOnNull = <T extends z.ZodType>(schema: T) =>
-  z.array(schema).nullable().default([]).transform((value) => value ?? []);
-
 const IssueOrchestrationPlanSchema = z.object({
   id: z.string(),
   issue_id: z.string(),
@@ -234,6 +235,7 @@ const IssueOrchestrationPlanSchema = z.object({
     reason_code: "",
     recommended_action: "none",
   }),
+  available_actions: emptyArrayOnNull(z.string()),
   nodes: emptyArrayOnNull(IssueOrchestrationNodeSchema),
   events: emptyArrayOnNull(IssueOrchestrationEventSchema),
   artifacts: emptyArrayOnNull(IssueOrchestrationArtifactSchema),

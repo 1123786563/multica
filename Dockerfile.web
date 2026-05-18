@@ -14,12 +14,15 @@ COPY packages/views/package.json packages/views/
 COPY packages/tsconfig/package.json packages/tsconfig/
 COPY packages/eslint-config/package.json packages/eslint-config/
 
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+RUN pnpm config set registry ${NPM_CONFIG_REGISTRY}
 RUN pnpm install --frozen-lockfile
 
 # --- Build ---
 FROM node:22-alpine AS builder
 
 RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
 
 WORKDIR /app
 
@@ -32,6 +35,7 @@ COPY apps/web/ apps/web/
 COPY packages/ packages/
 
 # Re-link after source overlay (fixes any symlinks overwritten by COPY)
+RUN pnpm config set registry ${NPM_CONFIG_REGISTRY}
 RUN pnpm install --frozen-lockfile --offline
 
 # Set build-time env: tells Next.js rewrites to proxy API calls to the backend service

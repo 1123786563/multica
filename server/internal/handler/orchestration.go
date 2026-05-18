@@ -55,7 +55,12 @@ func (h *Handler) GetIssueOrchestration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	snapshot, err := h.OrchestrationService.Snapshot(r.Context(), issue.ID)
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	actorType, actorID := h.resolveActor(r, userID, r.Header.Get("X-Workspace-ID"))
+	snapshot, err := h.OrchestrationService.SnapshotForActor(r.Context(), issue.ID, actorType, parseUUID(actorID))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load orchestration")
 		return
@@ -104,7 +109,7 @@ func (h *Handler) CancelOrchestrationPlan(w http.ResponseWriter, r *http.Request
 		h.writeApprovalActionError(w, err, "failed to cancel orchestration plan")
 		return
 	}
-	h.publish(protocol.EventOrchestrationUpdated, "", "member", userID, map[string]any{
+	h.publish(protocol.EventOrchestrationUpdated, result.WorkspaceID, "member", userID, map[string]any{
 		"plan_id": result.PlanID,
 		"action":  result.Action,
 	})
@@ -144,7 +149,7 @@ func (h *Handler) applyOrchestrationNodeAction(w http.ResponseWriter, r *http.Re
 		h.writeApprovalActionError(w, err, "failed to "+action+" orchestration node")
 		return
 	}
-	h.publish(protocol.EventOrchestrationUpdated, "", "member", userID, map[string]any{
+	h.publish(protocol.EventOrchestrationUpdated, result.WorkspaceID, "member", userID, map[string]any{
 		"plan_id": result.PlanID,
 		"node_id": result.NodeID,
 		"action":  result.Action,
@@ -177,6 +182,8 @@ func (h *Handler) writeApprovalActionError(w http.ResponseWriter, err error, fal
 		writeError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, service.ErrTemporalUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "orchestration is unavailable")
+	case errors.Is(err, service.ErrInvalidState):
+		writeError(w, http.StatusConflict, "orchestration action is not available")
 	default:
 		slog.Warn("orchestration approval action failed", "error", err)
 		writeError(w, http.StatusInternalServerError, fallback)

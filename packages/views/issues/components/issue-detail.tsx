@@ -54,12 +54,12 @@ import { collectThreadReplies } from "./thread-utils";
 import { AgentLiveCard } from "./agent-live-card";
 import { ExecutionLogSection } from "./execution-log-section";
 import { PullRequestList } from "./pull-request-list";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueAttachmentsOptions, issueOrchestrationOptions } from "@multica/core/issues/queries";
+import { issueKeys, issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions, issueAttachmentsOptions, issueOrchestrationOptions } from "@multica/core/issues/queries";
 import { issueLabelsOptions } from "@multica/core/labels";
 import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
 import { useRecentIssuesStore } from "@multica/core/issues/stores";
@@ -184,13 +184,52 @@ function priorityLabel(priority: string, t: ActivityT): string {
   return priority;
 }
 
-function OrchestrationPanel({ plan }: { plan: IssueOrchestrationPlan }) {
-  const signalEvents = plan.events.filter((event) => event.type.startsWith("signal."));
+function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationPlan; issueId: string; wsId: string }) {
+  const queryClient = useQueryClient();
+  const approvalAction = useMutation({
+    mutationFn: ({ action, id }: { action: string; id: string }) => {
+      if (action === "approve") return api.approveOrchestrationNode(id);
+      if (action === "retry") return api.retryOrchestrationNode(id);
+      if (action === "cancel") return api.cancelOrchestrationPlan(id);
+      return Promise.reject(new Error(`Unsupported orchestration action: ${action}`));
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: issueKeys.orchestration(wsId, issueId) });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Orchestration action failed");
+    },
+  });
+  const auditEvents = plan.events.filter((event) => event.type.startsWith("signal.") || event.type.startsWith("approval."));
+  const actionLabels: Record<string, string> = {
+    approve: "Approve",
+    retry: "Retry",
+    cancel: "Cancel",
+  };
+  const runAction = (action: string, id: string) => {
+    if (approvalAction.isPending) return;
+    approvalAction.mutate({ action, id });
+  };
   return (
     <div className="space-y-2 pl-2">
       <div className="flex items-center justify-between gap-2 rounded-md bg-muted/35 px-2 py-1.5 text-xs">
         <span className="font-medium">{plan.status}</span>
         <span className="truncate text-muted-foreground">{plan.summary.reason_code || plan.workflow_type}</span>
+        {plan.available_actions.length > 0 && (
+          <span className="flex shrink-0 items-center gap-1">
+            {plan.available_actions.map((action) => (
+              <button
+                key={action}
+                type="button"
+                disabled={approvalAction.isPending}
+                onClick={() => runAction(action, plan.id)}
+                className="rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {actionLabels[action] ?? action}
+              </button>
+            ))}
+          </span>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
         <span>Action: {plan.summary.recommended_action}</span>
@@ -210,15 +249,30 @@ function OrchestrationPanel({ plan }: { plan: IssueOrchestrationPlan }) {
                 )}
               />
               <span className="min-w-0 flex-1 truncate">{node.title || node.workflow_node_key}</span>
+              {node.available_actions.length > 0 && (
+                <span className="flex shrink-0 items-center gap-1">
+                  {node.available_actions.map((action) => (
+                    <button
+                      key={action}
+                      type="button"
+                      disabled={approvalAction.isPending}
+                      onClick={() => runAction(action, node.id)}
+                      className="rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {actionLabels[action] ?? action}
+                    </button>
+                  ))}
+                </span>
+              )}
               <span className="shrink-0 text-muted-foreground">{node.status}</span>
             </div>
           ))}
         </div>
       )}
-      {signalEvents.length > 0 && (
+      {auditEvents.length > 0 && (
         <div className="space-y-1 border-t border-border/60 pt-2">
-          <div className="px-2 text-[11px] font-medium text-muted-foreground">Signal audit</div>
-          {signalEvents.map((event) => (
+          <div className="px-2 text-[11px] font-medium text-muted-foreground">Audit trail</div>
+          {auditEvents.map((event) => (
             <div key={event.id} className="rounded-md px-2 py-1 text-[11px] text-muted-foreground">
               <div className="font-medium text-foreground">{event.type}</div>
               {event.message && <div className="line-clamp-2">{event.message}</div>}
@@ -1422,7 +1476,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             Orchestration
             <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${orchestrationOpen ? "rotate-90" : ""}`} />
           </button>
-          {orchestrationOpen && <OrchestrationPanel plan={activeOrchestrationPlan} />}
+          {orchestrationOpen && <OrchestrationPanel plan={activeOrchestrationPlan} issueId={id} wsId={wsId} />}
         </div>
       )}
 

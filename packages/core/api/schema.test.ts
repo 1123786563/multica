@@ -144,6 +144,7 @@ describe("ApiClient schema fallback", () => {
       const client = new ApiClient("https://api.example.test");
       const res = await client.getIssueOrchestration("issue-1");
       expect(res.plans).toHaveLength(1);
+      expect(res.plans[0]?.available_actions).toEqual([]);
       expect(res.plans[0]?.nodes).toEqual([]);
       expect(res.plans[0]?.events).toEqual([]);
       expect(res.plans[0]?.artifacts).toEqual([]);

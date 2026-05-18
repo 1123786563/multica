@@ -126,11 +126,16 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		TaskQueue: cfg.TemporalTaskQueue,
 	})
 	orchestrationSvc := service.NewOrchestrationService(executor, txStarter, orchestrationStarter)
-	orchestrationSvc.ApprovalSignaler = service.NewTemporalApprovalActionSignaler(service.TemporalStarterConfig{
+	orchestrationSvc.TaskCanceler = taskSvc
+	approvalClient := service.NewTemporalApprovalActionSignaler(service.TemporalStarterConfig{
 		HostPort:  cfg.TemporalHostPort,
 		Namespace: cfg.TemporalNamespace,
 		TaskQueue: cfg.TemporalTaskQueue,
 	})
+	orchestrationSvc.ApprovalSignaler = approvalClient
+	if canceler, ok := approvalClient.(service.WorkflowCanceler); ok {
+		orchestrationSvc.WorkflowCanceler = canceler
+	}
 	return &Handler{
 		Queries:               queries,
 		DB:                    executor,

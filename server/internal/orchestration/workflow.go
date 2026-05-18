@@ -11,6 +11,7 @@ import (
 const (
 	IssueWorkflowName              = "IssueWorkflow"
 	AgentTaskOutcomeSignalName     = "agent_task_outcome"
+	ApprovalActionSignalName       = "approval_action"
 	LoadIssueActivityName          = "orchestration.load_issue"
 	AnalyzeIssueActivityName       = "orchestration.analyze_issue"
 	DispatchTaskActivityName       = "orchestration.dispatch_daemon_task"
@@ -20,6 +21,7 @@ const (
 	FinalizeWorkflowActivityName   = "orchestration.finalize_workflow"
 	ProjectAnalysisActivityName    = "orchestration.project_analysis"
 	ProjectSignalAuditActivityName = "orchestration.project_signal_audit"
+	maxNodeAttempts                = 2
 )
 
 type IssueWorkflowInput struct {
@@ -82,13 +84,19 @@ type ValidateOutcomeResult struct {
 	ReasonCode         string
 	RecommendedAction  string
 	NeedsHumanReview   bool
+	ShouldRetry        bool
 	TerminalPlanStatus string
 	ProjectionSummary  string
 	ProjectionDetail   string
+	FailedTests        []string
+	Risks              []string
 }
 
 type ReviewOutcomeResult struct {
-	Summary string
+	Summary       string
+	HighRisk      bool
+	Concern       string
+	SeverityLabel string
 }
 
 type SummarizeOutcomeResult struct {
@@ -111,17 +119,126 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 		return err
 	}
 
-	var dispatch service.DispatchAgentTaskResult
-	if err := workflow.ExecuteActivity(ctx, DispatchTaskActivityName, DispatchDaemonTaskInput{
-		PlanID:             input.PlanID,
-		WorkflowNodeKey:    "dispatch",
-		Attempt:            1,
-		TemporalWorkflowID: input.WorkflowID,
-	}).Get(ctx, &dispatch); err != nil {
-		return err
-	}
-
 	outcomeCh := workflow.GetSignalChannel(ctx, AgentTaskOutcomeSignalName)
+	approvalCh := workflow.GetSignalChannel(ctx, ApprovalActionSignalName)
+
+	for attempt := 1; attempt <= maxNodeAttempts; attempt++ {
+		var dispatch service.DispatchAgentTaskResult
+		if err := workflow.ExecuteActivity(ctx, DispatchTaskActivityName, DispatchDaemonTaskInput{
+			PlanID:             input.PlanID,
+			WorkflowNodeKey:    "dispatch",
+			Attempt:            attempt,
+			TemporalWorkflowID: input.WorkflowID,
+		}).Get(ctx, &dispatch); err != nil {
+			return err
+		}
+
+		outcome, err := waitForAgentTaskOutcome(ctx, input, dispatch, outcomeCh)
+		if err != nil {
+			return err
+		}
+
+		var validation ValidateOutcomeResult
+		if err := workflow.ExecuteActivity(ctx, ValidateOutcomeActivityName, ValidateOutcomeInput{
+			Outcome:  outcome,
+			Analysis: analysis,
+			Issue:    issue,
+			Dispatch: dispatch,
+		}).Get(ctx, &validation); err != nil {
+			return err
+		}
+		if validation.ShouldRetry && attempt >= maxNodeAttempts {
+			validation.ShouldRetry = false
+			validation.NeedsHumanReview = true
+			validation.TerminalPlanStatus = "waiting_human"
+			validation.RecommendedAction = "review"
+		}
+
+		var review ReviewOutcomeResult
+		if err := workflow.ExecuteActivity(ctx, ReviewOutcomeActivityName, validation, analysis, issue, dispatch).Get(ctx, &review); err != nil {
+			return err
+		}
+		validation = applyOutcomePolicy(validation, review)
+
+		var summary SummarizeOutcomeResult
+		if err := workflow.ExecuteActivity(ctx, SummarizeOutcomeActivityName, review, validation, analysis, issue, dispatch).Get(ctx, &summary); err != nil {
+			return err
+		}
+
+		if validation.ShouldRetry && attempt < maxNodeAttempts {
+			validation.Status = "failed"
+			validation.TerminalPlanStatus = "running"
+			if err := workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if validation.NeedsHumanReview || validation.TerminalPlanStatus == "waiting_human" {
+			if err := workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil); err != nil {
+				return err
+			}
+			approval := waitForApprovalAction(ctx, input, dispatch, approvalCh)
+			switch approval.Action {
+			case "approve":
+				validation.Status = "completed"
+				validation.ReasonCode = "human_approved"
+				validation.RecommendedAction = "none"
+				validation.NeedsHumanReview = false
+				validation.ShouldRetry = false
+				validation.TerminalPlanStatus = "completed"
+				validation.ProjectionDetail = "human approved orchestration outcome"
+				return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
+			case "retry":
+				if attempt < maxNodeAttempts {
+					continue
+				}
+				validation.Status = "failed"
+				validation.ReasonCode = "retry_exhausted"
+				validation.RecommendedAction = "none"
+				validation.NeedsHumanReview = false
+				validation.ShouldRetry = false
+				validation.TerminalPlanStatus = "failed"
+				validation.ProjectionDetail = "orchestration retry budget exhausted"
+				return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
+			case "cancel":
+				validation.Status = "cancelled"
+				validation.ReasonCode = "human_cancelled"
+				validation.RecommendedAction = "none"
+				validation.NeedsHumanReview = false
+				validation.ShouldRetry = false
+				validation.TerminalPlanStatus = "cancelled"
+				validation.ProjectionDetail = "human cancelled orchestration"
+				return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
+			}
+		}
+
+		return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
+	}
+	return nil
+}
+
+func applyOutcomePolicy(validation ValidateOutcomeResult, review ReviewOutcomeResult) ValidateOutcomeResult {
+	if validation.NeedsHumanReview || validation.TerminalPlanStatus == "waiting_human" {
+		return validation
+	}
+	if review.HighRisk {
+		validation.Status = "waiting_human"
+		validation.ReasonCode = "review_high_risk"
+		validation.RecommendedAction = "review"
+		validation.NeedsHumanReview = true
+		validation.ShouldRetry = false
+		validation.TerminalPlanStatus = "waiting_human"
+		if review.Concern != "" {
+			validation.ProjectionDetail = "advisory review flagged high-risk concern: " + review.Concern
+		} else {
+			validation.ProjectionDetail = "advisory review flagged a high-risk concern"
+		}
+	}
+	return validation
+}
+
+func waitForAgentTaskOutcome(ctx workflow.Context, input IssueWorkflowInput, dispatch service.DispatchAgentTaskResult, outcomeCh workflow.ReceiveChannel) (service.AgentTaskOutcomeSignalInput, error) {
 	var outcome service.AgentTaskOutcomeSignalInput
 	received := false
 	selector := workflow.NewSelector(ctx)
@@ -138,28 +255,29 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 	for !received {
 		selector.Select(ctx)
 	}
+	return outcome, nil
+}
 
-	var validation ValidateOutcomeResult
-	if err := workflow.ExecuteActivity(ctx, ValidateOutcomeActivityName, ValidateOutcomeInput{
-		Outcome:  outcome,
-		Analysis: analysis,
-		Issue:    issue,
-		Dispatch: dispatch,
-	}).Get(ctx, &validation); err != nil {
-		return err
+func waitForApprovalAction(ctx workflow.Context, input IssueWorkflowInput, dispatch service.DispatchAgentTaskResult, approvalCh workflow.ReceiveChannel) service.ApprovalActionSignalInput {
+	var approval service.ApprovalActionSignalInput
+	received := false
+	selector := workflow.NewSelector(ctx)
+	selector.AddReceive(approvalCh, func(c workflow.ReceiveChannel, _ bool) {
+		var candidate service.ApprovalActionSignalInput
+		c.Receive(ctx, &candidate)
+		if candidate.WorkflowID == input.WorkflowID &&
+			candidate.PlanID == input.PlanID &&
+			candidate.NodeID == dispatch.NodeID &&
+			candidate.ActorType == "human" &&
+			(candidate.Action == "approve" || candidate.Action == "retry" || candidate.Action == "cancel") {
+			approval = candidate
+			received = true
+		}
+	})
+	for !received {
+		selector.Select(ctx)
 	}
-
-	var review ReviewOutcomeResult
-	if err := workflow.ExecuteActivity(ctx, ReviewOutcomeActivityName, validation, analysis, issue, dispatch).Get(ctx, &review); err != nil {
-		return err
-	}
-
-	var summary SummarizeOutcomeResult
-	if err := workflow.ExecuteActivity(ctx, SummarizeOutcomeActivityName, review, validation, analysis, issue, dispatch).Get(ctx, &summary); err != nil {
-		return err
-	}
-
-	return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
+	return approval
 }
 
 func correlateAgentTaskOutcome(input IssueWorkflowInput, dispatch service.DispatchAgentTaskResult, outcome service.AgentTaskOutcomeSignalInput) (bool, SignalAuditInput) {

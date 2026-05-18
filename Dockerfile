@@ -7,6 +7,8 @@ WORKDIR /src
 
 # Cache dependencies
 COPY server/go.mod server/go.sum ./server/
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 RUN cd server && go mod download
 
 # Copy server source

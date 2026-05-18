@@ -239,7 +239,7 @@ func (s *auditCheckingApprovalSignaler) SignalApprovalAction(ctx context.Context
 		FROM orchestration_event
 		WHERE plan_id = $1
 			AND node_id = $2
-			AND type = 'approval_action'
+			AND type = 'approval.' || $4
 			AND details->>'actor_id' = $3
 			AND details->>'actor_type' = 'human'
 			AND details->>'action' = $4
@@ -251,7 +251,7 @@ func (s *auditCheckingApprovalSignaler) SignalApprovalAction(ctx context.Context
 			FROM orchestration_event
 			WHERE plan_id = $1
 				AND node_id IS NULL
-				AND type = 'approval_action'
+				AND type = 'approval.' || $3
 				AND details->>'actor_id' = $2
 				AND details->>'actor_type' = 'human'
 				AND details->>'action' = $3
@@ -275,6 +275,27 @@ func (s *auditCheckingApprovalSignaler) recordedCalls() []service.ApprovalAction
 	defer s.mu.Unlock()
 	calls := make([]service.ApprovalActionSignalInput, len(s.calls))
 	copy(calls, s.calls)
+	return calls
+}
+
+type recordingWorkflowCanceler struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (c *recordingWorkflowCanceler) CancelWorkflow(ctx context.Context, workflowID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, workflowID)
+	return c.err
+}
+
+func (c *recordingWorkflowCanceler) recordedCalls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	calls := make([]string, len(c.calls))
+	copy(calls, c.calls)
 	return calls
 }
 
@@ -337,6 +358,14 @@ func TestApproveOrchestrationNodeAllowsOwnerAndAuditsBeforeSignal(t *testing.T) 
 		t.Fatalf("mark node waiting_human: %v", err)
 	}
 
+	eventsCh := make(chan events.Event, 4)
+	testHandler.Bus.Subscribe(protocol.EventOrchestrationUpdated, func(e events.Event) {
+		select {
+		case eventsCh <- e:
+		default:
+		}
+	})
+
 	approveW := httptest.NewRecorder()
 	approveReq := withURLParam(
 		newRequest("POST", "/api/orchestration/nodes/"+dispatched.NodeID+"/approve", map[string]any{
@@ -366,6 +395,210 @@ func TestApproveOrchestrationNodeAllowsOwnerAndAuditsBeforeSignal(t *testing.T) 
 	}
 	if call.Action != "approve" || call.Reason != "risk accepted by owner" {
 		t.Fatalf("signal action/reason mismatch: %+v", call)
+	}
+	select {
+	case event := <-eventsCh:
+		if event.WorkspaceID != testWorkspaceID {
+			t.Fatalf("approval event workspace_id = %q, want %q", event.WorkspaceID, testWorkspaceID)
+		}
+	default:
+		t.Fatal("expected orchestration:updated event on approval")
+	}
+}
+
+func TestApprovalNodeActionsAllowAdminAndHumanAssignee(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration approval authorized humans")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	signaler := &auditCheckingApprovalSignaler{t: t}
+	previousApprovalSignaler := testHandler.OrchestrationService.ApprovalSignaler
+	testHandler.OrchestrationService.ApprovalSignaler = signaler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.ApprovalSignaler = previousApprovalSignaler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "validation",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch approval node: %v", err)
+	}
+	adminID := createRuntimeLocalSkillTestMember(t, "admin")
+	assigneeID := createRuntimeLocalSkillTestMember(t, "member")
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE issue
+		SET assignee_type = 'member',
+			assignee_id = $2
+		WHERE id = $1
+	`, issueID, assigneeID); err != nil {
+		t.Fatalf("assign issue to human member: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE orchestration_node
+		SET status = 'waiting_human',
+			reason_code = 'tests_failed',
+			recommended_action = 'retry'
+		WHERE id = $1
+	`, dispatched.NodeID); err != nil {
+		t.Fatalf("mark node waiting_human: %v", err)
+	}
+
+	adminW := httptest.NewRecorder()
+	adminReq := withURLParam(newRequestAs(adminID, "POST", "/api/orchestration/nodes/"+dispatched.NodeID+"/approve", nil), "nodeId", dispatched.NodeID)
+	testHandler.ApproveOrchestrationNode(adminW, adminReq)
+	if adminW.Code != http.StatusAccepted {
+		t.Fatalf("admin ApproveOrchestrationNode: expected 202, got %d: %s", adminW.Code, adminW.Body.String())
+	}
+
+	assigneeW := httptest.NewRecorder()
+	assigneeReq := withURLParam(newRequestAs(assigneeID, "POST", "/api/orchestration/nodes/"+dispatched.NodeID+"/retry", nil), "nodeId", dispatched.NodeID)
+	testHandler.RetryOrchestrationNode(assigneeW, assigneeReq)
+	if assigneeW.Code != http.StatusAccepted {
+		t.Fatalf("assignee RetryOrchestrationNode: expected 202, got %d: %s", assigneeW.Code, assigneeW.Body.String())
+	}
+
+	calls := signaler.recordedCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected admin and assignee signals, got %+v", calls)
+	}
+	if calls[0].ActorID != adminID || calls[0].Action != "approve" {
+		t.Fatalf("unexpected admin signal: %+v", calls[0])
+	}
+	if calls[1].ActorID != assigneeID || calls[1].Action != "retry" {
+		t.Fatalf("unexpected assignee signal: %+v", calls[1])
+	}
+}
+
+func TestApproveOrchestrationNodeRejectsNodeThatIsNotWaitingForHuman(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration approval state denied")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	signaler := &auditCheckingApprovalSignaler{t: t}
+	previousApprovalSignaler := testHandler.OrchestrationService.ApprovalSignaler
+	testHandler.OrchestrationService.ApprovalSignaler = signaler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.ApprovalSignaler = previousApprovalSignaler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "validation",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch approval node: %v", err)
+	}
+
+	approveW := httptest.NewRecorder()
+	approveReq := withURLParam(newRequest("POST", "/api/orchestration/nodes/"+dispatched.NodeID+"/approve", nil), "nodeId", dispatched.NodeID)
+	testHandler.ApproveOrchestrationNode(approveW, approveReq)
+	if approveW.Code != http.StatusConflict {
+		t.Fatalf("ApproveOrchestrationNode: expected 409, got %d: %s", approveW.Code, approveW.Body.String())
+	}
+	if calls := signaler.recordedCalls(); len(calls) != 0 {
+		t.Fatalf("non-waiting node approval should not signal Temporal, got %+v", calls)
+	}
+}
+
+func TestRetryOrchestrationNodeRejectsExhaustedRetryBudget(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration retry budget denied")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	signaler := &auditCheckingApprovalSignaler{t: t}
+	previousApprovalSignaler := testHandler.OrchestrationService.ApprovalSignaler
+	testHandler.OrchestrationService.ApprovalSignaler = signaler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.ApprovalSignaler = previousApprovalSignaler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "validation",
+		Attempt:            2,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch approval node: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE orchestration_node
+		SET status = 'waiting_human',
+			reason_code = 'evidence_insufficient',
+			recommended_action = 'review'
+		WHERE id = $1
+	`, dispatched.NodeID); err != nil {
+		t.Fatalf("mark node waiting_human: %v", err)
+	}
+
+	retryW := httptest.NewRecorder()
+	retryReq := withURLParam(newRequest("POST", "/api/orchestration/nodes/"+dispatched.NodeID+"/retry", nil), "nodeId", dispatched.NodeID)
+	testHandler.RetryOrchestrationNode(retryW, retryReq)
+	if retryW.Code != http.StatusConflict {
+		t.Fatalf("RetryOrchestrationNode: expected 409, got %d: %s", retryW.Code, retryW.Body.String())
+	}
+	if calls := signaler.recordedCalls(); len(calls) != 0 {
+		t.Fatalf("retry-exhausted approval should not signal Temporal, got %+v", calls)
 	}
 }
 
@@ -443,12 +676,114 @@ func TestApproveOrchestrationNodeRejectsAgentActor(t *testing.T) {
 	if err := testPool.QueryRow(t.Context(), `
 		SELECT count(*)
 		FROM orchestration_event
-		WHERE plan_id = $1 AND node_id = $2 AND type = 'approval_action'
+			WHERE plan_id = $1 AND node_id = $2 AND type LIKE 'approval.%'
 	`, startBody.Plan.ID, dispatched.NodeID).Scan(&auditCount); err != nil {
 		t.Fatalf("count approval audits: %v", err)
 	}
 	if auditCount != 0 {
 		t.Fatalf("agent approval should not write audit event, got %d", auditCount)
+	}
+}
+
+func TestGetIssueOrchestrationProjectsActionsOnlyForAuthorizedHumans(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration approval read actions")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "validation",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch approval node: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE orchestration_node
+		SET status = 'waiting_human',
+			reason_code = 'tests_failed',
+			recommended_action = 'retry'
+		WHERE id = $1
+	`, dispatched.NodeID); err != nil {
+		t.Fatalf("mark node waiting_human: %v", err)
+	}
+
+	type projectedActions struct {
+		Plan []string
+		Node []string
+	}
+	readActions := func(t *testing.T, userID string) projectedActions {
+		t.Helper()
+		readW := httptest.NewRecorder()
+		readReq := withURLParam(newRequestAs(userID, "GET", "/api/issues/"+issueID+"/orchestration", nil), "id", issueID)
+		testHandler.GetIssueOrchestration(readW, readReq)
+		if readW.Code != http.StatusOK {
+			t.Fatalf("GetIssueOrchestration: expected 200, got %d: %s", readW.Code, readW.Body.String())
+		}
+		var snapshot struct {
+			Plans []struct {
+				AvailableActions []string `json:"available_actions"`
+				Nodes            []struct {
+					ID               string   `json:"id"`
+					AvailableActions []string `json:"available_actions"`
+				} `json:"nodes"`
+			} `json:"plans"`
+		}
+		if err := json.Unmarshal(readW.Body.Bytes(), &snapshot); err != nil {
+			t.Fatalf("decode orchestration snapshot: %v", err)
+		}
+		for _, node := range snapshot.Plans[0].Nodes {
+			if node.ID == dispatched.NodeID {
+				return projectedActions{Plan: snapshot.Plans[0].AvailableActions, Node: node.AvailableActions}
+			}
+		}
+		t.Fatalf("projected node %s not found: %s", dispatched.NodeID, readW.Body.String())
+		return projectedActions{}
+	}
+
+	ownerActions := readActions(t, testUserID)
+	if len(ownerActions.Plan) != 1 || ownerActions.Plan[0] != "cancel" {
+		t.Fatalf("owner plan actions = %+v, want cancel", ownerActions.Plan)
+	}
+	if len(ownerActions.Node) != 2 || ownerActions.Node[0] != "approve" || ownerActions.Node[1] != "retry" {
+		t.Fatalf("owner node actions = %+v, want approve/retry", ownerActions.Node)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE orchestration_node
+		SET attempt = 2
+		WHERE id = $1
+	`, dispatched.NodeID); err != nil {
+		t.Fatalf("mark node retry budget exhausted: %v", err)
+	}
+	exhaustedActions := readActions(t, testUserID)
+	if len(exhaustedActions.Node) != 1 || exhaustedActions.Node[0] != "approve" {
+		t.Fatalf("retry-exhausted node actions = %+v, want approve only", exhaustedActions.Node)
+	}
+	plainMemberID := createRuntimeLocalSkillTestMember(t, "member")
+	if actions := readActions(t, plainMemberID); len(actions.Plan) != 0 || len(actions.Node) != 0 {
+		t.Fatalf("unrelated member actions = %+v, want none", actions)
 	}
 }
 
@@ -461,9 +796,13 @@ func TestCancelOrchestrationPlanAuditsSignalsAndCancelsLinkedTask(t *testing.T) 
 	signaler := &auditCheckingApprovalSignaler{t: t}
 	previousApprovalSignaler := testHandler.OrchestrationService.ApprovalSignaler
 	testHandler.OrchestrationService.ApprovalSignaler = signaler
+	canceler := &recordingWorkflowCanceler{}
+	previousWorkflowCanceler := testHandler.OrchestrationService.WorkflowCanceler
+	testHandler.OrchestrationService.WorkflowCanceler = canceler
 	t.Cleanup(func() {
 		testHandler.OrchestrationService.Starter = previousStarter
 		testHandler.OrchestrationService.ApprovalSignaler = previousApprovalSignaler
+		testHandler.OrchestrationService.WorkflowCanceler = previousWorkflowCanceler
 	})
 
 	w := httptest.NewRecorder()
@@ -512,12 +851,12 @@ func TestCancelOrchestrationPlanAuditsSignalsAndCancelsLinkedTask(t *testing.T) 
 		t.Fatalf("CancelOrchestrationPlan: expected 202, got %d: %s", cancelW.Code, cancelW.Body.String())
 	}
 
-	calls := signaler.recordedCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected one cancel signal, got %d", len(calls))
+	if calls := signaler.recordedCalls(); len(calls) != 0 {
+		t.Fatalf("plan cancellation should cancel the workflow instead of signaling approval, got %+v", calls)
 	}
-	if calls[0].Action != "cancel" || calls[0].NodeID != "" {
-		t.Fatalf("unexpected cancel signal: %+v", calls[0])
+	cancelCalls := canceler.recordedCalls()
+	if len(cancelCalls) != 1 || cancelCalls[0] != startBody.Plan.TemporalWorkflowID {
+		t.Fatalf("expected one workflow cancellation for %q, got %+v", startBody.Plan.TemporalWorkflowID, cancelCalls)
 	}
 
 	var planStatus, taskStatus string
@@ -529,6 +868,195 @@ func TestCancelOrchestrationPlanAuditsSignalsAndCancelsLinkedTask(t *testing.T) 
 	}
 	if planStatus != "cancelled" || taskStatus != "cancelled" {
 		t.Fatalf("expected cancelled plan/task, got plan=%q task=%q", planStatus, taskStatus)
+	}
+}
+
+func TestCancelOrchestrationPlanWithoutActiveTaskPreservesEvidence(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration cancel without task")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	canceler := &recordingWorkflowCanceler{}
+	previousWorkflowCanceler := testHandler.OrchestrationService.WorkflowCanceler
+	testHandler.OrchestrationService.WorkflowCanceler = canceler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.WorkflowCanceler = previousWorkflowCanceler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	var completedNodeID string
+	if err := testPool.QueryRow(t.Context(), `
+		INSERT INTO orchestration_node (plan_id, workflow_node_key, title, status, attempt, started_at, completed_at)
+		VALUES ($1, 'analyze', 'Analyze', 'completed', 1, now(), now())
+		RETURNING id
+	`, startBody.Plan.ID).Scan(&completedNodeID); err != nil {
+		t.Fatalf("insert completed node: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO orchestration_event (plan_id, node_id, type, source, message, details)
+		VALUES ($1, $2, 'node.completed', 'workflow', 'Analyze completed', '{"summary":"ready"}'::jsonb)
+	`, startBody.Plan.ID, completedNodeID); err != nil {
+		t.Fatalf("insert completed event: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO orchestration_artifact (plan_id, node_id, type, source, label, uri, data)
+		VALUES ($1, $2, 'analysis', 'workflow', 'Analysis summary', 'artifact://analysis', '{"recommendation":"dispatch"}'::jsonb)
+	`, startBody.Plan.ID, completedNodeID); err != nil {
+		t.Fatalf("insert completed artifact: %v", err)
+	}
+
+	cancelW := httptest.NewRecorder()
+	cancelReq := withURLParam(
+		newRequest("POST", "/api/orchestration/plans/"+startBody.Plan.ID+"/cancel", map[string]any{
+			"reason": "operator stopped run",
+		}),
+		"planId",
+		startBody.Plan.ID,
+	)
+	testHandler.CancelOrchestrationPlan(cancelW, cancelReq)
+	if cancelW.Code != http.StatusAccepted {
+		t.Fatalf("CancelOrchestrationPlan: expected 202, got %d: %s", cancelW.Code, cancelW.Body.String())
+	}
+	cancelCalls := canceler.recordedCalls()
+	if len(cancelCalls) != 1 || cancelCalls[0] != startBody.Plan.TemporalWorkflowID {
+		t.Fatalf("expected one workflow cancellation for %q, got %+v", startBody.Plan.TemporalWorkflowID, cancelCalls)
+	}
+
+	readW := httptest.NewRecorder()
+	readReq := withURLParam(newRequest("GET", "/api/issues/"+issueID+"/orchestration", nil), "id", issueID)
+	testHandler.GetIssueOrchestration(readW, readReq)
+	if readW.Code != http.StatusOK {
+		t.Fatalf("GetIssueOrchestration: expected 200, got %d: %s", readW.Code, readW.Body.String())
+	}
+	var snapshot struct {
+		Plans []struct {
+			Status  string `json:"status"`
+			Summary struct {
+				ReasonCode string `json:"reason_code"`
+			} `json:"summary"`
+			Nodes []struct {
+				ID               string   `json:"id"`
+				WorkflowNodeKey  string   `json:"workflow_node_key"`
+				Status           string   `json:"status"`
+				AvailableActions []string `json:"available_actions"`
+			} `json:"nodes"`
+			Events []struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"events"`
+			Artifacts []struct {
+				Label string `json:"label"`
+				URI   string `json:"uri"`
+			} `json:"artifacts"`
+		} `json:"plans"`
+	}
+	if err := json.Unmarshal(readW.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("decode orchestration snapshot: %v", err)
+	}
+	if len(snapshot.Plans) != 1 {
+		t.Fatalf("expected one plan in snapshot, got %d", len(snapshot.Plans))
+	}
+	plan := snapshot.Plans[0]
+	if plan.Status != "cancelled" || plan.Summary.ReasonCode != "human_cancelled" {
+		t.Fatalf("snapshot plan status/reason = %q/%q, want cancelled/human_cancelled", plan.Status, plan.Summary.ReasonCode)
+	}
+	var sawCompletedNode, sawCancelAudit, sawArtifact bool
+	for _, node := range plan.Nodes {
+		if node.ID == completedNodeID && node.WorkflowNodeKey == "analyze" && node.Status == "completed" && len(node.AvailableActions) == 0 {
+			sawCompletedNode = true
+		}
+	}
+	for _, event := range plan.Events {
+		if event.Type == "approval.cancel" {
+			sawCancelAudit = true
+		}
+	}
+	for _, artifact := range plan.Artifacts {
+		if artifact.Label == "Analysis summary" && artifact.URI == "artifact://analysis" {
+			sawArtifact = true
+		}
+	}
+	if !sawCompletedNode || !sawCancelAudit || !sawArtifact {
+		t.Fatalf("snapshot missing preserved evidence: node=%v cancelAudit=%v artifact=%v plan=%+v", sawCompletedNode, sawCancelAudit, sawArtifact, plan)
+	}
+}
+
+func TestCancelOrchestrationPlanIsIdempotentAfterAlreadyCancelled(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration cancel idempotent")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	canceler := &recordingWorkflowCanceler{}
+	previousWorkflowCanceler := testHandler.OrchestrationService.WorkflowCanceler
+	testHandler.OrchestrationService.WorkflowCanceler = canceler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.WorkflowCanceler = previousWorkflowCanceler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID string `json:"id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	cancel := func(reason string) {
+		t.Helper()
+		cancelW := httptest.NewRecorder()
+		cancelReq := withURLParam(
+			newRequest("POST", "/api/orchestration/plans/"+startBody.Plan.ID+"/cancel", map[string]any{"reason": reason}),
+			"planId",
+			startBody.Plan.ID,
+		)
+		testHandler.CancelOrchestrationPlan(cancelW, cancelReq)
+		if cancelW.Code != http.StatusAccepted {
+			t.Fatalf("CancelOrchestrationPlan: expected 202, got %d: %s", cancelW.Code, cancelW.Body.String())
+		}
+	}
+
+	cancel("first stop")
+	cancel("second stop")
+
+	if calls := canceler.recordedCalls(); len(calls) != 1 {
+		t.Fatalf("repeated cancel should call Temporal once, got %+v", calls)
+	}
+	var auditCount int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM orchestration_event
+		WHERE plan_id = $1 AND type = 'approval.cancel'
+	`, startBody.Plan.ID).Scan(&auditCount); err != nil {
+		t.Fatalf("count cancel audit events: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("repeated cancel should write one audit event, got %d", auditCount)
 	}
 }
 

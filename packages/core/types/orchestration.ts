@@ -11,6 +11,7 @@ export interface IssueOrchestrationNode {
   status: string;
   reason_code: string;
   recommended_action: string;
+  available_actions: string[];
   attempt: number;
 }
 
@@ -44,6 +45,7 @@ export interface IssueOrchestrationPlan {
   created_at: string;
   updated_at: string;
   summary: IssueOrchestrationSummary;
+  available_actions: string[];
   nodes: IssueOrchestrationNode[];
   events: IssueOrchestrationEvent[];
   artifacts: IssueOrchestrationArtifact[];

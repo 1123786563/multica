@@ -144,3 +144,19 @@ func (s *TemporalWorkflowStarterClient) SignalApprovalAction(ctx context.Context
 
 	return c.SignalWorkflow(ctx, input.WorkflowID, "", defaultApprovalActionSignal, input)
 }
+
+func (s *TemporalWorkflowStarterClient) CancelWorkflow(ctx context.Context, workflowID string) error {
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	c, err := client.DialContext(dialCtx, client.Options{
+		HostPort:  s.HostPort,
+		Namespace: s.Namespace,
+	})
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	return c.CancelWorkflow(ctx, workflowID, "")
+}

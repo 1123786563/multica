@@ -11,12 +11,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 var (
 	ErrTemporalUnavailable = errors.New("temporal unavailable")
 	ErrForbidden           = errors.New("forbidden")
+	ErrInvalidState        = errors.New("invalid orchestration state")
 )
+
+const maxOrchestrationNodeAttempts = 2
 
 type WorkflowAlreadyStartedError struct {
 	WorkflowID string
@@ -46,6 +50,14 @@ type AgentTaskOutcomeSignaler interface {
 
 type ApprovalActionSignaler interface {
 	SignalApprovalAction(ctx context.Context, input ApprovalActionSignalInput) error
+}
+
+type WorkflowCanceler interface {
+	CancelWorkflow(ctx context.Context, workflowID string) error
+}
+
+type TaskCanceler interface {
+	CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.AgentTaskQueue, error)
 }
 
 type IssueWorkflowStartInput struct {
@@ -88,6 +100,8 @@ type OrchestrationService struct {
 	Tx               TxStarter
 	Starter          TemporalWorkflowStarter
 	ApprovalSignaler ApprovalActionSignaler
+	WorkflowCanceler WorkflowCanceler
+	TaskCanceler     TaskCanceler
 }
 
 func NewOrchestrationService(db OrchestrationDB, tx TxStarter, starter TemporalWorkflowStarter) *OrchestrationService {
@@ -105,6 +119,7 @@ type OrchestrationPlan struct {
 	CreatedAt          time.Time               `json:"created_at"`
 	UpdatedAt          time.Time               `json:"updated_at"`
 	Summary            OrchestrationSummary    `json:"summary"`
+	AvailableActions   []string                `json:"available_actions"`
 	Nodes              []OrchestrationNode     `json:"nodes"`
 	Events             []OrchestrationEvent    `json:"events"`
 	Artifacts          []OrchestrationArtifact `json:"artifacts"`
@@ -116,14 +131,15 @@ type OrchestrationSummary struct {
 }
 
 type OrchestrationNode struct {
-	ID                string `json:"id"`
-	NodeKey           string `json:"node_key"`
-	WorkflowNodeKey   string `json:"workflow_node_key"`
-	Title             string `json:"title"`
-	Status            string `json:"status"`
-	ReasonCode        string `json:"reason_code"`
-	RecommendedAction string `json:"recommended_action"`
-	Attempt           int    `json:"attempt"`
+	ID                string   `json:"id"`
+	NodeKey           string   `json:"node_key"`
+	WorkflowNodeKey   string   `json:"workflow_node_key"`
+	Title             string   `json:"title"`
+	Status            string   `json:"status"`
+	ReasonCode        string   `json:"reason_code"`
+	RecommendedAction string   `json:"recommended_action"`
+	AvailableActions  []string `json:"available_actions"`
+	Attempt           int      `json:"attempt"`
 }
 
 type OrchestrationEvent struct {
@@ -178,10 +194,11 @@ type ApprovalActionInput struct {
 }
 
 type ApprovalActionResult struct {
-	PlanID     string `json:"plan_id"`
-	NodeID     string `json:"node_id"`
-	Action     string `json:"action"`
-	WorkflowID string `json:"workflow_id"`
+	PlanID      string `json:"plan_id"`
+	NodeID      string `json:"node_id"`
+	Action      string `json:"action"`
+	WorkflowID  string `json:"workflow_id"`
+	WorkspaceID string `json:"workspace_id"`
 }
 
 type PlanApprovalActionInput struct {
@@ -304,18 +321,25 @@ func (s *OrchestrationService) ApplyApprovalAction(ctx context.Context, input Ap
 	defer tx.Rollback(ctx)
 
 	var planID, issueID, workspaceID pgtype.UUID
-	var workflowID string
+	var workflowID, nodeStatus string
+	var nodeAttempt int
 	if err := tx.QueryRow(ctx, `
-		SELECT p.id, p.issue_id, p.workspace_id, COALESCE(p.temporal_workflow_id, '')
+		SELECT p.id, p.issue_id, p.workspace_id, COALESCE(p.temporal_workflow_id, ''), n.status, n.attempt
 		FROM orchestration_node n
 		JOIN orchestration_plan p ON p.id = n.plan_id
 		WHERE n.id = $1
 		FOR UPDATE OF n, p
-	`, input.NodeID).Scan(&planID, &issueID, &workspaceID, &workflowID); err != nil {
+	`, input.NodeID).Scan(&planID, &issueID, &workspaceID, &workflowID, &nodeStatus, &nodeAttempt); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("load approval node: %w", err)
 	}
 	if workflowID == "" {
 		return ApprovalActionResult{}, ErrTemporalUnavailable
+	}
+	if nodeStatus != "waiting_human" {
+		return ApprovalActionResult{}, ErrInvalidState
+	}
+	if input.Action == "retry" && nodeAttempt >= maxOrchestrationNodeAttempts {
+		return ApprovalActionResult{}, ErrInvalidState
 	}
 
 	allowed, err := s.authorizedHumanApprovalActor(ctx, tx, workspaceID, issueID, input.ActorID)
@@ -339,8 +363,8 @@ func (s *OrchestrationService) ApplyApprovalAction(ctx context.Context, input Ap
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO orchestration_event (plan_id, node_id, type, source, message, details)
-		VALUES ($1, $2, 'approval_action', 'server', $3, $4::jsonb)
-	`, planID, input.NodeID, "Approval action recorded", details); err != nil {
+		VALUES ($1, $2, $3, 'server', $4, $5::jsonb)
+	`, planID, input.NodeID, "approval."+input.Action, "Approval action recorded", details); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("write approval audit event: %w", err)
 	}
 
@@ -349,10 +373,11 @@ func (s *OrchestrationService) ApplyApprovalAction(ctx context.Context, input Ap
 	}
 
 	result := ApprovalActionResult{
-		PlanID:     util.UUIDToString(planID),
-		NodeID:     util.UUIDToString(input.NodeID),
-		Action:     input.Action,
-		WorkflowID: workflowID,
+		PlanID:      util.UUIDToString(planID),
+		NodeID:      util.UUIDToString(input.NodeID),
+		Action:      input.Action,
+		WorkflowID:  workflowID,
+		WorkspaceID: util.UUIDToString(workspaceID),
 	}
 	if err := s.ApprovalSignaler.SignalApprovalAction(ctx, ApprovalActionSignalInput{
 		WorkflowID: result.WorkflowID,
@@ -369,7 +394,7 @@ func (s *OrchestrationService) ApplyApprovalAction(ctx context.Context, input Ap
 }
 
 func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, input PlanApprovalActionInput) (ApprovalActionResult, error) {
-	if s.Tx == nil || s.DB == nil || s.ApprovalSignaler == nil {
+	if s.Tx == nil || s.DB == nil || s.WorkflowCanceler == nil {
 		return ApprovalActionResult{}, ErrTemporalUnavailable
 	}
 	if input.Action != "cancel" {
@@ -383,13 +408,13 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	defer tx.Rollback(ctx)
 
 	var issueID, workspaceID pgtype.UUID
-	var workflowID string
+	var workflowID, planStatus string
 	if err := tx.QueryRow(ctx, `
-		SELECT issue_id, workspace_id, COALESCE(temporal_workflow_id, '')
+		SELECT issue_id, workspace_id, status, COALESCE(temporal_workflow_id, '')
 		FROM orchestration_plan
 		WHERE id = $1
 		FOR UPDATE
-	`, input.PlanID).Scan(&issueID, &workspaceID, &workflowID); err != nil {
+	`, input.PlanID).Scan(&issueID, &workspaceID, &planStatus, &workflowID); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("load approval plan: %w", err)
 	}
 	if workflowID == "" {
@@ -402,6 +427,20 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	}
 	if !allowed {
 		return ApprovalActionResult{}, ErrForbidden
+	}
+	if planStatus == "cancelled" {
+		if err := tx.Commit(ctx); err != nil {
+			return ApprovalActionResult{}, err
+		}
+		return ApprovalActionResult{
+			PlanID:      util.UUIDToString(input.PlanID),
+			Action:      input.Action,
+			WorkflowID:  workflowID,
+			WorkspaceID: util.UUIDToString(workspaceID),
+		}, nil
+	}
+	if planStatus != "starting" && planStatus != "running" && planStatus != "waiting_human" {
+		return ApprovalActionResult{}, ErrInvalidState
 	}
 
 	details, err := json.Marshal(map[string]any{
@@ -416,7 +455,7 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO orchestration_event (plan_id, type, source, message, details)
-		VALUES ($1, 'approval_action', 'server', $2, $3::jsonb)
+		VALUES ($1, 'approval.cancel', 'server', $2, $3::jsonb)
 	`, input.PlanID, "Approval action recorded", details); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("write approval audit event: %w", err)
 	}
@@ -440,39 +479,55 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	`, input.PlanID); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration nodes: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE agent_task_queue
-		SET status = 'cancelled',
-			completed_at = COALESCE(completed_at, now())
+	taskRows, err := tx.Query(ctx, `
+		SELECT id
+		FROM agent_task_queue
 		WHERE orchestration_plan_id = $1
 			AND status IN ('queued', 'dispatched', 'running')
-	`, input.PlanID); err != nil {
-		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration tasks: %w", err)
+	`, input.PlanID)
+	if err != nil {
+		return ApprovalActionResult{}, fmt.Errorf("list orchestration tasks to cancel: %w", err)
 	}
+	var taskIDs []pgtype.UUID
+	for taskRows.Next() {
+		var taskID pgtype.UUID
+		if err := taskRows.Scan(&taskID); err != nil {
+			taskRows.Close()
+			return ApprovalActionResult{}, err
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+	if err := taskRows.Err(); err != nil {
+		taskRows.Close()
+		return ApprovalActionResult{}, err
+	}
+	taskRows.Close()
 
 	if err := tx.Commit(ctx); err != nil {
 		return ApprovalActionResult{}, err
 	}
 
-	result := ApprovalActionResult{
-		PlanID:     util.UUIDToString(input.PlanID),
-		Action:     input.Action,
-		WorkflowID: workflowID,
+	if s.TaskCanceler != nil {
+		for _, taskID := range taskIDs {
+			if _, err := s.TaskCanceler.CancelTask(ctx, taskID); err != nil {
+				return ApprovalActionResult{}, fmt.Errorf("cancel orchestration task: %w", err)
+			}
+		}
 	}
-	if err := s.ApprovalSignaler.SignalApprovalAction(ctx, ApprovalActionSignalInput{
-		WorkflowID: result.WorkflowID,
-		PlanID:     result.PlanID,
-		ActorID:    util.UUIDToString(input.ActorID),
-		ActorType:  "human",
-		Action:     input.Action,
-		Reason:     input.Reason,
-	}); err != nil {
+
+	result := ApprovalActionResult{
+		PlanID:      util.UUIDToString(input.PlanID),
+		Action:      input.Action,
+		WorkflowID:  workflowID,
+		WorkspaceID: util.UUIDToString(workspaceID),
+	}
+	if err := s.WorkflowCanceler.CancelWorkflow(ctx, result.WorkflowID); err != nil {
 		return ApprovalActionResult{}, err
 	}
 	return result, nil
 }
 
-func (s *OrchestrationService) authorizedHumanApprovalActor(ctx context.Context, tx pgx.Tx, workspaceID, issueID, actorID pgtype.UUID) (bool, error) {
+func (s *OrchestrationService) authorizedHumanApprovalActor(ctx context.Context, tx OrchestrationDB, workspaceID, issueID, actorID pgtype.UUID) (bool, error) {
 	var role string
 	if err := tx.QueryRow(ctx, `
 		SELECT role
@@ -679,6 +734,26 @@ func (s *OrchestrationService) markPlanFailed(ctx context.Context, planID pgtype
 }
 
 func (s *OrchestrationService) Snapshot(ctx context.Context, issueID pgtype.UUID) (OrchestrationSnapshot, error) {
+	return s.snapshot(ctx, issueID, false)
+}
+
+func (s *OrchestrationService) SnapshotForActor(ctx context.Context, issueID pgtype.UUID, actorType string, actorID pgtype.UUID) (OrchestrationSnapshot, error) {
+	canAct := false
+	if actorType == "member" && actorID.Valid {
+		var workspaceID pgtype.UUID
+		if err := s.DB.QueryRow(ctx, `SELECT workspace_id FROM issue WHERE id = $1`, issueID).Scan(&workspaceID); err != nil {
+			return OrchestrationSnapshot{}, err
+		}
+		allowed, err := s.authorizedHumanApprovalActor(ctx, s.DB, workspaceID, issueID, actorID)
+		if err != nil {
+			return OrchestrationSnapshot{}, err
+		}
+		canAct = allowed
+	}
+	return s.snapshot(ctx, issueID, canAct)
+}
+
+func (s *OrchestrationService) snapshot(ctx context.Context, issueID pgtype.UUID, canAct bool) (OrchestrationSnapshot, error) {
 	rows, err := s.DB.Query(ctx, `
 		SELECT id
 		FROM orchestration_plan
@@ -696,7 +771,7 @@ func (s *OrchestrationService) Snapshot(ctx context.Context, issueID pgtype.UUID
 		if err := rows.Scan(&id); err != nil {
 			return OrchestrationSnapshot{}, err
 		}
-		plan, err := s.getPlan(ctx, id)
+		plan, err := s.getPlanWithActions(ctx, id, canAct)
 		if err != nil {
 			return OrchestrationSnapshot{}, err
 		}
@@ -709,6 +784,10 @@ func (s *OrchestrationService) Snapshot(ctx context.Context, issueID pgtype.UUID
 }
 
 func (s *OrchestrationService) getPlan(ctx context.Context, planID pgtype.UUID) (OrchestrationPlan, error) {
+	return s.getPlanWithActions(ctx, planID, false)
+}
+
+func (s *OrchestrationService) getPlanWithActions(ctx context.Context, planID pgtype.UUID, canAct bool) (OrchestrationPlan, error) {
 	var plan OrchestrationPlan
 	var id, issueID pgtype.UUID
 	if err := s.DB.QueryRow(ctx, `
@@ -734,8 +813,9 @@ func (s *OrchestrationService) getPlan(ctx context.Context, planID pgtype.UUID) 
 	}
 	plan.ID = util.UUIDToString(id)
 	plan.IssueID = util.UUIDToString(issueID)
+	plan.AvailableActions = availablePlanActions(plan, canAct)
 	plan.Nodes = defaultIssueWorkflowNodes(plan.Status)
-	if nodes, err := s.projectedNodes(ctx, planID, plan.Nodes); err == nil {
+	if nodes, err := s.projectedNodes(ctx, planID, plan.Nodes, canAct); err == nil {
 		plan.Nodes = nodes
 	} else {
 		return OrchestrationPlan{}, err
@@ -839,7 +919,7 @@ func (s *OrchestrationService) projectedArtifacts(ctx context.Context, planID pg
 	return artifacts, nil
 }
 
-func (s *OrchestrationService) projectedNodes(ctx context.Context, planID pgtype.UUID, defaults []OrchestrationNode) ([]OrchestrationNode, error) {
+func (s *OrchestrationService) projectedNodes(ctx context.Context, planID pgtype.UUID, defaults []OrchestrationNode, canAct bool) ([]OrchestrationNode, error) {
 	rows, err := s.DB.Query(ctx, `
 		SELECT id, workflow_node_key, title, status, reason_code, recommended_action, attempt
 		FROM orchestration_node
@@ -877,15 +957,40 @@ func (s *OrchestrationService) projectedNodes(ctx context.Context, planID pgtype
 			if node.Title == "" {
 				node.Title = nodes[idx].Title
 			}
+			node.AvailableActions = availableNodeActions(node, canAct)
 			nodes[idx] = node
 			continue
 		}
+		node.AvailableActions = availableNodeActions(node, canAct)
 		nodes = append(nodes, node)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return nodes, nil
+}
+
+func availablePlanActions(plan OrchestrationPlan, canAct bool) []string {
+	if !canAct {
+		return []string{}
+	}
+	switch plan.Status {
+	case "starting", "running", "waiting_human":
+		return []string{"cancel"}
+	default:
+		return []string{}
+	}
+}
+
+func availableNodeActions(node OrchestrationNode, canAct bool) []string {
+	if !canAct || node.Status != "waiting_human" {
+		return []string{}
+	}
+	actions := []string{"approve"}
+	if node.Attempt < maxOrchestrationNodeAttempts {
+		actions = append(actions, "retry")
+	}
+	return actions
 }
 
 func defaultIssueWorkflowNodes(planStatus string) []OrchestrationNode {
