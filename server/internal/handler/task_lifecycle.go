@@ -94,14 +94,14 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// RerunIssue manually retries the issue's current agent assignment as a fresh
-// orchestration execution. It cancels the active plan and starts a new one.
-// The new task is flagged force_fresh_session=true so the daemon skips the
-// (agent_id, issue_id) session-resume lookup and starts a clean agent session.
-// A user clicking rerun has just judged the prior output bad — replaying the
-// same conversation would replay the same poisoned state. (Automatic retry, by
-// contrast, intentionally inherits the session — that path handles
-// infrastructure failures, not bad output.)
+// RerunIssue manually re-enqueues the issue's current agent assignment as a
+// fresh task. Useful when an issue is stuck or the user wants to retry a
+// failed run. The new task is flagged force_fresh_session=true: the daemon
+// claim handler skips the (agent_id, issue_id) session-resume lookup so the
+// agent starts a clean session. A user clicking rerun has just judged the
+// prior output bad — replaying the same conversation would replay the same
+// poisoned state. (Automatic retry, by contrast, intentionally inherits the
+// session — that path handles infrastructure failures, not bad output.)
 func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	issue, ok := h.loadIssueForUser(w, r, id)
@@ -109,7 +109,7 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID)
+	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, pgtype.UUID{})
 	if err != nil {
 		slog.Warn("issue rerun failed", "issue_id", id, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())

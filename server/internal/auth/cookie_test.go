@@ -14,7 +14,7 @@ func TestIsSecureCookie(t *testing.T) {
 		{"https origin → Secure", "https://app.example.com", true},
 		{"https with port", "https://app.example.com:8443", true},
 		{"http origin → not Secure", "http://192.168.5.5:13000", false},
-		{"http localhost → not Secure", "http://localhost:3300", false},
+		{"http localhost → not Secure", "http://localhost:3000", false},
 		{"empty → not Secure", "", false},
 		{"malformed → not Secure", "::not-a-url", false},
 		{"uppercase scheme still matches", "HTTPS://app.example.com", true},

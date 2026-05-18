@@ -10,7 +10,7 @@ import pg from "pg";
 // `||` (not `??`) so an empty `NEXT_PUBLIC_API_URL=` in .env still falls
 // back to localhost. dotenv sets unset-vs-empty both as "" — treating them
 // the same matches user intent.
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || `http://localhost:${process.env.PORT || "8280"}`;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || `http://localhost:${process.env.PORT || "8080"}`;
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://multica:multica@localhost:5432/multica?sslmode=disable";
 
 interface TestWorkspace {
@@ -21,12 +21,9 @@ interface TestWorkspace {
 
 export class TestApiClient {
   private token: string | null = null;
-  private userId: string | null = null;
   private workspaceSlug: string | null = null;
   private workspaceId: string | null = null;
   private createdIssueIds: string[] = [];
-  private createdAgentIds: string[] = [];
-  private createdRuntimeIds: string[] = [];
 
   async login(email: string, name: string) {
     const client = new pg.Client(DATABASE_URL);
@@ -67,7 +64,6 @@ export class TestApiClient {
       const data = await verifyRes.json();
 
       this.token = data.token;
-      this.userId = data.user?.id ?? null;
 
       // Update user name if needed
       if (name && data.user?.name !== name) {
@@ -100,7 +96,7 @@ export class TestApiClient {
 
   async ensureWorkspace(name = "E2E Workspace", slug = "e2e-workspace") {
     const workspaces = await this.getWorkspaces();
-    const workspace = workspaces.find((item) => item.slug === slug);
+    const workspace = workspaces.find((item) => item.slug === slug) ?? workspaces[0];
     if (workspace) {
       this.workspaceId = workspace.id;
       this.workspaceSlug = workspace.slug;
@@ -114,15 +110,13 @@ export class TestApiClient {
     if (res.ok) {
       const created = (await res.json()) as TestWorkspace;
       this.workspaceId = created.id;
-      this.workspaceSlug = created.slug;
       return created;
     }
 
     const refreshed = await this.getWorkspaces();
-    const created = refreshed.find((item) => item.slug === slug);
+    const created = refreshed.find((item) => item.slug === slug) ?? refreshed[0];
     if (created) {
       this.workspaceId = created.id;
-      this.workspaceSlug = created.slug;
       return created;
     }
 
@@ -139,112 +133,8 @@ export class TestApiClient {
     return issue;
   }
 
-  async getIssue(id: string) {
-    const res = await this.authedFetch(`/api/issues/${id}`);
-    return res.json();
-  }
-
-  async getIssueOrchestration(id: string) {
-    const res = await this.authedFetch(`/api/issues/${id}/orchestration`);
-    return res.json();
-  }
-
-  async claimTask(runtimeId: string) {
-    const res = await this.authedFetch(`/api/daemon/runtimes/${runtimeId}/tasks/claim`, {
-      method: "POST",
-    });
-    const body = await res.json();
-    return body.task;
-  }
-
-  async startTask(taskId: string) {
-    const res = await this.authedFetch(`/api/daemon/tasks/${taskId}/start`, {
-      method: "POST",
-    });
-    return res.json();
-  }
-
-  async completeTask(taskId: string, result: Record<string, unknown>) {
-    const res = await this.authedFetch(`/api/daemon/tasks/${taskId}/complete`, {
-      method: "POST",
-      body: JSON.stringify({ result }),
-    });
-    return res.json();
-  }
-
-  async createAgentFixture(name: string) {
-    if (!this.workspaceId) throw new Error("workspace must be selected before creating an agent fixture");
-    if (!this.userId) throw new Error("login must complete before creating an agent fixture");
-
-    const client = new pg.Client(DATABASE_URL);
-    await client.connect();
-    try {
-      const runtime = await client.query<{ id: string }>(
-        `
-          INSERT INTO agent_runtime (
-            workspace_id, daemon_id, name, runtime_mode, provider, status,
-            device_info, metadata, last_seen_at
-          )
-          VALUES ($1, $2, $3, 'cloud', 'e2e-fake', 'online', $4, $5::jsonb, now())
-          RETURNING id
-        `,
-        [
-          this.workspaceId,
-          `e2e-daemon-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          `${name} Runtime`,
-          "E2E fake runtime",
-          JSON.stringify({ cli_version: "0.2.20" }),
-        ],
-      );
-      const runtimeId = runtime.rows[0]!.id;
-      const agent = await client.query<{ id: string }>(
-        `
-          INSERT INTO agent (
-            workspace_id, name, description, runtime_mode, runtime_config,
-            runtime_id, visibility, max_concurrent_tasks, owner_id,
-            instructions, custom_env, custom_args, mcp_config
-          )
-          VALUES ($1, $2, '', 'cloud', '{}'::jsonb, $3, 'workspace', 1, $4, '', '{}'::jsonb, '[]'::jsonb, '{}'::jsonb)
-          RETURNING id
-        `,
-        [this.workspaceId, name, runtimeId, this.userId],
-      );
-      const agentId = agent.rows[0]!.id;
-      this.createdRuntimeIds.push(runtimeId);
-      this.createdAgentIds.push(agentId);
-      return { agentId, runtimeId };
-    } finally {
-      await client.end();
-    }
-  }
-
-  async setOrchestrationEnabled(enabled: boolean) {
-    if (!this.workspaceId) throw new Error("workspace must be selected before setting orchestration flag");
-    const client = new pg.Client(DATABASE_URL);
-    await client.connect();
-    try {
-      await client.query(
-        `
-          UPDATE workspace
-          SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{orchestration_enabled}', $2::jsonb, true)
-          WHERE id = $1
-        `,
-        [this.workspaceId, JSON.stringify(enabled)],
-      );
-    } finally {
-      await client.end();
-    }
-  }
-
   async deleteIssue(id: string) {
     await this.authedFetch(`/api/issues/${id}`, { method: "DELETE" });
-  }
-
-  async dismissStarterContent() {
-    await this.authedFetch("/api/me/starter-content/dismiss", {
-      method: "POST",
-      body: JSON.stringify({ workspace_id: this.workspaceId }),
-    });
   }
 
   /** Clean up all issues created during this test. */
@@ -257,22 +147,6 @@ export class TestApiClient {
       }
     }
     this.createdIssueIds = [];
-
-    const client = new pg.Client(DATABASE_URL);
-    await client.connect();
-    try {
-      for (const agentId of this.createdAgentIds) {
-        await client.query("DELETE FROM agent_task_queue WHERE agent_id = $1", [agentId]);
-        await client.query("DELETE FROM agent WHERE id = $1", [agentId]);
-      }
-      for (const runtimeId of this.createdRuntimeIds) {
-        await client.query("DELETE FROM agent_runtime WHERE id = $1", [runtimeId]);
-      }
-    } finally {
-      await client.end();
-    }
-    this.createdAgentIds = [];
-    this.createdRuntimeIds = [];
   }
 
   getToken() {

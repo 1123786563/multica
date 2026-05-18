@@ -19,7 +19,7 @@ offset=$((hash_value % 1000))
 
 postgres_db="multica_${slug}_${offset}"
 postgres_port=5432
-backend_port=$((18280 + offset))
+backend_port=$((18080 + offset))
 frontend_port=$((13000 + offset))
 frontend_origin="http://localhost:${frontend_port}"
 

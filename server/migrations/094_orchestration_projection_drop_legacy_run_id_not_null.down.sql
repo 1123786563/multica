@@ -1,0 +1,3 @@
+-- Legacy run_id columns predate plan/node based orchestration projections.
+-- Keep the rollback intentionally empty so downgrades do not reintroduce a
+-- NOT NULL constraint that blocks plan-scoped event and artifact writes.

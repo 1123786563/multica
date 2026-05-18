@@ -29,6 +29,7 @@
 - `docs/adr/0017-mvp-uses-linear-orchestration-panel.md`
 - `docs/adr/0018-approval-actions-require-human-authority.md`
 - `docs/adr/0019-attention-comments-target-issue-relevant-humans.md`
+- `docs/temporal-orchestration-mvp-checkout.md`
 
 ## MVP 目标
 

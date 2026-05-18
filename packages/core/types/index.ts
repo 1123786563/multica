@@ -1,14 +1,5 @@
 export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueReaction } from "./issue";
-export type {
-  IssueOrchestration,
-  OrchestrationPlan,
-  OrchestrationPlanStatus,
-  OrchestrationNode,
-  OrchestrationNodeStatus,
-  OrchestrationNodeSummary,
-  OrchestrationEvent,
-  OrchestrationArtifact,
-} from "./orchestration";
+export type * from "./orchestration";
 export type {
   Agent,
   AgentStatus,
@@ -21,6 +12,12 @@ export type {
   AgentRuntime,
   RuntimeDevice,
   CreateAgentRequest,
+  AgentTemplate,
+  AgentTemplateSummary,
+  AgentTemplateSkillRef,
+  CreateAgentFromTemplateRequest,
+  CreateAgentFromTemplateResponse,
+  CreateAgentFromTemplateFailure,
   UpdateAgentRequest,
   Skill,
   SkillSummary,
@@ -33,6 +30,10 @@ export type {
   RuntimeHourlyActivity,
   RuntimeUsageByAgent,
   RuntimeUsageByHour,
+  DashboardUsageDaily,
+  DashboardUsageByAgent,
+  DashboardAgentRunTime,
+  DashboardRunTimeDaily,
   RuntimeUpdate,
   RuntimeUpdateStatus,
   RuntimeModel,
@@ -78,6 +79,13 @@ export type {
 } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
 export type {
+  GitHubInstallation,
+  GitHubPullRequest,
+  GitHubPullRequestState,
+  ListGitHubInstallationsResponse,
+  GitHubConnectResponse,
+} from "./github";
+export type {
   Autopilot,
   AutopilotStatus,
   AutopilotExecutionMode,
@@ -94,3 +102,16 @@ export type {
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
 } from "./autopilot";
+export type {
+  Squad,
+  SquadMember,
+  SquadMemberType,
+  SquadActivityLog,
+  SquadActivityOutcome,
+  CreateSquadRequest,
+  UpdateSquadRequest,
+  AddSquadMemberRequest,
+  RemoveSquadMemberRequest,
+  UpdateSquadMemberRoleRequest,
+  CreateSquadActivityLogRequest,
+} from "./squad";

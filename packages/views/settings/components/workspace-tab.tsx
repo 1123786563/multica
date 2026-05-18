@@ -134,10 +134,9 @@ export function WorkspaceTab() {
         description,
         context,
       });
-      qc.setQueriesData({ queryKey: workspaceKeys.list() }, (old: Workspace[] | undefined) =>
+      qc.setQueryData(workspaceKeys.list(), (old: Workspace[] | undefined) =>
         old?.map((ws) => (ws.id === updated.id ? updated : ws)),
       );
-      await qc.invalidateQueries({ queryKey: workspaceKeys.list() });
       toast.success(t(($) => $.workspace.toast_saved));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t(($) => $.workspace.toast_save_failed));

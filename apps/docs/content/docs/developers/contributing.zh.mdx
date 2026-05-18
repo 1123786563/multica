@@ -92,15 +92,15 @@ This is a first-class workflow. Both checkouts use the same PostgreSQL container
 | | Main | Worktree |
 |---|---|---|
 | Database | `multica` | `multica_my_feature_702` |
-| Backend port | `8280` | generated (e.g. `18782`) |
-| Frontend port | `3300` | generated (e.g. `13702`) |
+| Backend port | `8080` | generated (e.g. `18782`) |
+| Frontend port | `3000` | generated (e.g. `13702`) |
 
 ## Commands
 
 ```bash
 # Frontend (all commands go through Turborepo)
 pnpm install
-pnpm dev:web          # Next.js dev server (port 3300)
+pnpm dev:web          # Next.js dev server (port 3000)
 pnpm dev:desktop      # Electron dev (electron-vite, HMR)
 pnpm build            # Build all frontend apps
 pnpm typecheck        # TypeScript check
@@ -108,7 +108,7 @@ pnpm lint             # ESLint
 pnpm test             # TS tests (Vitest)
 
 # Backend (Go)
-make dev              # Run Go server (port 8280)
+make dev              # Run Go server (port 8080)
 make daemon           # Run local daemon
 make build            # Build server + CLI binaries
 make test             # Go tests

@@ -45,17 +45,3 @@ make check            # Full verification pipeline
 ```
 
 See CLAUDE.md for the complete command reference.
-
-## Agent skills
-
-### Issue tracker
-
-Issues live as markdown files in `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Five canonical triage roles using default label names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Multi-context layout — `CONTEXT-MAP.md` at root points to per-context `CONTEXT.md` files. See `docs/agents/domain.md`.

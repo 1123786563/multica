@@ -13,7 +13,7 @@ Look up issues by symptom. Each entry gives you **symptom / likely causes / how 
 
 **Likely causes**:
 
-1. **`MULTICA_SERVER_URL` points at the wrong address** — default is `ws://localhost:8280/ws`; self-host must change it to your server address
+1. **`MULTICA_SERVER_URL` points at the wrong address** — default is `ws://localhost:8080/ws`; self-host must change it to your server address
 2. **Network / firewall blocking** — the daemon and server aren't on the same network, or outbound traffic is blocked
 3. **Token expired or invalid** — you never ran `multica login`, or the PAT was revoked
 4. **Server rejected registration** — the account you signed in with isn't in the target workspace (register returns 403)
@@ -24,8 +24,8 @@ Look up issues by symptom. Each entry gives you **symptom / likely causes / how 
 ```bash
 multica daemon logs --lines 100    # look for daemon-side errors
 echo $MULTICA_SERVER_URL          # confirm the address is set
-curl -i http://<server-host>:8280/health   # hit the server directly
-curl -i http://<server-host>:8280/readyz  # include DB + migration readiness
+curl -i http://<server-host>:8080/health   # hit the server directly
+curl -i http://<server-host>:8080/readyz  # include DB + migration readiness
 cat ~/.multica/config.json        # verify api_token exists
 multica workspace list            # confirm you're a member of the target workspace
 ```
@@ -67,7 +67,7 @@ On the server side (self-host), grep for `"no_tasks"` / `"no_capacity"` to see t
 
 **Likely causes**:
 
-1. **Origin check failure** — your frontend domain isn't in the server's CORS allowlist. The default allowlist only includes `localhost:3300/5173/5174`; self-hosting on the public internet requires `FRONTEND_ORIGIN`
+1. **Origin check failure** — your frontend domain isn't in the server's CORS allowlist. The default allowlist only includes `localhost:3000/5173/5174`; self-hosting on the public internet requires `FRONTEND_ORIGIN`
 2. **Protocol mismatch** — frontend on `https://` needs `wss://`; HTTP uses `ws://`
 3. **Reverse proxy doesn't enable WebSocket upgrade** — Nginx / Envoy / HAProxy don't forward the `Upgrade` header by default
 4. **JWT cookie expired or missing** — no re-sign-in after the 30-day expiry
@@ -76,7 +76,7 @@ On the server side (self-host), grep for `"no_tasks"` / `"no_capacity"` to see t
 
 - Browser DevTools → Network → filter by "WS" and check connection state and status code
 - Grep server logs for `"rejected origin"` / `"websocket"` — an origin issue spells itself out
-- `curl -i http://<server-host>:8280/ws` should return `101 Switching Protocols` (with the `Upgrade` header)
+- `curl -i http://<server-host>:8080/ws` should return `101 Switching Protocols` (with the `Upgrade` header)
 
 **How to fix**:
 
@@ -138,16 +138,16 @@ Check your inbox (including spam) for the real verification code.
 
 **Likely causes**:
 
-1. **Server port taken** (default `8280`)
+1. **Server port taken** (default `8080`)
 2. **Daemon health port taken** (default `19514`, offset by a hash per profile)
-3. **Web dev server port conflict** (`3300` / `5173`)
+3. **Web dev server port conflict** (`3000` / `5173`)
 4. **Insufficient privileges for the port** (binding a privileged port `< 1024` requires sudo)
 
 **How to diagnose**:
 
 ```bash
-lsof -i :8280        # macOS / Linux
-netstat -ano | findstr :8280    # Windows
+lsof -i :8080        # macOS / Linux
+netstat -ano | findstr :8080    # Windows
 ```
 
 **How to fix**:

@@ -15,9 +15,9 @@ func TestTaskWakeupURL(t *testing.T) {
 	}{
 		{
 			name:       "http base",
-			baseURL:    "http://localhost:8280",
+			baseURL:    "http://localhost:8080",
 			runtimeIDs: []string{"runtime-b", "runtime-a"},
-			want:       "ws://localhost:8280/api/daemon/ws?runtime_ids=runtime-a%2Cruntime-b",
+			want:       "ws://localhost:8080/api/daemon/ws?runtime_ids=runtime-a%2Cruntime-b",
 		},
 		{
 			name:       "https base",

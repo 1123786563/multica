@@ -16,13 +16,12 @@ This slice should prove projection table reuse, Activity-owned writes, coarse re
 
 ## Acceptance criteria
 
-- [ ] Workflow code does not directly write projection tables, comments, notifications, WebSocket events, or Agent Task side effects.
-- [ ] Projection Activities idempotently write run, node, and event progress for the fixed MVP workflow chain.
-- [ ] The issue-scoped read API returns node summaries suitable for a Linear Orchestration Panel.
-- [ ] A coarse `orchestration:updated` refresh causes clients to reload issue-scoped orchestration data.
-- [ ] Tests cover Activity idempotency, workflow replay determinism, projection ordering, read API shape, and minimal panel rendering.
+- [x] Workflow code does not directly write projection tables, comments, notifications, WebSocket events, or Agent Task side effects.
+- [x] Projection Activities idempotently write run, node, and event progress for the fixed MVP workflow chain.
+- [x] The issue-scoped read API returns node summaries suitable for a Linear Orchestration Panel.
+- [x] A coarse `orchestration:updated` refresh causes clients to reload issue-scoped orchestration data.
+- [x] Tests cover Activity idempotency, workflow replay determinism, projection ordering, read API shape, and minimal panel rendering.
 
 ## Blocked by
 
 - 02-start-workflow-with-active-run-idempotency
-

@@ -70,7 +70,7 @@ func TestWorkspaceUsage_BucketsByUsageTime(t *testing.T) {
 		})
 	}
 
-	insertTaskWithUsage(yesterdayLate, todayEarly, 1000)          // cross-midnight
+	insertTaskWithUsage(yesterdayLate, todayEarly, 1000)         // cross-midnight
 	insertTaskWithUsage(yesterdayMorning, yesterdayMorning, 2000) // full-day yesterday
 
 	// /api/usage/daily — daily breakdown.

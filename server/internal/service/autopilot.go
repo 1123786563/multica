@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -73,6 +76,14 @@ func (s *AutopilotService) DispatchAutopilot(
 	switch autopilot.ExecutionMode {
 	case "create_issue":
 		if err := s.dispatchCreateIssue(ctx, autopilot, &run); err != nil {
+			var duplicate *issueguard.ActiveDuplicateError
+			if errors.As(err, &duplicate) {
+				updatedRun := s.skipDuplicateRun(ctx, autopilot, run, source, duplicate)
+				if source == "manual" {
+					return &updatedRun, fmt.Errorf("dispatch create_issue: %w", err)
+				}
+				return &updatedRun, nil
+			}
 			s.failRun(ctx, run.ID, err.Error())
 			s.captureAutopilotRunFailed(autopilot, run, source, err.Error())
 			return &run, fmt.Errorf("dispatch create_issue: %w", err)
@@ -118,14 +129,21 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 
 	qtx := s.Queries.WithTx(tx)
 
-	// Get next issue number.
+	title := s.interpolateTemplate(ap)
+	description := s.buildIssueDescription(ap)
+
+	duplicate, foundDuplicate, err := issueguard.LockAndFindActiveDuplicate(ctx, qtx, ap.WorkspaceID, pgtype.UUID{}, pgtype.UUID{}, title, false)
+	if err != nil {
+		return fmt.Errorf("check duplicate issue: %w", err)
+	}
+	if foundDuplicate {
+		return issueguard.NewActiveDuplicateError(duplicate, s.getIssuePrefix(ap.WorkspaceID))
+	}
+
 	issueNumber, err := qtx.IncrementIssueCounter(ctx, ap.WorkspaceID)
 	if err != nil {
 		return fmt.Errorf("increment issue counter: %w", err)
 	}
-
-	title := s.interpolateTemplate(ap)
-	description := s.buildIssueDescription(ap)
 
 	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
 		WorkspaceID:   ap.WorkspaceID,
@@ -135,8 +153,11 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		Priority:      "none",
 		AssigneeType:  pgtype.Text{String: "agent", Valid: true},
 		AssigneeID:    ap.AssigneeID,
-		CreatorType:   ap.CreatedByType,
-		CreatorID:     ap.CreatedByID,
+		// The agent that the autopilot dispatches to is the issue's creator,
+		// not the human who originally configured the autopilot. The latter
+		// is captured separately via origin_type=autopilot + origin_id.
+		CreatorType:   "agent",
+		CreatorID:     ap.AssigneeID,
 		ParentIssueID: pgtype.UUID{},
 		Position:      0,
 		DueDate:       pgtype.Timestamptz{},
@@ -169,19 +190,17 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventIssueCreated,
 		WorkspaceID: util.UUIDToString(ap.WorkspaceID),
-		ActorType:   ap.CreatedByType,
-		ActorID:     util.UUIDToString(ap.CreatedByID),
+		ActorType:   "agent",
+		ActorID:     util.UUIDToString(ap.AssigneeID),
 		Payload: map[string]any{
 			"issue": issueToMap(issue, prefix),
 		},
 	})
 	s.captureIssueCreatedFromAutopilot(ap, run, issue)
 
-	if s.TaskSvc.Orchestrator == nil {
-		return fmt.Errorf("orchestrator unavailable")
-	}
-	if _, err := s.TaskSvc.Orchestrator.OnIssueAssigned(ctx, issue); err != nil {
-		return fmt.Errorf("orchestrate issue: %w", err)
+	// Enqueue agent task via the existing flow.
+	if _, err := s.TaskSvc.EnqueueTaskForIssue(ctx, issue); err != nil {
+		return fmt.Errorf("enqueue task for issue: %w", err)
 	}
 
 	slog.Info("autopilot dispatched (create_issue)",
@@ -347,6 +366,55 @@ func (s *AutopilotService) failRun(ctx context.Context, runID pgtype.UUID, reaso
 	}
 }
 
+func (s *AutopilotService) skipDuplicateRun(
+	ctx context.Context,
+	autopilot db.Autopilot,
+	run db.AutopilotRun,
+	source string,
+	duplicate *issueguard.ActiveDuplicateError,
+) db.AutopilotRun {
+	reason := duplicate.Error()
+	result, err := json.Marshal(map[string]any{
+		"code": "active_duplicate_issue",
+		"issue": map[string]any{
+			"id":         duplicate.ID,
+			"identifier": duplicate.Identifier,
+			"title":      duplicate.Title,
+			"status":     duplicate.Status,
+		},
+	})
+	if err != nil {
+		slog.Warn("failed to marshal duplicate autopilot result",
+			"run_id", util.UUIDToString(run.ID),
+			"error", err,
+		)
+	}
+
+	updatedRun, err := s.Queries.UpdateAutopilotRunSkippedWithResult(ctx, db.UpdateAutopilotRunSkippedWithResultParams{
+		ID:            run.ID,
+		FailureReason: pgtype.Text{String: reason, Valid: true},
+		Result:        result,
+	})
+	if err != nil {
+		slog.Warn("failed to mark duplicate autopilot run as skipped",
+			"run_id", util.UUIDToString(run.ID),
+			"error", err,
+		)
+		return run
+	}
+
+	slog.Info("autopilot duplicate issue skipped",
+		"autopilot_id", util.UUIDToString(autopilot.ID),
+		"run_id", util.UUIDToString(run.ID),
+		"source", source,
+		"existing_issue_id", duplicate.ID,
+	)
+
+	s.Queries.UpdateAutopilotLastRunAt(ctx, autopilot.ID)
+	s.publishRunDone(util.UUIDToString(autopilot.WorkspaceID), updatedRun, "skipped")
+	return updatedRun
+}
+
 // shouldSkipDispatch is the pre-flight admission check from MUL-1899.
 // Returns (reason, true) when dispatching now would only enqueue a doomed
 // task — i.e. the assignee agent is gone, archived, has no runtime bound, or
@@ -384,6 +452,27 @@ func (s *AutopilotService) shouldSkipDispatch(ctx context.Context, ap db.Autopil
 	}
 	if rt.Status != "online" {
 		return "agent runtime is " + rt.Status + " at dispatch time", true
+	}
+	// Private-agent gate at the autopilot layer. Caller identity = the
+	// autopilot's creator: if the creator no longer has access to the
+	// (now-private) target agent, the dispatch is recorded as `skipped`.
+	// Agent-created autopilots bypass the gate to preserve A2A
+	// collaboration. Errors loading the workspace member fail closed —
+	// without an authoritative role the gate cannot grant access.
+	if agent.Visibility == "private" && ap.CreatedByType == "member" {
+		creatorID := util.UUIDToString(ap.CreatedByID)
+		if util.UUIDToString(agent.OwnerID) != creatorID {
+			member, err := s.Queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+				UserID:      ap.CreatedByID,
+				WorkspaceID: ap.WorkspaceID,
+			})
+			if err != nil {
+				return "autopilot creator no longer in workspace", true
+			}
+			if member.Role != "owner" && member.Role != "admin" {
+				return "autopilot creator lacks access to private assignee agent", true
+			}
+		}
 	}
 	return "", false
 }

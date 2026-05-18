@@ -21,7 +21,7 @@ import {
 import { createLogger } from "../logger";
 import { useRealtimeSync, type RealtimeSyncStores } from "./use-realtime-sync";
 
-type EventHandler = (payload: unknown, actorId?: string) => void;
+type EventHandler = (payload: unknown, actorId?: string, actorType?: string) => void;
 
 interface WSContextValue {
   subscribe: (event: WSEventType, handler: EventHandler) => () => void;
@@ -32,7 +32,7 @@ const WSContext = createContext<WSContextValue | null>(null);
 
 export interface WSProviderProps {
   children: ReactNode;
-  /** WebSocket server URL (e.g. "ws://localhost:8280/ws") */
+  /** WebSocket server URL (e.g. "ws://localhost:8080/ws") */
   wsUrl: string;
   /** Platform-created auth store instance */
   authStore: UseBoundStore<StoreApi<AuthState>>;

@@ -64,32 +64,32 @@ func TestResolveCallbackBinding(t *testing.T) {
 		},
 		{
 			name:         "localhost app URL stays on loopback",
-			appURL:       "http://localhost:3300",
-			serverURL:    "http://localhost:8280",
+			appURL:       "http://localhost:3000",
+			serverURL:    "http://localhost:8080",
 			detect:       failing,
 			wantCallback: "localhost",
 			wantBind:     "127.0.0.1",
 		},
 		{
 			name:         "same-machine self-host uses loopback (CLI IP matches app IP)",
-			appURL:       "http://192.168.0.28:3300",
-			serverURL:    "http://192.168.0.28:8280",
+			appURL:       "http://192.168.0.28:3000",
+			serverURL:    "http://192.168.0.28:8080",
 			detect:       fixed("192.168.0.28"),
 			wantCallback: "localhost",
 			wantBind:     "127.0.0.1",
 		},
 		{
 			name:         "cross-machine self-host points callback at CLI's LAN IP",
-			appURL:       "http://192.168.0.28:3300",
-			serverURL:    "http://192.168.0.28:8280",
+			appURL:       "http://192.168.0.28:3000",
+			serverURL:    "http://192.168.0.28:8080",
 			detect:       fixed("192.168.0.47"),
 			wantCallback: "192.168.0.47",
 			wantBind:     "0.0.0.0",
 		},
 		{
 			name:         "outbound detection failure falls back to app IP",
-			appURL:       "http://192.168.0.28:3300",
-			serverURL:    "http://192.168.0.28:8280",
+			appURL:       "http://192.168.0.28:3000",
+			serverURL:    "http://192.168.0.28:8080",
 			detect:       failing,
 			wantCallback: "192.168.0.28",
 			wantBind:     "0.0.0.0",
@@ -233,8 +233,8 @@ func TestNormalizeAPIBaseURL(t *testing.T) {
 	})
 
 	t.Run("keeps http base URL", func(t *testing.T) {
-		if got := normalizeAPIBaseURL("http://localhost:8280"); got != "http://localhost:8280" {
-			t.Fatalf("normalizeAPIBaseURL() = %q, want %q", got, "http://localhost:8280")
+		if got := normalizeAPIBaseURL("http://localhost:8080"); got != "http://localhost:8080" {
+			t.Fatalf("normalizeAPIBaseURL() = %q, want %q", got, "http://localhost:8080")
 		}
 	})
 

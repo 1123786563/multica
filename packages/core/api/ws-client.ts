@@ -1,7 +1,7 @@
 import type { WSMessage, WSEventType } from "../types/events";
 import { type Logger, noopLogger } from "../logger";
 
-type EventHandler = (payload: unknown, actorId?: string) => void;
+type EventHandler = (payload: unknown, actorId?: string, actorType?: string) => void;
 
 /** Identifies the WS client to the server. Sent as `client_platform`,
  *  `client_version`, and `client_os` query parameters on the upgrade URL —
@@ -84,7 +84,7 @@ export class WSClient {
       const eventHandlers = this.handlers.get(msg.type);
       if (eventHandlers) {
         for (const handler of eventHandlers) {
-          handler(msg.payload, msg.actor_id);
+          handler(msg.payload, msg.actor_id, msg.actor_type);
         }
       }
       for (const handler of this.anyHandlers) {
@@ -94,7 +94,7 @@ export class WSClient {
 
     this.ws.onclose = () => {
       this.logger.warn("disconnected, reconnecting in 3s");
-      this.reconnectTimer = setTimeout(() => this.connect(), 3300);
+      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
     };
 
     this.ws.onerror = () => {

@@ -29,7 +29,7 @@ import (
 )
 
 var defaultOrigins = []string{
-	"http://localhost:3300", // Next.js dev
+	"http://localhost:3000", // Next.js dev
 	"http://localhost:5173", // electron-vite dev
 	"http://localhost:5174", // electron-vite dev (fallback port)
 }
@@ -105,7 +105,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		AllowSignup:                   os.Getenv("ALLOW_SIGNUP") != "false",
 		AllowedEmails:                 splitAndTrim(os.Getenv("ALLOWED_EMAILS")),
 		AllowedEmailDomains:           splitAndTrim(os.Getenv("ALLOWED_EMAIL_DOMAINS")),
+		TemporalHostPort:              strings.TrimSpace(os.Getenv("TEMPORAL_HOST_PORT")),
+		TemporalNamespace:             strings.TrimSpace(os.Getenv("TEMPORAL_NAMESPACE")),
+		TemporalTaskQueue:             strings.TrimSpace(os.Getenv("TEMPORAL_TASK_QUEUE")),
 		UseDailyRollupForRuntimeUsage: os.Getenv("USAGE_DAILY_ROLLUP_ENABLED") == "true",
+		UseDailyRollupForDashboard:    os.Getenv("USAGE_DASHBOARD_ROLLUP_ENABLED") == "true",
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	if opts.DaemonWakeup != nil {
@@ -213,6 +217,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Public API
 	r.Get("/api/config", h.GetConfig)
 
+	// GitHub App webhook (no Multica auth — requests are authenticated via
+	// HMAC-SHA256 signature in the handler) and post-install setup callback.
+	r.Post("/api/webhooks/github", h.HandleGitHubWebhook)
+	r.Get("/api/github/setup", h.GitHubSetupCallback)
+
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(queries, patCache, daemonTokenCache))
@@ -291,6 +300,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 				// Owner-only access
 				r.With(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner")).Delete("/", h.DeleteWorkspace)
+
+				// GitHub integration — admin-only operations live here so the
+				// nesting matches the rest of /api/workspaces/{id}/* routes.
+				r.Group(func(r chi.Router) {
+					r.Use(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner", "admin"))
+					r.Get("/github/connect", h.GitHubConnect)
+					r.Get("/github/installations", h.ListGitHubInstallations)
+					r.Delete("/github/installations/{installationId}", h.DeleteGitHubInstallation)
+				})
 			})
 		})
 
@@ -317,6 +335,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Route("/api/issues", func(r chi.Router) {
 				r.Get("/search", h.SearchIssues)
 				r.Get("/child-progress", h.ChildIssueProgress)
+				r.Get("/grouped", h.ListGroupedIssues)
 				r.Get("/", h.ListIssues)
 				r.Post("/", h.CreateIssue)
 				r.Post("/quick-create", h.QuickCreateIssue)
@@ -333,6 +352,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/subscribe", h.SubscribeToIssue)
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
 					r.Get("/active-task", h.GetActiveTaskForIssue)
+					r.Post("/orchestration/start", h.StartIssueOrchestration)
 					r.Get("/orchestration", h.GetIssueOrchestration)
 					r.Post("/tasks/{taskId}/cancel", h.CancelTask)
 					r.Post("/rerun", h.RerunIssue)
@@ -345,6 +365,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/labels", h.ListLabelsForIssue)
 					r.Post("/labels", h.AttachLabel)
 					r.Delete("/labels/{labelId}", h.DetachLabel)
+					r.Get("/pull-requests", h.ListPullRequestsForIssue)
 				})
 			})
 
@@ -377,6 +398,31 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
+			// Squads
+			r.Route("/api/squads", func(r chi.Router) {
+				r.Get("/", h.ListSquads)
+				r.Post("/", h.CreateSquad)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetSquad)
+					r.Put("/", h.UpdateSquad)
+					r.Delete("/", h.DeleteSquad)
+					r.Get("/members", h.ListSquadMembers)
+					r.Post("/members", h.AddSquadMember)
+					r.Delete("/members", h.RemoveSquadMember)
+					r.Patch("/members/role", h.UpdateSquadMemberRole)
+				})
+			})
+
+			// Squad leader evaluation (writes to activity_log)
+			r.Post("/api/issues/{id}/squad-evaluated", h.RecordSquadLeaderEvaluation)
+
+			// Orchestration
+			r.Route("/api/orchestration", func(r chi.Router) {
+				r.Post("/nodes/{nodeId}/approve", h.ApproveOrchestrationNode)
+				r.Post("/nodes/{nodeId}/retry", h.RetryOrchestrationNode)
+				r.Post("/plans/{planId}/cancel", h.CancelOrchestrationPlan)
+			})
+
 			// Autopilots
 			r.Route("/api/autopilots", func(r chi.Router) {
 				r.Get("/", h.ListAutopilots)
@@ -405,6 +451,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Attachments
 			r.Get("/api/attachments/{id}", h.GetAttachmentByID)
+			r.Get("/api/attachments/{id}/content", h.GetAttachmentContent)
 			r.Delete("/api/attachments/{id}", h.DeleteAttachment)
 
 			// Comments
@@ -421,6 +468,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Route("/api/agents", func(r chi.Router) {
 				r.Get("/", h.ListAgents)
 				r.Post("/", h.CreateAgent)
+				// Agent templates: pre-configured instructions + skill refs.
+				// Picking a template imports the referenced skills into the
+				// workspace (find-or-create by name) and creates the agent
+				// with the template's instructions in one transaction.
+				r.Post("/from-template", h.CreateAgentFromTemplate)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetAgent)
 					r.Put("/", h.UpdateAgent)
@@ -431,6 +483,14 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/skills", h.ListAgentSkills)
 					r.Put("/skills", h.SetAgentSkills)
 				})
+			})
+
+			// Agent templates catalog (browse + detail). The Create flow
+			// lives under /api/agents/from-template above; this route is for
+			// the picker UI to list available templates.
+			r.Route("/api/agent-templates", func(r chi.Router) {
+				r.Get("/", h.ListAgentTemplates)
+				r.Get("/{slug}", h.GetAgentTemplate)
 			})
 
 			// Skills
@@ -454,10 +514,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/summary", h.GetWorkspaceUsageSummary)
 			})
 
+			// Dashboard — workspace-wide token + run-time rollups for the
+			// "/{slug}/dashboard" page. Optional ?project_id filter scopes
+			// the rollup to a single project.
+			r.Route("/api/dashboard", func(r chi.Router) {
+				r.Get("/usage/daily", h.GetDashboardUsageDaily)
+				r.Get("/usage/by-agent", h.GetDashboardUsageByAgent)
+				r.Get("/agent-runtime", h.GetDashboardAgentRunTime)
+				r.Get("/runtime/daily", h.GetDashboardRunTimeDaily)
+			})
+
 			// Runtimes
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
 				r.Route("/{runtimeId}", func(r chi.Router) {
+					r.Patch("/", h.UpdateAgentRuntime)
 					r.Get("/usage", h.GetRuntimeUsage)
 					r.Get("/usage/by-agent", h.GetRuntimeUsageByAgent)
 					r.Get("/usage/by-hour", h.GetRuntimeUsageByHour)
@@ -489,18 +560,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Workspace-wide 30-day run counts per agent for the Agents-list RUNS column.
 			r.Get("/api/agent-run-counts", h.GetWorkspaceAgentRunCounts)
 
-			r.Route("/api/orchestration", func(r chi.Router) {
-				r.Post("/nodes/{nodeId}/approve", h.ApproveOrchestrationNode)
-				r.Post("/nodes/{nodeId}/request-changes", h.RequestChangesOrchestrationNode)
-				r.Post("/nodes/{nodeId}/retry", h.RetryOrchestrationNode)
-				r.Post("/plans/{planId}/cancel", h.CancelOrchestrationPlan)
-			})
-
 			r.Route("/api/chat/sessions", func(r chi.Router) {
 				r.Post("/", h.CreateChatSession)
 				r.Get("/", h.ListChatSessions)
 				r.Route("/{sessionId}", func(r chi.Router) {
 					r.Get("/", h.GetChatSession)
+					r.Patch("/", h.UpdateChatSession)
 					r.Delete("/", h.DeleteChatSession)
 					r.Post("/messages", h.SendChatMessage)
 					r.Get("/messages", h.ListChatMessages)
@@ -586,6 +651,18 @@ func (pr *patResolver) ResolveToken(ctx context.Context, token string) (string, 
 // internal round-trips of DB-sourced UUIDs (e.g. issue.ID, e.ActorID), so an
 // invalid value indicates a programming error and should panic loudly.
 func parseUUID(s string) pgtype.UUID {
+	return util.MustParseUUID(s)
+}
+
+// optionalUUID returns a NULL pgtype.UUID for an empty string and otherwise
+// behaves like parseUUID. Use this for actor IDs on events where the producer
+// may legitimately be a "system" actor with no member/agent attribution
+// (e.g. GitHub webhook auto-status sync) — the activity_log and inbox_item
+// tables both allow actor_id to be NULL.
+func optionalUUID(s string) pgtype.UUID {
+	if s == "" {
+		return pgtype.UUID{}
+	}
 	return util.MustParseUUID(s)
 }
 

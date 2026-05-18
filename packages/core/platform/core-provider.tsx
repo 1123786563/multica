@@ -65,7 +65,7 @@ function initCore(
 export function CoreProvider({
   children,
   apiBaseUrl = "",
-  wsUrl = "ws://localhost:8280/ws",
+  wsUrl = "ws://localhost:8080/ws",
   storage = defaultStorage,
   cookieAuth,
   onLogin,

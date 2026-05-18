@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -79,26 +80,6 @@ func TestMain(m *testing.M) {
 }
 
 func setupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, string, error) {
-	if _, err := pool.Exec(ctx, `
-		DELETE FROM orchestration_artifact;
-		DELETE FROM orchestration_event;
-		DELETE FROM orchestration_edge;
-		DELETE FROM orchestration_node;
-		DELETE FROM orchestration_plan;
-	`); err != nil {
-		return "", "", err
-	}
-
-	if _, err := pool.Exec(ctx, `
-		ALTER TABLE orchestration_node
-		    DROP CONSTRAINT IF EXISTS orchestration_node_type_check;
-		ALTER TABLE orchestration_node
-		    ADD CONSTRAINT orchestration_node_type_check
-		    CHECK (type IN ('plan', 'execute', 'verify'));
-	`); err != nil {
-		return "", "", err
-	}
-
 	if err := cleanupHandlerTestFixture(ctx, pool); err != nil {
 		return "", "", err
 	}
@@ -114,8 +95,8 @@ func setupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, s
 
 	var workspaceID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO workspace (name, slug, description, issue_prefix, settings)
-		VALUES ($1, $2, $3, $4, '{"orchestration_enabled": true}'::jsonb)
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id
 	`, "Handler Tests", handlerTestWorkspaceSlug, "Temporary workspace for handler tests", "HAN").Scan(&workspaceID); err != nil {
 		return "", "", err
@@ -216,6 +197,27 @@ func createHandlerTestAgent(t *testing.T, name string, mcpConfig []byte) string 
 	})
 
 	return agentID
+}
+
+// createHandlerTestTaskForAgent seeds a queued agent_task_queue row for the
+// given agent and returns the task UUID. Used by tests that need to set
+// X-Task-ID alongside X-Agent-ID — resolveActor now requires the pair to be
+// present and consistent before granting "agent" actor identity.
+func createHandlerTestTaskForAgent(t *testing.T, agentID string) string {
+	t.Helper()
+
+	var taskID string
+	if err := testPool.QueryRow(context.Background(), `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority)
+		VALUES ($1, $2, 'queued', 0)
+		RETURNING id
+	`, agentID, handlerTestRuntimeID(t)).Scan(&taskID); err != nil {
+		t.Fatalf("failed to create handler test task: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+	})
+	return taskID
 }
 
 func fetchAgentMcpConfig(t *testing.T, agentID string) []byte {
@@ -638,6 +640,525 @@ func TestCreateSubIssueUsesExplicitProjectOverParentProject(t *testing.T) {
 	}
 }
 
+func TestCreateIssueRejectsActiveDuplicate(t *testing.T) {
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	var projectID, parentID, issueID, duplicateID string
+	defer func() {
+		for _, id := range []string{duplicateID, issueID, parentID} {
+			if id != "" {
+				testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, id)
+			}
+		}
+		if projectID != "" {
+			testPool.Exec(ctx, `DELETE FROM project WHERE id = $1`, projectID)
+		}
+	}()
+
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO project (workspace_id, title)
+		VALUES ($1, $2)
+		RETURNING id
+	`, testWorkspaceID, "Duplicate guard project "+suffix).Scan(&projectID); err != nil {
+		t.Fatalf("create project fixture: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title": "Duplicate guard parent " + suffix,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue parent: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var parent IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&parent); err != nil {
+		t.Fatalf("decode parent: %v", err)
+	}
+	parentID = parent.ID
+
+	title := "SH-PM-SYNTH-01 Synthesize recommendation-to-shortlist planning outputs " + suffix
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           title,
+		"status":          "in_progress",
+		"parent_issue_id": parentID,
+		"project_id":      projectID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue original: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var original IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&original); err != nil {
+		t.Fatalf("decode original: %v", err)
+	}
+	issueID = original.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           "  sh-pm-synth-01   synthesize recommendation-to-shortlist planning outputs " + suffix + "  ",
+		"parent_issue_id": parentID,
+		"project_id":      projectID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("CreateIssue duplicate: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var conflict struct {
+		Code  string        `json:"code"`
+		Error string        `json:"error"`
+		Issue IssueResponse `json:"issue"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if conflict.Code != "active_duplicate_issue" {
+		t.Fatalf("code = %q, want active_duplicate_issue", conflict.Code)
+	}
+	if conflict.Issue.ID != issueID || conflict.Issue.Status != "in_progress" {
+		t.Fatalf("conflict issue = %#v, want original %s in_progress", conflict.Issue, issueID)
+	}
+	if !strings.Contains(conflict.Error, original.Identifier+" "+title) || !strings.Contains(conflict.Error, "allow_duplicate=true") || !strings.Contains(conflict.Error, "--allow-duplicate") {
+		t.Fatalf("unexpected duplicate message: %q", conflict.Error)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           title,
+		"parent_issue_id": parentID,
+		"project_id":      projectID,
+		"allow_duplicate": true,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue allow duplicate: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var duplicate IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&duplicate); err != nil {
+		t.Fatalf("decode duplicate: %v", err)
+	}
+	duplicateID = duplicate.ID
+	if duplicateID == issueID {
+		t.Fatalf("allow duplicate returned original issue id %s", duplicateID)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":           title,
+		"parent_issue_id": parentID,
+		"project_id":      projectID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("CreateIssue duplicate after allow-duplicate: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.NewDecoder(w.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode second conflict: %v", err)
+	}
+	if conflict.Issue.ID != issueID {
+		t.Fatalf("conflict issue = %s, want oldest active issue %s", conflict.Issue.ID, issueID)
+	}
+}
+
+func TestCreateIssueAllowsDuplicateAfterCancelled(t *testing.T) {
+	ctx := context.Background()
+	title := fmt.Sprintf("Cancelled duplicate guard %d", time.Now().UnixNano())
+	var firstID, secondID string
+	defer func() {
+		for _, id := range []string{secondID, firstID} {
+			if id != "" {
+				testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, id)
+			}
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":  title,
+		"status": "cancelled",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue cancelled: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var first IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&first); err != nil {
+		t.Fatalf("decode cancelled: %v", err)
+	}
+	firstID = first.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title": title,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue after cancelled: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var second IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	secondID = second.ID
+	if secondID == firstID {
+		t.Fatalf("new issue reused cancelled issue id %s", secondID)
+	}
+}
+
+func TestCreateIssueAllowsDuplicateAfterDone(t *testing.T) {
+	ctx := context.Background()
+	title := fmt.Sprintf("Done duplicate guard %d", time.Now().UnixNano())
+	var firstID, secondID string
+	defer func() {
+		for _, id := range []string{secondID, firstID} {
+			if id != "" {
+				testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, id)
+			}
+		}
+	}()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":  title,
+		"status": "done",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue done: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var first IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&first); err != nil {
+		t.Fatalf("decode done: %v", err)
+	}
+	firstID = first.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title": title,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue after done: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var second IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	secondID = second.ID
+	if secondID == firstID {
+		t.Fatalf("new issue reused done issue id %s", secondID)
+	}
+}
+
+func TestTriggerAutopilotRejectsActiveDuplicateIssue(t *testing.T) {
+	ctx := context.Background()
+	title := fmt.Sprintf("Autopilot duplicate guard %d", time.Now().UnixNano())
+	var issueID, autopilotID string
+	defer func() {
+		if autopilotID != "" {
+			testPool.Exec(ctx, `DELETE FROM autopilot WHERE id = $1`, autopilotID)
+		}
+		if issueID != "" {
+			testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+		}
+	}()
+
+	var agentID string
+	if err := testPool.QueryRow(ctx, `SELECT id FROM agent WHERE workspace_id = $1 LIMIT 1`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load test agent: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":  title,
+		"status": "todo",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue existing: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var existing IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&existing); err != nil {
+		t.Fatalf("decode existing issue: %v", err)
+	}
+	issueID = existing.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/autopilots?workspace_id="+testWorkspaceID, map[string]any{
+		"title":                "Duplicate guard autopilot",
+		"assignee_id":          agentID,
+		"execution_mode":       "create_issue",
+		"issue_title_template": title,
+	})
+	testHandler.CreateAutopilot(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAutopilot: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var autopilot AutopilotResponse
+	if err := json.NewDecoder(w.Body).Decode(&autopilot); err != nil {
+		t.Fatalf("decode autopilot: %v", err)
+	}
+	autopilotID = autopilot.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/autopilots/"+autopilotID+"/trigger?workspace_id="+testWorkspaceID, nil)
+	req = withURLParam(req, "id", autopilotID)
+	testHandler.TriggerAutopilot(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("TriggerAutopilot duplicate: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var conflict struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+		Issue struct {
+			ID         string `json:"id"`
+			Identifier string `json:"identifier"`
+			Title      string `json:"title"`
+			Status     string `json:"status"`
+		} `json:"issue"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode duplicate conflict: %v", err)
+	}
+	if conflict.Code != "active_duplicate_issue" {
+		t.Fatalf("code = %q, want active_duplicate_issue", conflict.Code)
+	}
+	if conflict.Issue.ID != issueID || conflict.Issue.Identifier != existing.Identifier || conflict.Issue.Status != "todo" {
+		t.Fatalf("conflict issue = %#v, want existing %s %s todo", conflict.Issue, issueID, existing.Identifier)
+	}
+	if !strings.Contains(conflict.Error, "Active duplicate issue exists: "+existing.Identifier+" "+title) {
+		t.Fatalf("duplicate error did not mention existing issue: %s", conflict.Error)
+	}
+
+	assertAutopilotDuplicateRunSkipped(t, ctx, autopilotID, issueID, existing.Identifier, title)
+	assertAutopilotNotFailureMonitorCandidate(t, ctx, autopilotID)
+
+	var count int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM issue WHERE workspace_id = $1 AND title = $2`, testWorkspaceID, title).Scan(&count); err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("autopilot duplicate guard should leave one matching issue, got %d", count)
+	}
+}
+
+func TestScheduledAutopilotDuplicateIssueSkipsRun(t *testing.T) {
+	ctx := context.Background()
+	title := fmt.Sprintf("Scheduled autopilot duplicate guard %d", time.Now().UnixNano())
+	var issueID, autopilotID string
+	defer func() {
+		if autopilotID != "" {
+			testPool.Exec(ctx, `DELETE FROM autopilot WHERE id = $1`, autopilotID)
+		}
+		if issueID != "" {
+			testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+		}
+	}()
+
+	var agentID string
+	if err := testPool.QueryRow(ctx, `SELECT id FROM agent WHERE workspace_id = $1 LIMIT 1`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load test agent: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":  title,
+		"status": "todo",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue existing: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var existing IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&existing); err != nil {
+		t.Fatalf("decode existing issue: %v", err)
+	}
+	issueID = existing.ID
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/autopilots?workspace_id="+testWorkspaceID, map[string]any{
+		"title":                "Scheduled duplicate guard autopilot",
+		"assignee_id":          agentID,
+		"execution_mode":       "create_issue",
+		"issue_title_template": title,
+	})
+	testHandler.CreateAutopilot(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAutopilot: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var autopilot AutopilotResponse
+	if err := json.NewDecoder(w.Body).Decode(&autopilot); err != nil {
+		t.Fatalf("decode autopilot: %v", err)
+	}
+	autopilotID = autopilot.ID
+
+	queries := db.New(testPool)
+	ap, err := queries.GetAutopilot(ctx, parseUUID(autopilotID))
+	if err != nil {
+		t.Fatalf("GetAutopilot: %v", err)
+	}
+	run, err := testHandler.AutopilotService.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "schedule", nil)
+	if err != nil {
+		t.Fatalf("DispatchAutopilot schedule duplicate: %v", err)
+	}
+	if run == nil {
+		t.Fatal("expected skipped run, got nil")
+	}
+	if run.Status != "skipped" {
+		t.Fatalf("run status = %q, want skipped", run.Status)
+	}
+	assertAutopilotDuplicateRunSkipped(t, ctx, autopilotID, issueID, existing.Identifier, title)
+	assertAutopilotNotFailureMonitorCandidate(t, ctx, autopilotID)
+}
+
+// TestAutopilotCreatedIssueCreatorIsAssigneeAgent locks in that an issue spawned
+// by an autopilot reports the assignee agent — not the human who configured the
+// autopilot — as its creator. The matching issue:created event must carry the
+// same actor identity so downstream activity / notification listeners stay in
+// sync with the issue row.
+func TestAutopilotCreatedIssueCreatorIsAssigneeAgent(t *testing.T) {
+	ctx := context.Background()
+	title := fmt.Sprintf("Autopilot creator attribution %d", time.Now().UnixNano())
+	var autopilotID, issueID string
+	defer func() {
+		if issueID != "" {
+			testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+		}
+		if autopilotID != "" {
+			testPool.Exec(ctx, `DELETE FROM autopilot WHERE id = $1`, autopilotID)
+		}
+	}()
+
+	var agentID string
+	if err := testPool.QueryRow(ctx, `SELECT id FROM agent WHERE workspace_id = $1 LIMIT 1`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load test agent: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/autopilots?workspace_id="+testWorkspaceID, map[string]any{
+		"title":                "Creator attribution autopilot",
+		"assignee_id":          agentID,
+		"execution_mode":       "create_issue",
+		"issue_title_template": title,
+	})
+	testHandler.CreateAutopilot(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAutopilot: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var autopilot AutopilotResponse
+	if err := json.NewDecoder(w.Body).Decode(&autopilot); err != nil {
+		t.Fatalf("decode autopilot: %v", err)
+	}
+	autopilotID = autopilot.ID
+	if autopilot.CreatedByType != "member" || autopilot.CreatedByID != testUserID {
+		t.Fatalf("autopilot created_by = %s/%s, want member/%s", autopilot.CreatedByType, autopilot.CreatedByID, testUserID)
+	}
+
+	gotEvent := make(chan events.Event, 1)
+	testHandler.Bus.Subscribe(protocol.EventIssueCreated, func(e events.Event) {
+		select {
+		case gotEvent <- e:
+		default:
+		}
+	})
+
+	queries := db.New(testPool)
+	ap, err := queries.GetAutopilot(ctx, parseUUID(autopilotID))
+	if err != nil {
+		t.Fatalf("GetAutopilot: %v", err)
+	}
+	run, err := testHandler.AutopilotService.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "manual", nil)
+	if err != nil {
+		t.Fatalf("DispatchAutopilot: %v", err)
+	}
+	if run == nil || run.Status != "issue_created" {
+		t.Fatalf("dispatch result = %+v, want status issue_created", run)
+	}
+
+	var creatorType, creatorID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id, creator_type, creator_id
+		FROM issue
+		WHERE workspace_id = $1 AND title = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, testWorkspaceID, title).Scan(&issueID, &creatorType, &creatorID); err != nil {
+		t.Fatalf("load autopilot-created issue: %v", err)
+	}
+	if creatorType != "agent" {
+		t.Fatalf("issue creator_type = %q, want agent", creatorType)
+	}
+	if creatorID != agentID {
+		t.Fatalf("issue creator_id = %q, want assignee agent %q", creatorID, agentID)
+	}
+
+	select {
+	case ev := <-gotEvent:
+		if ev.ActorType != "agent" {
+			t.Fatalf("issue:created ActorType = %q, want agent", ev.ActorType)
+		}
+		if ev.ActorID != agentID {
+			t.Fatalf("issue:created ActorID = %q, want %q", ev.ActorID, agentID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive issue:created event")
+	}
+}
+
+func assertAutopilotDuplicateRunSkipped(t *testing.T, ctx context.Context, autopilotID, issueID, identifier, title string) {
+	t.Helper()
+	var status, failureReason string
+	var result []byte
+	if err := testPool.QueryRow(ctx, `
+		SELECT status, failure_reason, result
+		FROM autopilot_run
+		WHERE autopilot_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, autopilotID).Scan(&status, &failureReason, &result); err != nil {
+		t.Fatalf("load autopilot run: %v", err)
+	}
+	if status != "skipped" {
+		t.Fatalf("autopilot duplicate run status = %q, want skipped", status)
+	}
+	if !strings.Contains(failureReason, identifier+" "+title) {
+		t.Fatalf("duplicate run failure_reason = %q, want existing issue details", failureReason)
+	}
+	var payload struct {
+		Code  string `json:"code"`
+		Issue struct {
+			ID         string `json:"id"`
+			Identifier string `json:"identifier"`
+			Title      string `json:"title"`
+			Status     string `json:"status"`
+		} `json:"issue"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatalf("decode duplicate run result: %v", err)
+	}
+	if payload.Code != "active_duplicate_issue" || payload.Issue.ID != issueID || payload.Issue.Identifier != identifier || payload.Issue.Title != title {
+		t.Fatalf("duplicate run result = %#v, want issue %s %s %q", payload, issueID, identifier, title)
+	}
+}
+
+func assertAutopilotNotFailureMonitorCandidate(t *testing.T, ctx context.Context, autopilotID string) {
+	t.Helper()
+	candidates, err := db.New(testPool).SelectAutopilotsExceedingFailureThreshold(ctx, db.SelectAutopilotsExceedingFailureThresholdParams{
+		MinRuns:            1,
+		FailRatioThreshold: 1,
+		Since:              pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("SelectAutopilotsExceedingFailureThreshold: %v", err)
+	}
+	for _, candidate := range candidates {
+		if uuidToString(candidate.ID) == autopilotID {
+			t.Fatalf("duplicate skipped run should not be a failure monitor candidate: %+v", candidate)
+		}
+	}
+}
+
 // TestCreateIssueRejectsNonexistentMemberAssignee covers the bug where any
 // well-formed UUID was accepted as assignee_id without checking workspace
 // membership.
@@ -732,926 +1253,6 @@ func TestCreateIssueAcceptsValidMemberAssignee(t *testing.T) {
 	cleanupReq := newRequest("DELETE", "/api/issues/"+created.ID, nil)
 	cleanupReq = withURLParam(cleanupReq, "id", created.ID)
 	testHandler.DeleteIssue(httptest.NewRecorder(), cleanupReq)
-}
-
-func TestCreateIssueUsesKernelCompletionByDefault(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Orchestration Test Agent", []byte(`{}`))
-	skillID := insertHandlerTestSkill(t, "orchestration-runtime-adapter-skill", "# Runtime adapter skill\nUse existing task lifecycle.")
-	if _, err := testPool.Exec(ctx, `INSERT INTO agent_skill (agent_id, skill_id) VALUES ($1, $2)`, agentID, skillID); err != nil {
-		t.Fatalf("attach skill to orchestration agent: %v", err)
-	}
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Exercise orchestration kernel from issue create",
-		"description":   "The runtime must not be allowed to decide the issue is complete.",
-		"status":        "todo",
-		"priority":      "urgent",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-		"acceptance_criteria": []map[string]any{
-			{"text": "Kernel evaluates structured evidence before closing the issue"},
-		},
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
-	}
-	if plans[0].Status != "running" {
-		t.Fatalf("expected running plan after issue create, got %q", plans[0].Status)
-	}
-
-	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("list orchestration nodes: %v", err)
-	}
-	if len(nodes) != 3 {
-		t.Fatalf("expected plan/execute/verify nodes, got %d", len(nodes))
-	}
-	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
-		t.Helper()
-		for _, node := range nodes {
-			if node.Type == nodeType {
-				return node
-			}
-		}
-		t.Fatalf("missing %s node", nodeType)
-		return db.OrchestrationNode{}
-	}
-	planNode := nodeByType(nodes, "plan")
-	executeNode := nodeByType(nodes, "execute")
-	verifyNode := nodeByType(nodes, "verify")
-	if planNode.Status != "dispatched" || planNode.AttemptCount != 1 {
-		t.Fatalf("expected dispatched plan node with one attempt, got status=%q attempts=%d", planNode.Status, planNode.AttemptCount)
-	}
-	if executeNode.Status != "pending" || verifyNode.Status != "pending" {
-		t.Fatalf("downstream nodes should wait on graph dependencies, got %q/%q", executeNode.Status, verifyNode.Status)
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one orchestration task, got %d", len(tasks))
-	}
-	taskCtx, ok := service.ParseOrchestrationTaskContext(tasks[0].Context)
-	if !ok {
-		t.Fatalf("queued task does not carry orchestration context: %s", string(tasks[0].Context))
-	}
-	if taskCtx.OrchestrationPlanID != uuidToString(plans[0].ID) || taskCtx.OrchestrationNodeID != uuidToString(planNode.ID) {
-		t.Fatalf("task context does not point to created plan/node: %#v", taskCtx)
-	}
-	if taskCtx.OrchestrationRunID == "" {
-		t.Fatalf("task context should include orchestration run id: %#v", taskCtx)
-	}
-	if taskCtx.NodeType != "plan" || taskCtx.Attempt != 1 {
-		t.Fatalf("task context should identify node type and attempt, got node_type=%q attempt=%d", taskCtx.NodeType, taskCtx.Attempt)
-	}
-	if len(taskCtx.ExpectedResultSchema) == 0 {
-		t.Fatalf("task context should include expected result schema")
-	}
-	if !json.Valid(taskCtx.ExpectedResultSchema) {
-		t.Fatalf("expected result schema should be valid JSON: %s", string(taskCtx.ExpectedResultSchema))
-	}
-
-	assertOrchestrationEvents := func(required []string) {
-		t.Helper()
-		events, err := testHandler.Queries.ListOrchestrationEventsByPlan(ctx, plans[0].ID)
-		if err != nil {
-			t.Fatalf("list orchestration events: %v", err)
-		}
-		eventTypes := map[string]bool{}
-		for _, event := range events {
-			eventTypes[event.EventType] = true
-		}
-		for _, required := range required {
-			if !eventTypes[required] {
-				t.Fatalf("missing orchestration event %q; got %#v", required, eventTypes)
-			}
-		}
-	}
-
-	claimW := httptest.NewRecorder()
-	claimReq := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+uuidToString(tasks[0].RuntimeID)+"/claim", nil, testWorkspaceID, "test-orchestration-claim")
-	claimReq = withURLParam(claimReq, "runtimeId", uuidToString(tasks[0].RuntimeID))
-	testHandler.ClaimTaskByRuntime(claimW, claimReq)
-	if claimW.Code != http.StatusOK {
-		t.Fatalf("ClaimTaskByRuntime: expected 200, got %d: %s", claimW.Code, claimW.Body.String())
-	}
-	var claimResp struct {
-		Task *struct {
-			ID    string `json:"id"`
-			Agent *struct {
-				Skills []struct {
-					Name    string `json:"name"`
-					Content string `json:"content"`
-				} `json:"skills"`
-			} `json:"agent"`
-			Orchestration service.OrchestrationTaskContext `json:"orchestration"`
-		} `json:"task"`
-	}
-	if err := json.NewDecoder(claimW.Body).Decode(&claimResp); err != nil {
-		t.Fatalf("decode claim response: %v", err)
-	}
-	if claimResp.Task == nil || claimResp.Task.ID != uuidToString(tasks[0].ID) {
-		t.Fatalf("claim orchestration task: expected %s, got %#v", uuidToString(tasks[0].ID), claimResp.Task)
-	}
-	if claimResp.Task.Orchestration.OrchestrationNodeID != uuidToString(planNode.ID) || claimResp.Task.Orchestration.Attempt != 1 {
-		t.Fatalf("claim response should include orchestration node context, got %#v", claimResp.Task.Orchestration)
-	}
-	if claimResp.Task.Agent == nil || len(claimResp.Task.Agent.Skills) == 0 {
-		t.Fatalf("claim response should include agent-bound skill context")
-	}
-	if !strings.HasPrefix(claimResp.Task.Agent.Skills[0].Name, "orchestration-runtime-adapter-skill") {
-		t.Fatalf("unexpected claim skill context: %#v", claimResp.Task.Agent.Skills)
-	}
-	claimed, err := testHandler.Queries.GetAgentTask(ctx, tasks[0].ID)
-	if err != nil {
-		t.Fatalf("reload claimed orchestration task: %v", err)
-	}
-	started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
-	if err != nil {
-		t.Fatalf("start orchestration task: %v", err)
-	}
-	if _, err := testHandler.TaskService.CompleteTask(ctx, started.ID, []byte(`{"output":"I completed the whole issue."}`), "", ""); err != nil {
-		t.Fatalf("complete orchestration task after legacy output: %v", err)
-	}
-
-	issueAfterLegacyOutput, err := testHandler.Queries.GetIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("reload issue after legacy output: %v", err)
-	}
-	if issueAfterLegacyOutput.Status == "done" {
-		t.Fatal("legacy runtime output must not close the issue without evaluator evidence")
-	}
-
-	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload orchestration nodes: %v", err)
-	}
-	planNode = nodeByType(nodes, "plan")
-	if planNode.Status != "dispatched" || planNode.AttemptCount != 2 {
-		t.Fatalf("failed evaluation should schedule retry, got status=%q attempts=%d", planNode.Status, planNode.AttemptCount)
-	}
-	plansAfterRetry, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("reload orchestration plans: %v", err)
-	}
-	if plansAfterRetry[0].Status != "running" {
-		t.Fatalf("plan should remain running after retry scheduling, got %q", plansAfterRetry[0].Status)
-	}
-
-	tasks, err = testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks after retry: %v", err)
-	}
-	if len(tasks) != 2 {
-		t.Fatalf("expected retry task after evaluator rejection, got %d tasks", len(tasks))
-	}
-	assertOrchestrationEvents([]string{
-		"plan.created",
-		"node.created",
-		"node.dispatched",
-		"node.running",
-		"node.evaluating",
-		"task.completed",
-		"evaluation.invalid_result",
-		"node.retry_scheduled",
-	})
-
-	var retryTask db.AgentTaskQueue
-	for _, task := range tasks {
-		if task.Status == "queued" {
-			retryTask = task
-		}
-	}
-	if !retryTask.ID.Valid {
-		t.Fatal("expected queued retry task")
-	}
-	claimedRetry, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, retryTask.RuntimeID)
-	if err != nil {
-		t.Fatalf("claim retry task: %v", err)
-	}
-	if claimedRetry == nil || uuidToString(claimedRetry.ID) != uuidToString(retryTask.ID) {
-		t.Fatalf("claim retry task: expected %s, got %#v", uuidToString(retryTask.ID), claimedRetry)
-	}
-	retryTaskCtx, ok := service.ParseOrchestrationTaskContext(claimedRetry.Context)
-	if !ok {
-		t.Fatalf("retry task does not carry orchestration context: %s", string(claimedRetry.Context))
-	}
-	if !strings.Contains(retryTaskCtx.PriorEvidenceSummary, "Kernel reason: evidence_insufficient") {
-		t.Fatalf("retry task should include prior evidence summary, got %#v", retryTaskCtx)
-	}
-	if !strings.Contains(retryTaskCtx.ChangeRequest, "Structured result payload did not satisfy the orchestration result contract.") {
-		t.Fatalf("retry task should include change request, got %#v", retryTaskCtx)
-	}
-	startedRetry, err := testHandler.TaskService.StartTask(ctx, claimedRetry.ID)
-	if err != nil {
-		t.Fatalf("start retry task: %v", err)
-	}
-	planResult := []byte(`{
-		"schema_version": 1,
-		"status": "completed",
-		"summary": "Planned the issue context and identified the implementation path.",
-		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Structured result includes changed files and passing tests"}],
-		"confidence": 0.82
-	}`)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, startedRetry.ID, planResult, "", ""); err != nil {
-		t.Fatalf("complete orchestration task after structured result: %v", err)
-	}
-
-	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload nodes after plan completion: %v", err)
-	}
-	planNode = nodeByType(nodes, "plan")
-	executeNode = nodeByType(nodes, "execute")
-	verifyNode = nodeByType(nodes, "verify")
-	if planNode.Status != "completed" || executeNode.Status != "dispatched" || verifyNode.Status != "pending" {
-		t.Fatalf("plan completion should dispatch execute only, got %q/%q/%q", planNode.Status, executeNode.Status, verifyNode.Status)
-	}
-	issueAfterPlan, err := testHandler.Queries.GetIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("reload issue after plan: %v", err)
-	}
-	if issueAfterPlan.Status == "done" {
-		t.Fatal("issue must stay open until all plan nodes pass evaluation")
-	}
-
-	completeQueuedNode := func(node db.OrchestrationNode, result []byte) {
-		t.Helper()
-		tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-		if err != nil {
-			t.Fatalf("list tasks for node %s: %v", node.Type, err)
-		}
-		var queued db.AgentTaskQueue
-		for _, task := range tasks {
-			taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
-			if task.Status == "queued" && ok && taskCtx.OrchestrationNodeID == uuidToString(node.ID) {
-				queued = task
-				break
-			}
-		}
-		if !queued.ID.Valid {
-			t.Fatalf("expected queued task for %s node", node.Type)
-		}
-		claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, queued.RuntimeID)
-		if err != nil {
-			t.Fatalf("claim %s task: %v", node.Type, err)
-		}
-		if claimed == nil || uuidToString(claimed.ID) != uuidToString(queued.ID) {
-			t.Fatalf("claim %s task: expected %s, got %#v", node.Type, uuidToString(queued.ID), claimed)
-		}
-		started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
-		if err != nil {
-			t.Fatalf("start %s task: %v", node.Type, err)
-		}
-		if _, err := testHandler.TaskService.CompleteTask(ctx, started.ID, result, "", ""); err != nil {
-			t.Fatalf("complete %s task: %v", node.Type, err)
-		}
-	}
-
-	executeResult := []byte(`{
-		"schema_version": 1,
-		"status": "completed",
-		"summary": "Implemented the requested orchestration behavior.",
-		"changed_files": ["server/internal/service/orchestrator.go"],
-		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Implementation result includes changed files"}],
-		"confidence": 0.82
-	}`)
-	completeQueuedNode(executeNode, executeResult)
-	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload nodes after execute completion: %v", err)
-	}
-	executeNode = nodeByType(nodes, "execute")
-	verifyNode = nodeByType(nodes, "verify")
-	if executeNode.Status != "completed" || verifyNode.Status != "dispatched" {
-		t.Fatalf("execute completion should dispatch verify, got execute=%q verify=%q", executeNode.Status, verifyNode.Status)
-	}
-
-	verifyResult := []byte(`{
-		"schema_version": 1,
-		"status": "completed",
-		"summary": "Verified the implementation against the acceptance criteria.",
-		"test_result": {"status": "passed", "passed": true},
-		"criteria_evidence": [{"criterion": "Kernel evaluates structured evidence before closing the issue", "evidence": "Test node reports passing test evidence"}],
-		"confidence": 0.82
-	}`)
-	completeQueuedNode(verifyNode, verifyResult)
-
-	finalPlan, err := testHandler.Queries.GetOrchestrationPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload final plan: %v", err)
-	}
-	if finalPlan.Status != "completed" {
-		t.Fatalf("expected evaluator-approved plan completion, got %q", finalPlan.Status)
-	}
-	finalNodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload final nodes: %v", err)
-	}
-	for _, node := range finalNodes {
-		if node.Status != "completed" {
-			t.Fatalf("expected evaluator-approved node completion for %s, got %q", node.Type, node.Status)
-		}
-	}
-	finalIssue, err := testHandler.Queries.GetIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("reload final issue: %v", err)
-	}
-	if finalIssue.Status != "in_review" {
-		t.Fatalf("expected kernel to move issue to review after evaluator approval, got %q", finalIssue.Status)
-	}
-	if finalIssue.Status == "done" {
-		t.Fatal("kernel verification must not automatically mark issue done")
-	}
-	assertOrchestrationEvents([]string{
-		"evaluation.passed",
-		"node.completed",
-		"plan.completed",
-	})
-
-	getReq := withURLParam(newRequest(http.MethodGet, "/api/issues/"+created.ID+"/orchestration", nil), "id", created.ID)
-	getW := httptest.NewRecorder()
-	testHandler.GetIssueOrchestration(getW, getReq)
-	if getW.Code != http.StatusOK {
-		t.Fatalf("GetIssueOrchestration: expected 200, got %d: %s", getW.Code, getW.Body.String())
-	}
-	var orchestrationResp IssueOrchestrationResponse
-	if err := json.NewDecoder(getW.Body).Decode(&orchestrationResp); err != nil {
-		t.Fatalf("decode orchestration response: %v", err)
-	}
-	if len(orchestrationResp.Artifacts) == 0 {
-		t.Fatal("expected persisted node evidence artifacts in orchestration read API")
-	}
-	hasSummary, hasChangedFiles, hasTestResult, hasLinkedTask := false, false, false, false
-	for _, artifact := range orchestrationResp.Artifacts {
-		if artifact.TaskID != nil {
-			hasLinkedTask = true
-		}
-		switch artifact.Type {
-		case "summary":
-			hasSummary = true
-		case "diff":
-			var content struct {
-				ChangedFiles []string `json:"changed_files"`
-			}
-			if err := json.Unmarshal(artifact.Content, &content); err == nil && len(content.ChangedFiles) > 0 {
-				hasChangedFiles = true
-			}
-		case "test_result":
-			hasTestResult = true
-		}
-	}
-	if !hasSummary || !hasChangedFiles || !hasTestResult || !hasLinkedTask {
-		t.Fatalf("orchestration read API missing evidence fields: summary=%v changed_files=%v test_result=%v linked_task=%v artifacts=%+v", hasSummary, hasChangedFiles, hasTestResult, hasLinkedTask, orchestrationResp.Artifacts)
-	}
-}
-
-func TestDaemonCompleteTask_UsesExplicitStructuredResultForOrchestration(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Explicit Result Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Daemon explicit result",
-		"description":   "Structured result should be honored even when output is plain prose.",
-		"status":        "todo",
-		"priority":      "urgent",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-		"acceptance_criteria": []map[string]any{
-			{"text": "Structured result protocol is used"},
-		},
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
-	}
-
-	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("list orchestration nodes: %v", err)
-	}
-	var planNode db.OrchestrationNode
-	for _, node := range nodes {
-		if node.Type == "plan" {
-			planNode = node
-			break
-		}
-	}
-	if !planNode.ID.Valid {
-		t.Fatal("missing plan node")
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one orchestration task, got %d", len(tasks))
-	}
-	claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, tasks[0].RuntimeID)
-	if err != nil {
-		t.Fatalf("claim orchestration task: %v", err)
-	}
-	started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
-	if err != nil {
-		t.Fatalf("start orchestration task: %v", err)
-	}
-
-	daemonReq := newDaemonTokenRequest("POST", "/api/daemon/tasks/"+uuidToString(started.ID)+"/complete", map[string]any{
-		"output": "human-readable terminal text",
-		"result": map[string]any{
-			"schema_version":    1,
-			"status":            "completed",
-			"summary":           "Planned the issue context and identified the implementation path.",
-			"criteria_evidence": []map[string]any{{"criterion": "Structured result protocol is used", "evidence": "Explicit result payload satisfied the evaluator."}},
-			"confidence":        0.82,
-		},
-	}, testWorkspaceID, "legit-daemon")
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("taskId", uuidToString(started.ID))
-	daemonReq = daemonReq.WithContext(context.WithValue(daemonReq.Context(), chi.RouteCtxKey, rctx))
-	w = httptest.NewRecorder()
-	testHandler.CompleteTask(w, daemonReq)
-	if w.Code != http.StatusOK {
-		t.Fatalf("CompleteTask: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload nodes: %v", err)
-	}
-	for _, node := range nodes {
-		if node.ID == planNode.ID && node.Status != "completed" {
-			t.Fatalf("expected plan node to complete from explicit result payload, got %q", node.Status)
-		}
-	}
-}
-
-func TestIssueAssignedToAgent_OrchestrationFlagOffStillUsesOrchestrationPath(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Legacy Path Agent", []byte(`{}`))
-
-	setHandlerTestOrchestrationEnabled(t, false)
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Legacy path without flag",
-		"description":   "Disabled workspaces should keep the existing direct task path.",
-		"status":        "todo",
-		"priority":      "medium",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected one orchestration plan, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one orchestration task, got %d", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("orchestration task should carry orchestration context: %s", string(tasks[0].Context))
-	}
-}
-
-func TestIssueAssignedToAgent_DoesNotFallbackToLegacyWhenOrchestratorUnavailable(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Unavailable Orchestrator Agent", []byte(`{}`))
-
-	original := testHandler.TaskService.Orchestrator
-	testHandler.TaskService.Orchestrator = nil
-	t.Cleanup(func() {
-		testHandler.TaskService.Orchestrator = original
-	})
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "No legacy fallback when orchestrator unavailable",
-		"description":   "Agent-assigned issues must not silently enqueue legacy tasks.",
-		"status":        "todo",
-		"priority":      "medium",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 0 {
-		t.Fatalf("expected no orchestration plan when orchestrator is unavailable, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 0 {
-		t.Fatalf("expected no fallback legacy task when orchestrator is unavailable, got %d", len(tasks))
-	}
-}
-
-func TestCreateIssueStopsAfterRetryExhaustionByDefault(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Retry Exhaust Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Retry exhaustion",
-		"description":   "Invalid evaluator results should stop after max attempts.",
-		"status":        "todo",
-		"priority":      "urgent",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-		"acceptance_criteria": []map[string]any{
-			{"text": "Structured result must include evidence"},
-		},
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
-	}
-
-	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
-		t.Helper()
-		for _, node := range nodes {
-			if node.Type == nodeType {
-				return node
-			}
-		}
-		t.Fatalf("missing %s node", nodeType)
-		return db.OrchestrationNode{}
-	}
-
-	invalidResult := []byte(`{"status":"completed","summary":"done without evidence"}`)
-
-	completeQueuedNode := func(nodeID string) {
-		t.Helper()
-		tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-		if err != nil {
-			t.Fatalf("list issue tasks: %v", err)
-		}
-
-		var queued db.AgentTaskQueue
-		for _, task := range tasks {
-			taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
-			if task.Status == "queued" && ok && taskCtx.OrchestrationNodeID == nodeID {
-				queued = task
-				break
-			}
-		}
-		if !queued.ID.Valid {
-			t.Fatalf("expected queued task for node %s", nodeID)
-		}
-
-		claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, queued.RuntimeID)
-		if err != nil {
-			t.Fatalf("claim task: %v", err)
-		}
-		if claimed == nil {
-			t.Fatal("expected claimed task")
-		}
-		started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
-		if err != nil {
-			t.Fatalf("start task: %v", err)
-		}
-		if _, err := testHandler.TaskService.CompleteTask(ctx, started.ID, invalidResult, "", ""); err != nil {
-			t.Fatalf("complete task: %v", err)
-		}
-	}
-
-	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("list orchestration nodes: %v", err)
-	}
-	planNode := nodeByType(nodes, "plan")
-	completeQueuedNode(uuidToString(planNode.ID))
-
-	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload nodes after first attempt: %v", err)
-	}
-	planNode = nodeByType(nodes, "plan")
-	if planNode.AttemptCount != 2 {
-		t.Fatalf("expected retry to increment attempt count to 2, got %d", planNode.AttemptCount)
-	}
-	if planNode.Status != "dispatched" {
-		t.Fatalf("expected plan node dispatched after first failed evaluation, got %q", planNode.Status)
-	}
-
-	completeQueuedNode(uuidToString(planNode.ID))
-
-	nodes, err = testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload nodes after retry exhaustion: %v", err)
-	}
-	planNode = nodeByType(nodes, "plan")
-	if planNode.AttemptCount != planNode.MaxAttempts {
-		t.Fatalf("attempt_count=%d max_attempts=%d", planNode.AttemptCount, planNode.MaxAttempts)
-	}
-	if planNode.Status != "failed" {
-		t.Fatalf("expected node failed after retry exhaustion, got %s", planNode.Status)
-	}
-
-	finalPlan, err := testHandler.Queries.GetOrchestrationPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("reload plan after retry exhaustion: %v", err)
-	}
-	if finalPlan.Status != "failed" {
-		t.Fatalf("expected failed plan after retry exhaustion, got %q", finalPlan.Status)
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks after retry exhaustion: %v", err)
-	}
-	queuedCount := 0
-	queuedForPlan := 0
-	for _, task := range tasks {
-		if task.Status != "queued" {
-			continue
-		}
-		queuedCount++
-		taskCtx, ok := service.ParseOrchestrationTaskContext(task.Context)
-		if ok && taskCtx.OrchestrationNodeID == uuidToString(planNode.ID) {
-			queuedForPlan++
-		}
-	}
-	if queuedForPlan != 0 {
-		t.Fatalf("expected no queued retry task after exhaustion, got %d", queuedForPlan)
-	}
-	if queuedCount != 0 {
-		t.Fatalf("expected no queued tasks after exhaustion, got %d", queuedCount)
-	}
-
-	getReq := withURLParam(newRequest(http.MethodGet, "/api/issues/"+created.ID+"/orchestration", nil), "id", created.ID)
-	getW := httptest.NewRecorder()
-	testHandler.GetIssueOrchestration(getW, getReq)
-	if getW.Code != http.StatusOK {
-		t.Fatalf("GetIssueOrchestration: expected 200, got %d: %s", getW.Code, getW.Body.String())
-	}
-	var orchestrationResp IssueOrchestrationResponse
-	if err := json.NewDecoder(getW.Body).Decode(&orchestrationResp); err != nil {
-		t.Fatalf("decode orchestration response after retry exhaustion: %v", err)
-	}
-	var planSummary *NodeSummaryDTO
-	for _, node := range orchestrationResp.Nodes {
-		if node.ID == uuidToString(planNode.ID) {
-			planSummary = node.Summary
-			break
-		}
-	}
-	if planSummary == nil {
-		t.Fatal("expected plan node summary after retry exhaustion")
-	}
-	if planSummary.ReasonCode != "retry_exhausted" {
-		t.Fatalf("expected retry_exhausted reason code, got %q", planSummary.ReasonCode)
-	}
-	if planSummary.LatestEvaluationStatus != "evidence_insufficient" {
-		t.Fatalf("expected evidence_insufficient latest evaluation status, got %q", planSummary.LatestEvaluationStatus)
-	}
-	if planSummary.RecommendedAction != "retry" {
-		t.Fatalf("expected retry recommended action, got %q", planSummary.RecommendedAction)
-	}
-	if !strings.Contains(planSummary.PriorEvidenceSummary, "Kernel reason: evidence_insufficient") {
-		t.Fatalf("expected prior evidence summary in read API, got %#v", planSummary)
-	}
-}
-
-func TestOrchestrationFailTaskRoutesThroughKernelRetry(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "FailTask Kernel Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "FailTask retry path",
-		"description":   "Kernel should own orchestration task failure retries.",
-		"status":        "todo",
-		"priority":      "urgent",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-		"acceptance_criteria": []map[string]any{
-			{"text": "Runtime task failures are retried by kernel state machine"},
-		},
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected exactly one orchestration plan, got %d", len(plans))
-	}
-
-	nodeByType := func(nodes []db.OrchestrationNode, nodeType string) db.OrchestrationNode {
-		t.Helper()
-		for _, node := range nodes {
-			if node.Type == nodeType {
-				return node
-			}
-		}
-		t.Fatalf("missing %s node", nodeType)
-		return db.OrchestrationNode{}
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one orchestration task, got %d", len(tasks))
-	}
-
-	claimed, err := testHandler.TaskService.ClaimTaskForRuntime(ctx, tasks[0].RuntimeID)
-	if err != nil {
-		t.Fatalf("claim orchestration task: %v", err)
-	}
-	if claimed == nil {
-		t.Fatal("expected claimed orchestration task")
-	}
-	started, err := testHandler.TaskService.StartTask(ctx, claimed.ID)
-	if err != nil {
-		t.Fatalf("start orchestration task: %v", err)
-	}
-	if _, err := testHandler.TaskService.FailTask(ctx, started.ID, "runtime crashed", "", "", "runtime_offline"); err != nil {
-		t.Fatalf("fail orchestration task: %v", err)
-	}
-
-	nodes, err := testHandler.Queries.ListOrchestrationNodesByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("list orchestration nodes: %v", err)
-	}
-	if len(nodes) == 0 {
-		t.Fatal("expected orchestration nodes")
-	}
-	planNode := nodeByType(nodes, "plan")
-	if planNode.AttemptCount != 2 {
-		t.Fatalf("expected failed attempt to consume retry budget, got attempt_count=%d", planNode.AttemptCount)
-	}
-	if planNode.Status != "dispatched" {
-		t.Fatalf("expected retry node to be dispatched, got %q", planNode.Status)
-	}
-
-	events, err := testHandler.Queries.ListOrchestrationEventsByPlan(ctx, plans[0].ID)
-	if err != nil {
-		t.Fatalf("list events: %v", err)
-	}
-	eventTypes := map[string]bool{}
-	for _, event := range events {
-		eventTypes[event.EventType] = true
-	}
-	if !eventTypes["task.failed"] {
-		t.Fatalf("missing task.failed event: %#v", eventTypes)
-	}
-	if !eventTypes["node.retry_scheduled"] {
-		t.Fatalf("expected retry after task failure, got events %#v", eventTypes)
-	}
-
-	tasks, err = testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list tasks after fail: %v", err)
-	}
-	queuedCount := 0
-	for _, task := range tasks {
-		if task.Status == "queued" {
-			queuedCount++
-		}
-	}
-	if queuedCount != 1 {
-		t.Fatalf("expected exactly one queued retry task, got %d", queuedCount)
-	}
 }
 
 // TestCreateIssueRejectsMalformedAssigneeID covers the case where parseUUID
@@ -1795,138 +1396,6 @@ func TestUpdateIssueAllowsExplicitUnassign(t *testing.T) {
 	}
 }
 
-func TestUpdateIssueAssignAgent_FlagOffStillUsesOrchestrationPath(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Update Orchestration Agent", []byte(`{}`))
-
-	setHandlerTestOrchestrationEnabled(t, false)
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":    "Assign agent via update",
-		"status":   "todo",
-		"priority": "medium",
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	w = httptest.NewRecorder()
-	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-	})
-	req = withURLParam(req, "id", created.ID)
-	testHandler.UpdateIssue(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("UpdateIssue: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected one orchestration plan after agent assignment, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one orchestration task after agent assignment, got %d", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("orchestration task should carry orchestration context after agent assignment: %s", string(tasks[0].Context))
-	}
-}
-
-func TestBatchUpdateIssuesAssignAgent_FlagOffStillUsesOrchestrationPath(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Batch Update Orchestration Agent", []byte(`{}`))
-
-	setHandlerTestOrchestrationEnabled(t, false)
-
-	createIssue := func(title string) string {
-		t.Helper()
-		w := httptest.NewRecorder()
-		req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-			"title":    title,
-			"status":   "todo",
-			"priority": "medium",
-		})
-		testHandler.CreateIssue(w, req)
-		if w.Code != http.StatusCreated {
-			t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-		}
-		var created IssueResponse
-		if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-			t.Fatalf("decode created issue: %v", err)
-		}
-		return created.ID
-	}
-
-	issueA := createIssue("Batch assign agent A")
-	issueB := createIssue("Batch assign agent B")
-
-	w := httptest.NewRecorder()
-	req := newRequest("PUT", "/api/issues/batch", map[string]any{
-		"issue_ids": []string{issueA, issueB},
-		"updates": map[string]any{
-			"assignee_type": "agent",
-			"assignee_id":   agentID,
-		},
-	})
-	testHandler.BatchUpdateIssues(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("BatchUpdateIssues: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	for _, rawID := range []string{issueA, issueB} {
-		issueID := parseUUID(rawID)
-		plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-			SourceType: "issue",
-			SourceID:   issueID,
-		})
-		if err != nil {
-			t.Fatalf("list orchestration plans for %s: %v", rawID, err)
-		}
-		if len(plans) != 1 {
-			t.Fatalf("expected one orchestration plan for %s after batch assignment, got %d", rawID, len(plans))
-		}
-
-		tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-		if err != nil {
-			t.Fatalf("list issue tasks for %s: %v", rawID, err)
-		}
-		if len(tasks) != 1 {
-			t.Fatalf("expected one orchestration task for %s after batch assignment, got %d", rawID, len(tasks))
-		}
-		if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-			t.Fatalf("orchestration task should carry orchestration context for %s after batch assignment: %s", rawID, string(tasks[0].Context))
-		}
-	}
-}
-
 func TestCommentCRUD(t *testing.T) {
 	// Create an issue first
 	w := httptest.NewRecorder()
@@ -2023,141 +1492,6 @@ func TestCreateAutopilotRejectsMalformedAssigneeID(t *testing.T) {
 	testHandler.CreateAutopilot(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("CreateAutopilot: expected 400 for malformed assignee_id, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestTriggerAutopilotCreateIssue_UsesOrchestrationPath(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Autopilot Orchestration Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/autopilots", map[string]any{
-		"title":                      "Autopilot create issue orchestration",
-		"assignee_id":                agentID,
-		"execution_mode":             "create_issue",
-		"issue_title_template":       "Autopilot generated issue",
-		"issue_description_template": "Generated from autopilot.",
-		"status":                     "active",
-	})
-	testHandler.CreateAutopilot(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateAutopilot: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created autopilot: %v", err)
-	}
-	autopilotID, _ := created["id"].(string)
-	if autopilotID == "" {
-		t.Fatal("expected autopilot id")
-	}
-
-	w = httptest.NewRecorder()
-	req = newRequest("POST", "/api/autopilots/"+autopilotID+"/trigger", nil)
-	req = withURLParam(req, "id", autopilotID)
-	testHandler.TriggerAutopilot(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("TriggerAutopilot: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var issueID string
-	if err := testPool.QueryRow(ctx, `
-		SELECT i.id
-		FROM issue i
-		WHERE i.origin_type = 'autopilot'
-		ORDER BY i.created_at DESC
-		LIMIT 1
-	`).Scan(&issueID); err != nil {
-		t.Fatalf("load autopilot-created issue: %v", err)
-	}
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   parseUUID(issueID),
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected one orchestration plan for autopilot-created issue, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, parseUUID(issueID))
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one task for autopilot-created issue, got %d", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("autopilot create_issue task should carry orchestration context: %s", string(tasks[0].Context))
-	}
-}
-
-func TestImportStarterContent_WelcomeIssueUsesOrchestrationPath(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	agentID := createHandlerTestAgent(t, "Starter Content Orchestration Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/onboarding/starter-content/import", map[string]any{
-		"workspace_id": testWorkspaceID,
-		"project": map[string]any{
-			"title": "Starter project",
-		},
-		"welcome_issue_template": map[string]any{
-			"title":       "Welcome issue",
-			"description": "Welcome template",
-			"priority":    "high",
-		},
-		"agent_guided_sub_issues": []map[string]any{},
-		"self_serve_sub_issues":   []map[string]any{},
-		"selected_agent_id":       agentID,
-	})
-	testHandler.ImportStarterContent(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("ImportStarterContent: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	ctx := context.Background()
-	var issueID string
-	if err := testPool.QueryRow(ctx, `
-		SELECT id
-		FROM issue
-		WHERE workspace_id = $1 AND title = 'Welcome issue'
-		ORDER BY created_at DESC
-		LIMIT 1
-	`, testWorkspaceID).Scan(&issueID); err != nil {
-		t.Fatalf("load welcome issue: %v", err)
-	}
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   parseUUID(issueID),
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected one orchestration plan for welcome issue, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, parseUUID(issueID))
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one task for welcome issue, got %d", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("welcome issue task should carry orchestration context: %s", string(tasks[0].Context))
 	}
 }
 
@@ -3024,14 +2358,18 @@ func TestResolveActor(t *testing.T) {
 			wantActorType: "member",
 		},
 		{
-			name:          "valid agent ID returns agent",
+			// X-Agent-ID without X-Task-ID is not trusted — otherwise a
+			// workspace member who guesses an agent's UUID could impersonate
+			// it and bypass the private-agent gate. See resolveActor for the
+			// rationale.
+			name:          "agent ID without task ID returns member",
 			agentIDHeader: agentID,
-			wantActorType: "agent",
-			wantIsAgent:   true,
+			wantActorType: "member",
 		},
 		{
-			name:          "non-existent agent ID returns member",
+			name:          "non-existent agent ID with task returns member",
 			agentIDHeader: "00000000-0000-0000-0000-000000000099",
+			taskIDHeader:  taskID,
 			wantActorType: "member",
 		},
 		{
@@ -3125,8 +2463,8 @@ func TestBacklogNoTriggerOnCreate(t *testing.T) {
 }
 
 // TestBacklogToTodoTriggersAgent verifies that moving an agent-assigned issue
-// from "backlog" to "todo" enters the orchestration path exactly once
-// (none on creation, one orchestration task on status transition).
+// from "backlog" to "todo" enqueues exactly one agent task (none on creation,
+// one on status transition).
 func TestBacklogToTodoTriggersAgent(t *testing.T) {
 	ctx := context.Background()
 
@@ -3166,27 +2504,17 @@ func TestBacklogToTodoTriggersAgent(t *testing.T) {
 		t.Fatalf("UpdateIssue: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	issueID := parseUUID(created.ID)
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
+	// Verify exactly one task was enqueued (from the status transition, not creation).
+	var taskCount int
+	err = testPool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		created.ID, agentID,
+	).Scan(&taskCount)
 	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
+		t.Fatalf("failed to count tasks: %v", err)
 	}
-	if len(plans) != 1 {
-		t.Fatalf("expected exactly 1 orchestration plan after backlog->todo transition, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected exactly 1 task after backlog->todo transition, got %d", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("backlog->todo task should carry orchestration context: %s", string(tasks[0].Context))
+	if taskCount != 1 {
+		t.Fatalf("expected exactly 1 task after backlog->todo transition, got %d", taskCount)
 	}
 
 	// Cleanup
@@ -3194,235 +2522,6 @@ func TestBacklogToTodoTriggersAgent(t *testing.T) {
 	cleanupReq := newRequest("DELETE", "/api/issues/"+created.ID, nil)
 	cleanupReq = withURLParam(cleanupReq, "id", created.ID)
 	testHandler.DeleteIssue(httptest.NewRecorder(), cleanupReq)
-}
-
-func TestCommentTriggerAssignedAgent_FlagOffStillUsesOrchestrationPath(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "On Comment Orchestration Agent", []byte(`{"triggers":["on_comment"]}`))
-
-	setHandlerTestOrchestrationEnabled(t, false)
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Comment-triggered orchestration",
-		"status":        "todo",
-		"priority":      "medium",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-
-	issueID := parseUUID(created.ID)
-	if _, err := testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID); err != nil {
-		t.Fatalf("clear initial task queue: %v", err)
-	}
-	if _, err := testPool.Exec(ctx, `DELETE FROM orchestration_artifact WHERE plan_id IN (SELECT id FROM orchestration_plan WHERE source_type = 'issue' AND source_id = $1)`, issueID); err != nil {
-		t.Fatalf("clear orchestration artifacts: %v", err)
-	}
-	if _, err := testPool.Exec(ctx, `DELETE FROM orchestration_event WHERE plan_id IN (SELECT id FROM orchestration_plan WHERE source_type = 'issue' AND source_id = $1)`, issueID); err != nil {
-		t.Fatalf("clear orchestration events: %v", err)
-	}
-	if _, err := testPool.Exec(ctx, `DELETE FROM orchestration_edge WHERE plan_id IN (SELECT id FROM orchestration_plan WHERE source_type = 'issue' AND source_id = $1)`, issueID); err != nil {
-		t.Fatalf("clear orchestration edges: %v", err)
-	}
-	if _, err := testPool.Exec(ctx, `DELETE FROM orchestration_node WHERE plan_id IN (SELECT id FROM orchestration_plan WHERE source_type = 'issue' AND source_id = $1)`, issueID); err != nil {
-		t.Fatalf("clear orchestration nodes: %v", err)
-	}
-	if _, err := testPool.Exec(ctx, `DELETE FROM orchestration_plan WHERE source_type = 'issue' AND source_id = $1`, issueID); err != nil {
-		t.Fatalf("clear orchestration plans: %v", err)
-	}
-
-	w = httptest.NewRecorder()
-	req = newRequest("POST", "/api/issues/"+created.ID+"/comments", map[string]any{
-		"content": "Please re-check this issue.",
-	})
-	req = withURLParam(req, "id", created.ID)
-	testHandler.CreateComment(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateComment: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected one orchestration plan after comment trigger, got %d", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected one orchestration task after comment trigger, got %d", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("comment-triggered task should carry orchestration context: %s", string(tasks[0].Context))
-	}
-}
-
-func TestRerunIssue_UsesOrchestrationPathAndFreshSession(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Rerun Orchestration Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Rerun orchestration issue",
-		"status":        "todo",
-		"priority":      "medium",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	initialPlans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list initial orchestration plans: %v", err)
-	}
-	if len(initialPlans) != 1 {
-		t.Fatalf("expected one initial orchestration plan, got %d", len(initialPlans))
-	}
-
-	w = httptest.NewRecorder()
-	req = newRequest("POST", "/api/issues/"+created.ID+"/rerun", nil)
-	req = withURLParam(req, "id", created.ID)
-	testHandler.RerunIssue(w, req)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("RerunIssue: expected 202, got %d: %s", w.Code, w.Body.String())
-	}
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans after rerun: %v", err)
-	}
-	if len(plans) != 2 {
-		t.Fatalf("expected rerun to create a fresh orchestration plan, got %d plans", len(plans))
-	}
-	if plans[0].Status != "running" {
-		t.Fatalf("expected newest rerun plan to be running, got %q", plans[0].Status)
-	}
-	if plans[1].Status != "cancelled" {
-		t.Fatalf("expected prior plan to be cancelled on rerun, got %q", plans[1].Status)
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks after rerun: %v", err)
-	}
-	if len(tasks) != 2 {
-		t.Fatalf("expected initial task plus rerun task, got %d", len(tasks))
-	}
-	if tasks[0].Status != "queued" {
-		t.Fatalf("expected newest rerun task to be queued, got %q", tasks[0].Status)
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("rerun task should carry orchestration context: %s", string(tasks[0].Context))
-	}
-	if !tasks[0].ForceFreshSession {
-		t.Fatal("rerun orchestration task should force a fresh session")
-	}
-	if tasks[1].Status != "cancelled" {
-		t.Fatalf("expected prior task to be cancelled on rerun, got %q", tasks[1].Status)
-	}
-}
-
-func TestRerunIssue_DoesNotFallbackToLegacyWhenOrchestratorUnavailable(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-
-	ctx := context.Background()
-	agentID := createHandlerTestAgent(t, "Rerun Unavailable Orchestrator Agent", []byte(`{}`))
-
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":         "Rerun without orchestrator",
-		"status":        "todo",
-		"priority":      "medium",
-		"assignee_type": "agent",
-		"assignee_id":   agentID,
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created IssueResponse
-	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created issue: %v", err)
-	}
-	issueID := parseUUID(created.ID)
-
-	original := testHandler.TaskService.Orchestrator
-	testHandler.TaskService.Orchestrator = nil
-	t.Cleanup(func() {
-		testHandler.TaskService.Orchestrator = original
-	})
-
-	w = httptest.NewRecorder()
-	req = newRequest("POST", "/api/issues/"+created.ID+"/rerun", nil)
-	req = withURLParam(req, "id", created.ID)
-	testHandler.RerunIssue(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("RerunIssue: expected 400 when orchestrator unavailable, got %d: %s", w.Code, w.Body.String())
-	}
-
-	plans, err := testHandler.Queries.ListOrchestrationPlansBySource(ctx, db.ListOrchestrationPlansBySourceParams{
-		SourceType: "issue",
-		SourceID:   issueID,
-	})
-	if err != nil {
-		t.Fatalf("list orchestration plans after unavailable rerun: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("expected original orchestration plan to remain untouched, got %d plans", len(plans))
-	}
-
-	tasks, err := testHandler.Queries.ListTasksByIssue(ctx, issueID)
-	if err != nil {
-		t.Fatalf("list issue tasks after unavailable rerun: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected no new legacy rerun task when orchestrator unavailable, got %d tasks", len(tasks))
-	}
-	if _, ok := service.ParseOrchestrationTaskContext(tasks[0].Context); !ok {
-		t.Fatalf("existing task should remain orchestration task: %s", string(tasks[0].Context))
-	}
 }
 
 func TestDaemonRegisterMissingWorkspaceReturns404(t *testing.T) {
@@ -3534,10 +2633,13 @@ func TestAgentReplyDoesNotInheritParentMentions(t *testing.T) {
 
 	// 3. Agent A posts a reply in the same thread with NO mentions.
 	// With the fix, this must NOT inherit the parent mention of Agent B.
+	// resolveActor requires X-Task-ID paired with X-Agent-ID to trust the
+	// agent identity, so we seed a task that belongs to agent A.
+	agentATask := createHandlerTestTaskForAgent(t, agentA)
 	w = postComment(issueID, map[string]any{
 		"content":   "No reply needed — just an acknowledgment.",
 		"parent_id": parentComment.ID,
-	}, map[string]string{"X-Agent-ID": agentA})
+	}, map[string]string{"X-Agent-ID": agentA, "X-Task-ID": agentATask})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("agent A reply: expected 201, got %d: %s", w.Code, w.Body.String())
 	}
@@ -3610,12 +2712,16 @@ func TestMemberReplyToAgentRootDoesNotInheritParentMentions(t *testing.T) {
 
 	// 1. Agent J posts a PR-completion comment that @mentions Reviewer for review.
 	// This is a deliberate handoff and must enqueue a task for Reviewer.
+	// X-Task-ID is required alongside X-Agent-ID for resolveActor to grant
+	// the "agent" actor identity (defense against header forgery).
+	jAgentTask := createHandlerTestTaskForAgent(t, jAgent)
 	w = httptest.NewRecorder()
 	r := newRequest("POST", "/api/issues/"+issueID+"/comments", map[string]any{
 		"content": fmt.Sprintf("PR ready. [@Reviewer](mention://agent/%s) please review this.", reviewerAgent),
 	})
 	r = withURLParam(r, "id", issueID)
 	r.Header.Set("X-Agent-ID", jAgent)
+	r.Header.Set("X-Task-ID", jAgentTask)
 	testHandler.CreateComment(w, r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("J PR completion: expected 201, got %d: %s", w.Code, w.Body.String())
@@ -3701,7 +2807,10 @@ func TestAgentExplicitMentionStillTriggers(t *testing.T) {
 
 	// Agent A posts a top-level comment that explicitly @mentions Agent B —
 	// a deliberate handoff. This must enqueue a task for Agent B, and must
-	// not enqueue a self-trigger for Agent A.
+	// not enqueue a self-trigger for Agent A. resolveActor requires
+	// X-Task-ID to grant "agent" identity; without it the self-trigger
+	// suppression (authorType=="agent") would not fire.
+	agentATask := createHandlerTestTaskForAgent(t, agentA)
 	explicitMention := fmt.Sprintf("[@Agent B](mention://agent/%s) please take it from here", agentB)
 	w = httptest.NewRecorder()
 	r := newRequest("POST", "/api/issues/"+issueID+"/comments", map[string]any{
@@ -3709,6 +2818,7 @@ func TestAgentExplicitMentionStillTriggers(t *testing.T) {
 	})
 	r = withURLParam(r, "id", issueID)
 	r.Header.Set("X-Agent-ID", agentA)
+	r.Header.Set("X-Task-ID", agentATask)
 	testHandler.CreateComment(w, r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("agent A handoff: expected 201, got %d: %s", w.Code, w.Body.String())

@@ -63,13 +63,13 @@ describe("parseLogLine", () => {
   it("handles a quoted value containing a URL with embedded escaped quotes and a colon", () => {
     // Real sample: error="Post \"http://...\": dial tcp ..."
     const line =
-      '07:48:09.391 WRN claim task failed component=daemon runtime_id=03f8ff17-276d error="Post \\"http://localhost:8280/api/daemon/runtimes/abc/tasks/claim\\": dial tcp [::1]:8280: connect: connection refused"';
+      '07:48:09.391 WRN claim task failed component=daemon runtime_id=03f8ff17-276d error="Post \\"http://localhost:8080/api/daemon/runtimes/abc/tasks/claim\\": dial tcp [::1]:8080: connect: connection refused"';
     const r = parseLogLine(line, 1);
     expect(r.level).toBe("WARN");
     expect(r.message).toBe("claim task failed");
     expect(r.fields.runtime_id).toBe("03f8ff17-276d");
     expect(r.fields.error).toBe(
-      'Post "http://localhost:8280/api/daemon/runtimes/abc/tasks/claim": dial tcp [::1]:8280: connect: connection refused',
+      'Post "http://localhost:8080/api/daemon/runtimes/abc/tasks/claim": dial tcp [::1]:8080: connect: connection refused',
     );
   });
 

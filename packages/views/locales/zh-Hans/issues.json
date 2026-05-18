@@ -45,15 +45,19 @@
     "section_label": "标签",
     "members_group": "成员",
     "agents_group": "智能体",
+    "squads_group": "小队",
     "issue_count_other": "{{count}} 个 issue",
     "reset": "重置全部筛选"
   },
   "display": {
     "tooltip": "显示设置",
+    "grouping_section": "分组",
     "ordering_section": "排序",
     "card_properties_section": "卡片属性",
     "ascending_title": "升序",
     "descending_title": "降序",
+    "group_status": "状态",
+    "group_assignee": "负责人",
     "sort_manual": "手动",
     "sort_priority": "优先级",
     "sort_due_date": "截止日期",
@@ -74,6 +78,28 @@
     "board": "看板",
     "list": "列表"
   },
+  "actor_issues": {
+    "scope": {
+      "assigned": {
+        "label": "已分配",
+        "description": "分配给这个成员或智能体的 issue"
+      },
+      "created": {
+        "label": "已创建",
+        "description": "这个成员或智能体创建的 issue"
+      }
+    },
+    "empty": {
+      "assigned": {
+        "title": "没有已分配的 issue",
+        "description": "分配到这里的 issue 会显示在此视图中。"
+      },
+      "created": {
+        "title": "没有已创建的 issue",
+        "description": "由这里创建的 issue 会显示在此视图中。"
+      }
+    }
+  },
   "list": {
     "empty_status": "无 issue",
     "add_issue_tooltip": "新建 issue"
@@ -83,7 +109,8 @@
     "hide_column": "隐藏列",
     "show_column": "显示列",
     "add_issue_tooltip": "新建 issue",
-    "empty_column": "无 issue"
+    "empty_column": "无 issue",
+    "empty_grouping": "没有匹配的 issue"
   },
   "detail": {
     "not_found": "这个 issue 不存在或已在该工作区被删除。",
@@ -97,14 +124,22 @@
     "add_sub_issue_aria": "添加子 issue",
     "section_properties": "属性",
     "section_parent_issue": "父 issue",
+    "section_pull_requests": "Pull Request",
     "section_details": "详情",
     "section_token_usage": "Token 用量",
+    "pull_requests_loading": "加载中…",
+    "pull_requests_empty": "还没有关联的 PR。在 PR 的分支名、标题或正文里引用本 issue 的 identifier 即可自动关联。",
+    "pull_request_state_open": "Open",
+    "pull_request_state_draft": "Draft",
+    "pull_request_state_merged": "Merged",
+    "pull_request_state_closed": "Closed",
     "prop_status": "状态",
     "prop_priority": "优先级",
     "prop_assignee": "负责人",
     "prop_due_date": "截止日期",
     "prop_project": "项目",
     "prop_labels": "标签",
+    "add_property_action": "添加字段",
     "prop_created_by": "创建者",
     "prop_created": "创建时间",
     "prop_updated": "更新时间",
@@ -125,6 +160,8 @@
     "pin_tooltip": "固定到侧边栏",
     "unpin_tooltip": "从侧边栏取消固定",
     "sidebar_tooltip": "切换侧边栏",
+    "cmdf_toast_title": "页面内查找仅覆盖可见区",
+    "cmdf_toast_description": "评论列表已虚拟滚动,⌘F 找不到视口外的评论。完整应用内搜索即将推出。",
     "update_failed": "更新 issue 失败",
     "link_copied": "已复制链接",
     "link_copy_failed": "复制链接失败",
@@ -151,7 +188,16 @@
     "task_completed_other": "完成了 task（{{count}} 次）",
     "task_failed_one": "task 失败",
     "task_failed_other": "task 失败（{{count}} 次）",
-    "coalesced_badge": "×{{count}}"
+    "squad_leader_evaluated": "评估了小队触发",
+    "squad_leader_action": "已评估并采取了操作",
+    "squad_leader_action_reason": "已评估并采取了操作：{{reason}}",
+    "squad_leader_no_action": "已评估：无需操作",
+    "squad_leader_no_action_reason": "已评估：无需操作（{{reason}}）",
+    "squad_leader_failed": "评估失败",
+    "squad_leader_failed_reason": "评估失败：{{reason}}",
+    "coalesced_badge": "×{{count}}",
+    "activity_count_one": "{{count}} 条动态",
+    "activity_count_other": "{{count}} 条动态"
   },
   "comment": {
     "delete_title": "删除评论",
@@ -161,7 +207,6 @@
     "cancel_action": "取消",
     "edit_placeholder": "编辑评论...",
     "save_action": "保存",
-    "submit_action": "提交评论",
     "cancel_edit": "取消",
     "copy_action": "复制",
     "copied_toast": "已复制",
@@ -172,6 +217,7 @@
     "delete_failed": "删除评论失败",
     "reply_count_other": "{{count}} 条回复",
     "leave_comment_placeholder": "留下评论...",
+    "send_tooltip": "发送",
     "expand_tooltip": "展开",
     "collapse_tooltip": "收起",
     "resolve": {
@@ -215,7 +261,6 @@
     "trigger_retry_attempt": "重试 #{{attempt}}",
     "trigger_retry_attempt_prefix": "重试 #{{attempt}} · ",
     "trigger_retry_prefix": "重试 · ",
-    "trigger_orchestration": "编排节点",
     "trigger_autopilot": "自动化运行",
     "trigger_comment": "评论触发",
     "trigger_initial": "首次运行",
@@ -226,53 +271,12 @@
     "status_failed": "失败",
     "status_cancelled": "已取消"
   },
-  "orchestration": {
-    "section": "编排",
-    "status": "状态",
-    "current_node": "节点",
-    "current_status": "当前状态",
-    "why_this_state": "当前原因",
-    "recommended_action": "建议动作",
-    "attempts": "尝试次数",
-    "artifacts": "产物",
-    "artifact_list": "产物列表",
-    "evaluator": "评估",
-    "latest_event": "最新事件",
-    "latest_agent_summary": "最新智能体摘要",
-    "prior_evidence_summary": "上一轮证据摘要",
-    "change_request": "修改要求",
-    "reason_detail": "原因详情",
-    "last_updated": "最近更新",
-    "nodes": "节点",
-    "events": "事件",
-    "node_ref": "节点",
-    "plan_scope": "计划",
-    "approve": "批准",
-    "request_changes": "要求修改",
-    "request_changes_prompt": "请输入修改要求",
-    "retry": "重试",
-    "cancel": "取消",
-    "action": {
-      "none": "无需操作",
-      "retry": "重试",
-      "approve": "批准",
-      "provide_input": "补充输入",
-      "inspect_evidence": "查看证据"
-    },
-    "reason": {
-      "pending_dependencies": "等待依赖完成",
-      "ready_to_run": "已准备运行",
-      "running": "正在运行",
-      "evaluation_in_progress": "正在评估",
-      "waiting_for_human_input": "等待人工输入",
-      "waiting_for_approval": "等待人工批准",
-      "retry_scheduled": "已安排重试",
-      "runtime_failed": "运行时失败",
-      "invalid_result": "结果无效",
-      "evidence_insufficient": "证据不足",
-      "retry_exhausted": "重试次数已耗尽",
-      "completed": "已完成"
-    }
+  "terminate_dialog": {
+    "title": "确定停止该 task？",
+    "body": "Task 会被取消且无法恢复。",
+    "running_note": " 进行中的 task 可能需要几秒才能完全停止。",
+    "keep": "保留运行",
+    "confirm": "停止 task"
   },
   "batch": {
     "selected": "已选择 {{count}} 个",
@@ -319,7 +323,8 @@
       "trigger_unassigned": "未分配",
       "search_placeholder": "分配给...",
       "members_group": "成员",
-      "agents_group": "智能体"
+      "agents_group": "智能体",
+      "squads_group": "小队"
     },
     "due_date": {
       "trigger_label": "截止日期",

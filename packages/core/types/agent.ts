@@ -4,6 +4,14 @@ export type AgentRuntimeMode = "local" | "cloud";
 
 export type AgentVisibility = "workspace" | "private";
 
+// Runtime visibility is a separate axis from agent visibility — different
+// vocabulary because it gates a different action. "private" (default) means
+// only the runtime owner and workspace admins can bind agents to it;
+// "public" opens binding to any workspace member. Older backends that
+// haven't shipped MUL-2062 omit the field; the consumer must default to
+// "private" so the strictest behavior is the fallback.
+export type RuntimeVisibility = "private" | "public";
+
 export interface RuntimeDevice {
   id: string;
   workspace_id: string;
@@ -16,6 +24,9 @@ export interface RuntimeDevice {
   device_info: string;
   metadata: Record<string, unknown>;
   owner_id: string | null;
+  /** Defaults to "private" when the backend predates the visibility flag. */
+  visibility: RuntimeVisibility;
+  timezone: string;
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
@@ -94,104 +105,12 @@ export interface AgentTask {
    * tasks that have no linked issue (so e.g. quick-create tasks render
    * with a meaningful title instead of falling through to "Untracked").
    */
-  kind?: "comment" | "autopilot" | "chat" | "quick_create" | "orchestration" | "direct";
-  orchestration?: {
-    orchestration_plan_id?: string;
-    orchestration_node_id?: string;
-    orchestration_run_id?: string;
-    node_type?: string;
-    objective?: string;
-    node_title?: string;
-    node_description?: string;
-  } | null;
+  kind?: "comment" | "autopilot" | "chat" | "quick_create" | "direct";
   /**
    * Local working directory pinned for this task by the daemon. Empty until
    * the daemon reports a work_dir (typically once execution starts).
    */
   work_dir?: string;
-}
-
-export interface OrchestrationPlan {
-  id: string;
-  workspace_id: string;
-  source_type: string;
-  source_id: string;
-  objective: string;
-  status: "planning" | "ready" | "running" | "waiting_human" | "completed" | "failed" | "cancelled";
-  policy: Record<string, unknown>;
-  metadata: Record<string, unknown>;
-  created_by_type: string | null;
-  created_by_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface OrchestrationNode {
-  id: string;
-  plan_id: string;
-  type: string;
-  title: string;
-  description: string | null;
-  status: "pending" | "ready" | "dispatched" | "running" | "evaluating" | "completed" | "failed" | "blocked" | "waiting_human" | "skipped" | "cancelled";
-  assignee_agent_id: string | null;
-  input_contract: Record<string, unknown>;
-  output_contract: Record<string, unknown>;
-  evaluator_policy: Record<string, unknown>;
-  retry_policy: Record<string, unknown>;
-  runtime_constraints: Record<string, unknown>;
-  attempt_count: number;
-  max_attempts: number;
-  summary?: OrchestrationNodeSummary | null;
-  started_at: string | null;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface OrchestrationNodeSummary {
-  status: string;
-  reason_code: string;
-  reason_title: string;
-  reason_detail: string;
-  recommended_action: "none" | "retry" | "approve" | "provide_input" | "inspect_evidence" | string;
-  action_enabled: boolean;
-  attempt_count: number;
-  max_attempts: number;
-  latest_evaluation_status: string;
-  latest_agent_summary: string;
-  updated_at: string | null;
-}
-
-export interface OrchestrationEvent {
-  id: string;
-  plan_id: string;
-  node_id: string | null;
-  task_id: string | null;
-  event_type: string;
-  actor_type: string;
-  actor_id: string | null;
-  payload: Record<string, unknown>;
-  created_at: string;
-}
-
-export interface OrchestrationArtifact {
-  id: string;
-  plan_id: string;
-  node_id: string | null;
-  task_id: string | null;
-  type: string;
-  uri: string | null;
-  content: Record<string, unknown>;
-  metadata: Record<string, unknown>;
-  content_hash: string | null;
-  created_at: string;
-}
-
-export interface IssueOrchestration {
-  plans: OrchestrationPlan[];
-  nodes: OrchestrationNode[];
-  events: OrchestrationEvent[];
-  artifacts: OrchestrationArtifact[];
 }
 
 export interface Agent {
@@ -247,6 +166,76 @@ export interface CreateAgentRequest {
   /** Optional template slug used by the onboarding agent picker. Surfaced
    *  as the `template` property on the `agent_created` PostHog event. */
   template?: string;
+}
+
+/** Agent template summary — fields needed by the picker grid. Does NOT
+ *  include `instructions` to keep the list payload small; the detail
+ *  endpoint or the create flow returns the full template body. */
+export interface AgentTemplateSummary {
+  slug: string;
+  name: string;
+  description: string;
+  /** Optional grouping for the picker UI ("Engineering" / "Writing" / …). */
+  category?: string;
+  /** Optional lucide-react icon name (e.g. "Search"). Frontend falls back
+   *  to a generic icon when empty. */
+  icon?: string;
+  /** Optional semantic color token for the icon badge — one of "info" /
+   *  "success" / "warning" / "primary" / "secondary". Frontend has a
+   *  static class map so Tailwind can JIT-scan all variants. */
+  accent?: string;
+  skills: AgentTemplateSkillRef[];
+}
+
+/** Full agent template — same as `AgentTemplateSummary` plus the
+ *  instructions block. Returned by `GET /api/agent-templates/:slug`. */
+export interface AgentTemplate extends AgentTemplateSummary {
+  instructions: string;
+}
+
+/** Skill reference inside an agent template. `source_url` is the upstream
+ *  GitHub / skills.sh URL fetched on create; `cached_*` mirror the upstream
+ *  frontmatter at template-author time and let the picker render without
+ *  HTTP fetches. */
+export interface AgentTemplateSkillRef {
+  source_url: string;
+  cached_name: string;
+  cached_description: string;
+}
+
+export interface CreateAgentFromTemplateRequest {
+  template_slug: string;
+  name: string;
+  runtime_id: string;
+  model?: string;
+  visibility?: AgentVisibility;
+  max_concurrent_tasks?: number;
+  /** Optional overrides applied to the template before creation. nil/omit
+   *  uses the template's own value. */
+  description?: string;
+  instructions?: string;
+  avatar_url?: string;
+  /** Workspace skill IDs attached **in addition to** the template's
+   *  skills. Server dedupes against template skills automatically. */
+  extra_skill_ids?: string[];
+}
+
+export interface CreateAgentFromTemplateResponse {
+  agent: Agent;
+  /** Skill IDs that were newly created in the workspace from upstream URLs. */
+  imported_skill_ids: string[];
+  /** Skill IDs that already existed in the workspace (same name) and were
+   *  reused rather than re-imported. The UI can surface this as a toast so
+   *  the user knows their pre-existing skill wasn't overwritten. */
+  reused_skill_ids: string[];
+}
+
+/** 422 body returned by `POST /api/agents/from-template` when one or more
+ *  template skill URLs cannot be reached. The transaction is rolled back —
+ *  no partial workspace state. */
+export interface CreateAgentFromTemplateFailure {
+  error: string;
+  failed_urls: string[];
 }
 
 export interface UpdateAgentRequest {
@@ -368,6 +357,55 @@ export interface RuntimeUsageByHour {
   cache_read_tokens: number;
   cache_write_tokens: number;
   task_count: number;
+}
+
+// One (date, model) bucket of token usage for the workspace dashboard.
+// Same shape as RuntimeUsage but workspace-scoped (no runtime_id, no
+// provider field on the wire) and optionally narrowed to a single project
+// on the server side. Cost stays client-side via the model pricing table.
+export interface DashboardUsageDaily {
+  date: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  task_count: number;
+}
+
+// Per-(agent, model) token totals for the workspace dashboard. Identical
+// wire shape to RuntimeUsageByAgent — the client folds by agent_id and
+// sums cost.
+export interface DashboardUsageByAgent {
+  agent_id: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  task_count: number;
+}
+
+// Per-agent total terminal-task run-time + counts. Powers the workspace
+// dashboard's "time by agent" list. failed_count is a subset of
+// task_count (failed tasks still contribute to total_seconds because
+// they consumed runtime to fail).
+export interface DashboardAgentRunTime {
+  agent_id: string;
+  total_seconds: number;
+  task_count: number;
+  failed_count: number;
+}
+
+// One (date) bucket of terminal-task run-time + counts for the workspace
+// dashboard. Powers the Time and Tasks metrics on the daily-trend toggle
+// — same toggle as Tokens / Cost, anchored on completed_at so day buckets
+// line up with the per-agent run-time card.
+export interface DashboardRunTimeDaily {
+  date: string;
+  total_seconds: number;
+  task_count: number;
+  failed_count: number;
 }
 
 export type RuntimeUpdateStatus =

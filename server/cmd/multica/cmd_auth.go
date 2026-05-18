@@ -444,7 +444,7 @@ const callbackSuccessHTML = `<!DOCTYPE html>
     <p>You can close this tab and return to the terminal.</p>
     <p class="hint">Your CLI session is now authenticated.</p>
   </div>
-  <script>setTimeout(function(){window.close()},3300)</script>
+  <script>setTimeout(function(){window.close()},3000)</script>
 </body>
 </html>`
 

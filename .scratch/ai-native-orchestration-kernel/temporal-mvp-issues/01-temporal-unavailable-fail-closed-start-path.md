@@ -16,13 +16,12 @@ This slice should prove the new fail-closed boundary across config, API behavior
 
 ## Acceptance criteria
 
-- [ ] Orchestration startup checks explicit Temporal configuration before creating or dispatching executable work.
-- [ ] When Temporal is unavailable, the start path returns an unavailable/fail-closed response instead of creating a direct Agent Task.
-- [ ] The issue-scoped orchestration read model exposes enough status/reason data for Issue Detail to show unavailable/fail-closed state.
-- [ ] The failure path may record a projection event and attention state, but does not enqueue daemon-backed execution.
-- [ ] Tests cover missing config, unreachable Temporal client, unavailable worker behavior if detectable, and no direct Agent Task fallback.
+- [x] Orchestration startup checks explicit Temporal configuration before creating or dispatching executable work.
+- [x] When Temporal is unavailable, the start path returns an unavailable/fail-closed response instead of creating a direct Agent Task.
+- [x] The issue-scoped orchestration read model exposes enough status/reason data for Issue Detail to show unavailable/fail-closed state.
+- [x] The failure path may record a projection event and attention state, but does not enqueue daemon-backed execution.
+- [x] Tests cover missing config, unreachable Temporal client, unavailable worker behavior if detectable, and no direct Agent Task fallback.
 
 ## Blocked by
 
 None - can start immediately
-

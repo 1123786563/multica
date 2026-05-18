@@ -91,6 +91,15 @@ describe("ApiClient schema fallback", () => {
     });
   });
 
+  describe("listGroupedIssues", () => {
+    it("falls back to empty groups when the response is malformed", async () => {
+      stubFetchJson({ groups: "not-an-array" });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listGroupedIssues({ group_by: "assignee" });
+      expect(res).toEqual({ groups: [] });
+    });
+  });
+
   describe("listComments", () => {
     it("returns [] when the response is not an array", async () => {
       stubFetchJson({ wrong: "shape" });
@@ -119,143 +128,127 @@ describe("ApiClient schema fallback", () => {
   });
 
   describe("getIssueOrchestration", () => {
-    it("parses plan-based orchestration snapshots from the issue read API", async () => {
+    it("normalizes null arrays to empty arrays", async () => {
       stubFetchJson({
         plans: [
           {
             id: "plan-1",
-            workspace_id: "workspace-1",
-            source_type: "issue",
-            source_id: "issue-1",
-            objective: "Implement orchestration kernel model",
-            status: "running",
-            policy: {},
-            metadata: {},
-            created_by_type: "member",
-            created_by_id: "user-1",
-            created_at: "2026-05-12T00:00:00Z",
-            updated_at: "2026-05-12T00:00:00Z",
+            issue_id: "issue-1",
+            status: "failed",
+            nodes: null,
+            events: null,
+            artifacts: null,
           },
         ],
-        nodes: [
-          {
-            id: "node-1",
-            plan_id: "plan-1",
-            type: "inspect",
-            title: "Inspect issue context",
-            description: null,
-            status: "ready",
-            assignee_agent_id: "agent-1",
-            input_contract: {},
-            output_contract: {},
-            evaluator_policy: {},
-            retry_policy: {},
-            runtime_constraints: {},
-            attempt_count: 0,
-            max_attempts: 2,
-            linked_task_id: "task-1",
-            artifact_count: 3,
-            summary: null,
-            permissions: {
-              can_approve: false,
-              can_request_changes: false,
-              can_retry: false,
-            },
-            approval_history: [],
-            started_at: null,
-            completed_at: null,
-            created_at: "2026-05-12T00:00:00Z",
-            updated_at: "2026-05-12T00:00:00Z",
-          },
-        ],
-        events: [
-          {
-            id: "event-1",
-            plan_id: "plan-1",
-            node_id: null,
-            task_id: null,
-            event_type: "plan.created",
-            actor_type: "kernel",
-            actor_id: null,
-            payload: {},
-            created_at: "2026-05-12T00:00:00Z",
-          },
-        ],
-        artifacts: [],
       });
       const client = new ApiClient("https://api.example.test");
       const res = await client.getIssueOrchestration("issue-1");
       expect(res.plans).toHaveLength(1);
-      expect(res.plans[0]!.source_id).toBe("issue-1");
-      expect(res.nodes[0]!.type).toBe("inspect");
-      expect(res.nodes[0]!.linked_task_id).toBe("task-1");
-      expect(res.nodes[0]!.artifact_count).toBe(3);
-      expect(res.nodes[0]!.permissions?.can_approve).toBe(false);
-      expect(res.nodes[0]!.approval_history).toEqual([]);
-      expect(res.events[0]!.event_type).toBe("plan.created");
-      expect(res.artifacts).toEqual([]);
+      expect(res.plans[0]?.nodes).toEqual([]);
+      expect(res.plans[0]?.events).toEqual([]);
+      expect(res.plans[0]?.artifacts).toEqual([]);
     });
+  });
 
-    it("falls back to an empty orchestration snapshot when nodes is malformed", async () => {
-      stubFetchJson({ plans: [], nodes: "not-an-array", events: [], artifacts: [] });
+  // Agent template catalog is hit by the desktop create-agent picker.
+  // Installed desktop builds outlive any given server, so the shape MUST
+  // survive future field renames / wrapping without crashing. Each test
+  // here mirrors a concrete future drift we want to absorb.
+  describe("listAgentTemplates", () => {
+    it("falls back to [] when the body is null", async () => {
+      stubFetchJson(null);
       const client = new ApiClient("https://api.example.test");
-      const res = await client.getIssueOrchestration("issue-1");
-      expect(res).toEqual({ plans: [], nodes: [], events: [], artifacts: [] });
+      const tmpls = await client.listAgentTemplates();
+      expect(tmpls).toEqual([]);
     });
 
-    it("preserves unknown enum strings and downgrades malformed optional arrays", async () => {
+    it("defaults skills to [] when the field is missing from a template", async () => {
+      // Future server: drops `skills` because the picker no longer reads
+      // them. Picker code calls `template.skills.length` — must not throw.
+      stubFetchJson([{ slug: "x", name: "X" }]);
+      const client = new ApiClient("https://api.example.test");
+      const tmpls = await client.listAgentTemplates();
+      expect(tmpls).toHaveLength(1);
+      expect(tmpls[0]?.skills).toEqual([]);
+    });
+
+    it("accepts the bare-array shape (current contract)", async () => {
+      stubFetchJson([
+        { slug: "a", name: "A", description: "", skills: [] },
+        { slug: "b", name: "B", description: "", skills: [] },
+      ]);
+      const client = new ApiClient("https://api.example.test");
+      const tmpls = await client.listAgentTemplates();
+      expect(tmpls.map((t) => t.slug)).toEqual(["a", "b"]);
+    });
+
+    it("accepts a future {templates: [...]} envelope without breaking", async () => {
+      // Server migrates to a paginated envelope. We unwrap so the picker
+      // keeps working on the older bare-array consumer.
       stubFetchJson({
-        plans: [
-          {
-            id: "plan-1",
-            workspace_id: "workspace-1",
-            source_type: "issue",
-            source_id: "issue-1",
-            objective: "Handle future backend enum",
-            status: "future_plan_state",
-            policy: {},
-            metadata: {},
-            created_by_type: null,
-            created_by_id: null,
-            created_at: "2026-05-12T00:00:00Z",
-            updated_at: "2026-05-12T00:00:00Z",
-          },
-        ],
-        nodes: [
-          {
-            id: "node-1",
-            plan_id: "plan-1",
-            type: "future_node_type",
-            title: "Future node",
-            description: null,
-            status: "future_node_state",
-            assignee_agent_id: null,
-            input_contract: {},
-            output_contract: {},
-            evaluator_policy: {},
-            retry_policy: {},
-            runtime_constraints: {},
-            attempt_count: 1,
-            max_attempts: 2,
-            linked_task_id: null,
-            artifact_count: 0,
-            summary: null,
-            permissions: null,
-            approval_history: "not-an-array",
-            started_at: null,
-            completed_at: null,
-            created_at: "2026-05-12T00:00:00Z",
-            updated_at: "2026-05-12T00:00:00Z",
-          },
-        ],
-        events: [],
-        artifacts: [],
+        templates: [{ slug: "a", name: "A", description: "", skills: [] }],
+        total: 1,
       });
       const client = new ApiClient("https://api.example.test");
-      const res = await client.getIssueOrchestration("issue-1");
-      expect(res.plans[0]!.status).toBe("future_plan_state");
-      expect(res.nodes[0]!.status).toBe("future_node_state");
-      expect(res.nodes[0]!.approval_history).toEqual([]);
+      const tmpls = await client.listAgentTemplates();
+      expect(tmpls).toHaveLength(1);
+      expect(tmpls[0]?.slug).toBe("a");
+    });
+  });
+
+  describe("getAgentTemplate", () => {
+    it("falls back to a minimal record carrying the requested slug", async () => {
+      // Slug is part of the URL the user clicked — the fallback round-
+      // trips it so the page header still makes sense after a parse miss.
+      stubFetchJson({ wrong: "shape" });
+      const client = new ApiClient("https://api.example.test");
+      const detail = await client.getAgentTemplate("code-reviewer");
+      expect(detail.slug).toBe("code-reviewer");
+      expect(detail.skills).toEqual([]);
+      expect(detail.instructions).toBe("");
+    });
+
+    it("defaults instructions to '' when the field is missing", async () => {
+      stubFetchJson({
+        slug: "code-reviewer",
+        name: "Code Reviewer",
+        description: "",
+        skills: [],
+      });
+      const client = new ApiClient("https://api.example.test");
+      const detail = await client.getAgentTemplate("code-reviewer");
+      expect(detail.instructions).toBe("");
+    });
+  });
+
+  describe("createAgentFromTemplate", () => {
+    it("falls back to an empty agent when the response is malformed", async () => {
+      // The agent was created server-side even though the client can't
+      // parse the response — UI code reads `agent.id === ""` and skips
+      // the navigation step rather than landing on `/agents/`.
+      stubFetchJson({ unexpected: "shape" });
+      const client = new ApiClient("https://api.example.test");
+      const resp = await client.createAgentFromTemplate({
+        template_slug: "x",
+        name: "X",
+        runtime_id: "rt-1",
+      });
+      expect(resp.agent.id).toBe("");
+      expect(resp.imported_skill_ids).toEqual([]);
+      expect(resp.reused_skill_ids).toEqual([]);
+    });
+
+    it("defaults imported_skill_ids / reused_skill_ids to [] when missing", async () => {
+      stubFetchJson({ agent: { id: "agent-1" } });
+      const client = new ApiClient("https://api.example.test");
+      const resp = await client.createAgentFromTemplate({
+        template_slug: "x",
+        name: "X",
+        runtime_id: "rt-1",
+      });
+      expect(resp.agent.id).toBe("agent-1");
+      expect(resp.imported_skill_ids).toEqual([]);
+      expect(resp.reused_skill_ids).toEqual([]);
     });
   });
 });

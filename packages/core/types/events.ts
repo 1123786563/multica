@@ -28,6 +28,7 @@ export type WSEventType =
   | "task:failed"
   | "task:message"
   | "task:cancelled"
+  | "orchestration:updated"
   | "inbox:new"
   | "inbox:read"
   | "inbox:archived"
@@ -54,9 +55,13 @@ export type WSEventType =
   | "chat:done"
   | "chat:session_read"
   | "chat:session_deleted"
+  | "chat:session_updated"
   | "project:created"
   | "project:updated"
   | "project:deleted"
+  | "squad:created"
+  | "squad:updated"
+  | "squad:deleted"
   | "label:created"
   | "label:updated"
   | "label:deleted"
@@ -64,16 +69,21 @@ export type WSEventType =
   | "pin:created"
   | "pin:deleted"
   | "pin:reordered"
-  | "orchestration:updated"
   | "invitation:created"
   | "invitation:accepted"
   | "invitation:declined"
-  | "invitation:revoked";
+  | "invitation:revoked"
+  | "github_installation:created"
+  | "github_installation:deleted"
+  | "pull_request:linked"
+  | "pull_request:updated"
+  | "pull_request:unlinked";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
   payload: T;
   actor_id?: string;
+  actor_type?: string;
 }
 
 export interface IssueCreatedPayload {
@@ -86,6 +96,12 @@ export interface IssueUpdatedPayload {
 
 export interface IssueDeletedPayload {
   issue_id: string;
+}
+
+export interface OrchestrationUpdatedPayload {
+  issue_id: string;
+  plan_id: string;
+  status: string;
 }
 
 export interface IssueLabelsChangedPayload {
@@ -285,7 +301,16 @@ export interface ChatMessageEventPayload {
 export interface ChatDonePayload {
   chat_session_id: string;
   task_id: string;
+  /**
+   * Server populates these from the freshly-persisted assistant ChatMessage
+   * row so the WS handler can write it into the messages cache inline. Older
+   * servers (pre-#2123) only sent chat_session_id + task_id; treat every field
+   * below as optional and fall back to a refetch when absent.
+   */
+  message_id?: string;
   content?: string;
+  elapsed_ms?: number;
+  created_at?: string;
 }
 
 export interface ChatSessionReadPayload {
@@ -326,10 +351,4 @@ export interface InvitationDeclinedPayload {
 export interface InvitationRevokedPayload {
   invitation_id: string;
   invitee_email: string;
-}
-
-export interface OrchestrationUpdatedPayload {
-  issue_id: string;
-  plan_id: string;
-  changed_at: string;
 }

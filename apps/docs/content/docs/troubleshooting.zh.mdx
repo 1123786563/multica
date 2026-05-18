@@ -13,7 +13,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 **可能原因**：
 
-1. **`MULTICA_SERVER_URL` 指错地址** —— 默认是 `ws://localhost:8280/ws`，self-host 要改成你自己的 server 地址
+1. **`MULTICA_SERVER_URL` 指错地址** —— 默认是 `ws://localhost:8080/ws`，self-host 要改成你自己的 server 地址
 2. **网络 / 防火墙阻挡** —— daemon 和 server 不在同一网络，或出站被 block
 3. **Token 过期或无效** —— 你从来没跑过 `multica login`，或 PAT 被撤销
 4. **服务器拒绝注册** —— 你登录的账号不在目标工作区（register 返 403）
@@ -24,8 +24,8 @@ import { Callout } from "fumadocs-ui/components/callout";
 ```bash
 multica daemon logs --lines 100    # 看 daemon 侧错误
 echo $MULTICA_SERVER_URL          # 确认地址配对
-curl -i http://<server-host>:8280/health   # 直接戳 server
-curl -i http://<server-host>:8280/readyz  # 连同 DB + migration readiness 一起检查
+curl -i http://<server-host>:8080/health   # 直接戳 server
+curl -i http://<server-host>:8080/readyz  # 连同 DB + migration readiness 一起检查
 cat ~/.multica/config.json        # 看 api_token 是否存在
 multica workspace list            # 确认你是目标工作区成员
 ```
@@ -67,7 +67,7 @@ multica issue show <issue-id>             # 看 task 历史
 
 **可能原因**：
 
-1. **Origin 校验失败** —— 你的前端域名不在 server 的 CORS 白名单里。默认白名单只包含 `localhost:3300/5173/5174`，self-host 到公网必须配 `FRONTEND_ORIGIN`
+1. **Origin 校验失败** —— 你的前端域名不在 server 的 CORS 白名单里。默认白名单只包含 `localhost:3000/5173/5174`，self-host 到公网必须配 `FRONTEND_ORIGIN`
 2. **协议不匹配** —— 前端用 `https://` 需要 `wss://`，HTTP 用 `ws://`
 3. **反向代理没开 WebSocket upgrade** —— Nginx / Envoy / HAProxy 默认不转发 `Upgrade` header
 4. **JWT cookie 过期或丢失** —— 30 天过期后没重登
@@ -76,7 +76,7 @@ multica issue show <issue-id>             # 看 task 历史
 
 - 浏览器 DevTools → Network → 筛选 "WS"，看连接状态和状态码
 - Server 日志里 grep `"rejected origin"` / `"websocket"` —— 如果是 origin 问题会明确写出来
-- `curl -i http://<server-host>:8280/ws` 应该返回 `101 Switching Protocols`（需要带 `Upgrade` header）
+- `curl -i http://<server-host>:8080/ws` 应该返回 `101 Switching Protocols`（需要带 `Upgrade` header）
 
 **怎么修**：
 
@@ -138,16 +138,16 @@ docker exec <container> env | grep -E 'APP_ENV|MULTICA_DEV_VERIFICATION_CODE'
 
 **可能原因**：
 
-1. **Server 端口被占用**（默认 `8280`）
+1. **Server 端口被占用**（默认 `8080`）
 2. **Daemon health 端口被占用**（默认 `19514`，每个 profile 偏移一个 hash 值）
-3. **Web dev server 端口冲突**（`3300` / `5173`）
+3. **Web dev server 端口冲突**（`3000` / `5173`）
 4. **端口权限不足**（绑 `< 1024` 的 privileged port 需要 sudo）
 
 **怎么查**：
 
 ```bash
-lsof -i :8280        # macOS / Linux
-netstat -ano | findstr :8280    # Windows
+lsof -i :8080        # macOS / Linux
+netstat -ano | findstr :8080    # Windows
 ```
 
 **怎么修**：

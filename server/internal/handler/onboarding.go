@@ -593,7 +593,7 @@ func (h *Handler) ImportStarterContent(w http.ResponseWriter, r *http.Request) {
 		welcomeResp := issueToResponse(*welcomeIssueForEvent, workspacePrefix)
 		h.publish(protocol.EventIssueCreated, req.WorkspaceID, "member", userID, map[string]any{"issue": welcomeResp})
 		if h.shouldEnqueueAgentTask(r.Context(), *welcomeIssueForEvent) {
-			h.enqueueAssignedAgentWork(r.Context(), *welcomeIssueForEvent)
+			h.TaskService.EnqueueTaskForIssue(r.Context(), *welcomeIssueForEvent)
 		}
 	}
 	for _, sub := range subIssuesCreated {

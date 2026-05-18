@@ -1,0 +1,2 @@
+-- Keep rollback empty: legacy event_key/event_type and artifact issue_id
+-- constraints are incompatible with plan/node based projection writes.

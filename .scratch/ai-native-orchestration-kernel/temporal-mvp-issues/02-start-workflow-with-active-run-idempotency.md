@@ -16,13 +16,12 @@ This slice should prove that duplicate triggers and concurrent starts cannot cre
 
 ## Acceptance criteria
 
-- [ ] Starting orchestration for an Issue creates one active orchestration plan projection and starts one Temporal Workflow.
-- [ ] The Temporal Workflow ID is derived from workspace, Issue, and plan identity, not a fixed Issue-only ID.
-- [ ] Repeating start while an active run exists returns the existing active run and does not call Temporal StartWorkflow again.
-- [ ] Terminal historical runs remain inspectable, and a later rerun creates a new plan identity and new Workflow ID.
-- [ ] Tests cover duplicate starts, concurrent start races, terminal rerun, and WorkflowAlreadyStarted projection repair.
+- [x] Starting orchestration for an Issue creates one active orchestration plan projection and starts one Temporal Workflow.
+- [x] The Temporal Workflow ID is derived from workspace, Issue, and plan identity, not a fixed Issue-only ID.
+- [x] Repeating start while an active run exists returns the existing active run and does not call Temporal StartWorkflow again.
+- [x] Terminal historical runs remain inspectable, and a later rerun creates a new plan identity and new Workflow ID.
+- [x] Tests cover duplicate starts, concurrent start races, terminal rerun, and WorkflowAlreadyStarted projection repair.
 
 ## Blocked by
 
 - 01-temporal-unavailable-fail-closed-start-path
-

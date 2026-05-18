@@ -26,7 +26,7 @@ multica setup self-host
 
 This installs the `multica` CLI, checks out the latest self-host assets, pulls the official Multica images from GHCR, and configures everything for localhost.
 
-Open http://localhost:3300. To log in, configure `RESEND_API_KEY` in `.env` for email-based codes (recommended), or leave Resend unset and copy the generated code from the backend logs. See [Step 2 — Log In](#step-2--log-in) for details.
+Open http://localhost:3000. To log in, configure `RESEND_API_KEY` in `.env` for email-based codes (recommended), or leave Resend unset and copy the generated code from the backend logs. See [Step 2 — Log In](#step-2--log-in) for details.
 
 > **Prerequisites:** Docker and Docker Compose must be installed. The script checks for this and provides install links if missing.
 >
@@ -60,14 +60,14 @@ If the selected GHCR tag has not been published yet, `make selfhost` now tells y
 
 Once ready:
 
-- **Frontend:** http://localhost:3300
-- **Backend API:** http://localhost:8280
+- **Frontend:** http://localhost:3000
+- **Backend API:** http://localhost:8080
 
 > **Note:** If you prefer to run the Docker Compose steps manually, see [Manual Docker Compose Setup](#manual-docker-compose-setup) below.
 
 ### Step 2 — Log In
 
-Open http://localhost:3300 in your browser. The Docker self-host stack defaults to `APP_ENV=production` (set in `docker-compose.selfhost.yml`), and there is no fixed verification code by default. Pick one of the following to log in:
+Open http://localhost:3000 in your browser. The Docker self-host stack defaults to `APP_ENV=production` (set in `docker-compose.selfhost.yml`), and there is no fixed verification code by default. Pick one of the following to log in:
 
 - **Recommended (production):** configure `RESEND_API_KEY` in `.env`, then restart the backend. Real verification codes will be sent to the email address you enter. See [Advanced Configuration → Email](SELF_HOSTING_ADVANCED.md#email-required-for-authentication).
 - **Without email configured:** the verification code is generated server-side and printed to the backend container logs (look for `[DEV] Verification code for ...:`). Useful for one-off testing on a single machine.
@@ -109,7 +109,7 @@ multica setup self-host
 ```
 
 This automatically:
-1. Configures the CLI to connect to `localhost` (ports 8280/3300)
+1. Configures the CLI to connect to `localhost` (ports 8080/3000)
 2. Opens your browser for authentication
 3. Discovers your workspaces
 4. Starts the daemon in the background
@@ -130,7 +130,7 @@ multica daemon status
 
 ### Step 4 — Verify & Start Using
 
-1. Open your workspace in the web app at http://localhost:3300
+1. Open your workspace in the web app at http://localhost:3000
 2. Navigate to **Settings → Runtimes** — you should see your machine listed
 3. Go to **Settings → Agents** and create a new agent
 4. Create an issue and assign it to your agent — it will pick up the task automatically
@@ -206,8 +206,8 @@ If you prefer configuring the CLI step by step instead of `multica setup`:
 
 ```bash
 # Point CLI to your local server
-multica config set server_url http://localhost:8280
-multica config set app_url http://localhost:3300
+multica config set server_url http://localhost:8080
+multica config set app_url http://localhost:3000
 
 # Login (opens browser)
 multica login

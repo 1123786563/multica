@@ -1,7 +1,10 @@
 import { queryOptions } from "@tanstack/react-query";
 import { api } from "../api";
 import type {
+  GroupedIssuesResponse,
+  IssueOrchestration,
   IssueStatus,
+  ListGroupedIssuesParams,
   ListIssuesParams,
   ListIssuesCache,
 } from "../types";
@@ -10,13 +13,26 @@ import { BOARD_STATUSES } from "./config";
 export const issueKeys = {
   all: (wsId: string) => ["issues", wsId] as const,
   list: (wsId: string) => [...issueKeys.all(wsId), "list"] as const,
+  assigneeGroupsAll: (wsId: string) =>
+    [...issueKeys.all(wsId), "assignee-groups"] as const,
+  assigneeGroups: (wsId: string, filter: AssigneeGroupedIssuesFilter) =>
+    [...issueKeys.assigneeGroupsAll(wsId), filter] as const,
   /** All "my issues" queries — use for bulk invalidation. */
   myAll: (wsId: string) => [...issueKeys.all(wsId), "my"] as const,
   /** Per-scope "my issues" list with filter identity baked into the key. */
   myList: (wsId: string, scope: string, filter: MyIssuesFilter) =>
     [...issueKeys.myAll(wsId), scope, filter] as const,
+  myAssigneeGroupsAll: (wsId: string) =>
+    [...issueKeys.myAll(wsId), "assignee-groups"] as const,
+  myAssigneeGroups: (
+    wsId: string,
+    scope: string,
+    filter: AssigneeGroupedIssuesFilter,
+  ) => [...issueKeys.myAssigneeGroupsAll(wsId), scope, filter] as const,
   detail: (wsId: string, id: string) =>
     [...issueKeys.all(wsId), "detail", id] as const,
+  orchestration: (wsId: string, id: string) =>
+    [...issueKeys.all(wsId), "orchestration", id] as const,
   children: (wsId: string, id: string) =>
     [...issueKeys.all(wsId), "children", id] as const,
   childProgress: (wsId: string) =>
@@ -28,10 +44,12 @@ export const issueKeys = {
   subscribers: (issueId: string) =>
     ["issues", "subscribers", issueId] as const,
   usage: (issueId: string) => ["issues", "usage", issueId] as const,
+  /** Issue-level attachments — used by the description editor so its
+   *  inline file-card / image NodeViews can re-sign download URLs at
+   *  click time. */
+  attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
   /** Per-issue task list (issue-detail Execution log section). */
   tasks: (issueId: string) => ["issues", "tasks", issueId] as const,
-  orchestration: (issueId: string) =>
-    ["issues", "orchestration", issueId] as const,
   /** Prefix-match key for invalidating tasks across all issues — used by
    *  the global WS task: prefix path so any task lifecycle event refreshes
    *  every per-issue list, regardless of which issue is currently mounted. */
@@ -41,6 +59,11 @@ export const issueKeys = {
 export type MyIssuesFilter = Pick<
   ListIssuesParams,
   "assignee_id" | "assignee_ids" | "creator_id" | "project_id"
+>;
+
+export type AssigneeGroupedIssuesFilter = Omit<
+  ListGroupedIssuesParams,
+  "group_by" | "limit" | "offset" | "group_assignee_type" | "group_assignee_id"
 >;
 
 /** Page size per status column. */
@@ -90,6 +113,22 @@ export function issueListOptions(wsId: string) {
   });
 }
 
+export function issueAssigneeGroupsOptions(
+  wsId: string,
+  filter: AssigneeGroupedIssuesFilter,
+) {
+  return queryOptions<GroupedIssuesResponse>({
+    queryKey: issueKeys.assigneeGroups(wsId, filter),
+    queryFn: () =>
+      api.listGroupedIssues({
+        group_by: "assignee",
+        limit: ISSUE_PAGE_SIZE,
+        offset: 0,
+        ...filter,
+      }),
+  });
+}
+
 /**
  * Server-filtered issue list for the My Issues page.
  * Each scope gets its own cache entry so switching tabs is instant after first load.
@@ -106,10 +145,34 @@ export function myIssueListOptions(
   });
 }
 
+export function myIssueAssigneeGroupsOptions(
+  wsId: string,
+  scope: string,
+  filter: AssigneeGroupedIssuesFilter,
+) {
+  return queryOptions<GroupedIssuesResponse>({
+    queryKey: issueKeys.myAssigneeGroups(wsId, scope, filter),
+    queryFn: () =>
+      api.listGroupedIssues({
+        group_by: "assignee",
+        limit: ISSUE_PAGE_SIZE,
+        offset: 0,
+        ...filter,
+      }),
+  });
+}
+
 export function issueDetailOptions(wsId: string, id: string) {
   return queryOptions({
     queryKey: issueKeys.detail(wsId, id),
     queryFn: () => api.getIssue(id),
+  });
+}
+
+export function issueOrchestrationOptions(wsId: string, id: string) {
+  return queryOptions<IssueOrchestration>({
+    queryKey: issueKeys.orchestration(wsId, id),
+    queryFn: () => api.getIssueOrchestration(id),
   });
 }
 
@@ -172,9 +235,13 @@ export function issueUsageOptions(issueId: string) {
   });
 }
 
-export function issueOrchestrationOptions(issueId: string) {
+// Backs the description editor's fresh-sign download flow: NodeViews resolve
+// an attachment id by matching the markdown URL against this list. The list
+// is workspace-private metadata and lives on the same cache lifetime as the
+// rest of the issue detail surface.
+export function issueAttachmentsOptions(issueId: string) {
   return queryOptions({
-    queryKey: issueKeys.orchestration(issueId),
-    queryFn: () => api.getIssueOrchestration(issueId),
+    queryKey: issueKeys.attachments(issueId),
+    queryFn: () => api.listAttachments(issueId),
   });
 }
