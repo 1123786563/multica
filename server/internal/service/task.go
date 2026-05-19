@@ -804,14 +804,15 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 		return nil
 	}
 	signal := AgentTaskOutcomeSignalInput{
-		WorkflowID:     workflowID,
-		PlanID:         util.UUIDToString(planID),
-		NodeID:         util.UUIDToString(nodeID),
-		TaskID:         util.UUIDToString(task.ID),
-		Attempt:        attempt,
-		OutcomeVersion: 1,
-		Status:         status,
-		Error:          errMsg,
+		WorkflowID:      workflowID,
+		PlanID:          util.UUIDToString(planID),
+		NodeID:          util.UUIDToString(nodeID),
+		TaskID:          util.UUIDToString(task.ID),
+		Attempt:         attempt,
+		OutcomeVersion:  1,
+		Status:          status,
+		ResultReference: fmt.Sprintf("agent_task_queue:%s:result", util.UUIDToString(task.ID)),
+		Error:           errMsg,
 	}
 	if len(result) > 0 {
 		signal.Result = append(json.RawMessage(nil), result...)

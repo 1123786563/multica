@@ -195,6 +195,16 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 				return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
 			case "retry":
 				if attempt < maxNodeAttempts {
+					validation.Status = "running"
+					validation.ReasonCode = "human_retry"
+					validation.RecommendedAction = "none"
+					validation.NeedsHumanReview = false
+					validation.ShouldRetry = true
+					validation.TerminalPlanStatus = "running"
+					validation.ProjectionDetail = "human requested orchestration retry"
+					if err := workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil); err != nil {
+						return err
+					}
 					continue
 				}
 				validation.Status = "failed"
@@ -236,6 +246,7 @@ func applyOutcomePolicy(validation ValidateOutcomeResult, review ReviewOutcomeRe
 func waitForAgentTaskOutcome(ctx workflow.Context, input IssueWorkflowInput, dispatch service.DispatchAgentTaskResult, outcomeCh workflow.ReceiveChannel) (service.AgentTaskOutcomeSignalInput, error) {
 	var outcome service.AgentTaskOutcomeSignalInput
 	received := false
+	var auditErr error
 	selector := workflow.NewSelector(ctx)
 	selector.AddReceive(outcomeCh, func(c workflow.ReceiveChannel, _ bool) {
 		var candidate service.AgentTaskOutcomeSignalInput
@@ -244,11 +255,14 @@ func waitForAgentTaskOutcome(ctx workflow.Context, input IssueWorkflowInput, dis
 			outcome = candidate
 			received = true
 		} else {
-			_ = workflow.ExecuteActivity(ctx, ProjectSignalAuditActivityName, audit).Get(ctx, nil)
+			auditErr = workflow.ExecuteActivity(ctx, ProjectSignalAuditActivityName, audit).Get(ctx, nil)
 		}
 	})
 	for !received {
 		selector.Select(ctx)
+		if auditErr != nil {
+			return service.AgentTaskOutcomeSignalInput{}, auditErr
+		}
 	}
 	return outcome, nil
 }
@@ -280,14 +294,15 @@ func correlateAgentTaskOutcome(input IssueWorkflowInput, dispatch service.Dispat
 		outcome.PlanID == dispatch.PlanID &&
 		outcome.NodeID == dispatch.NodeID &&
 		outcome.TaskID == dispatch.TaskID &&
-		outcome.Attempt == dispatch.Attempt
+		outcome.Attempt == dispatch.Attempt &&
+		outcome.OutcomeVersion == 1
 	if matches {
 		return true, SignalAuditInput{}
 	}
 
 	eventType := "signal.mismatched_rejected"
 	message := "Agent Task outcome signal did not match the active orchestration node"
-	if outcome.PlanID == dispatch.PlanID && outcome.NodeID == dispatch.NodeID && outcome.TaskID == dispatch.TaskID && outcome.Attempt < dispatch.Attempt {
+	if outcome.PlanID == dispatch.PlanID && outcome.Attempt < dispatch.Attempt {
 		eventType = "signal.stale_ignored"
 		message = "Agent Task outcome signal was for a stale orchestration attempt"
 	}

@@ -37,3 +37,13 @@ func TestTemporalMVPCheckoutDocCoversRepeatableValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerRegistersSignalAuditProjectionActivity(t *testing.T) {
+	raw, err := os.ReadFile("worker.go")
+	if err != nil {
+		t.Fatalf("read worker: %v", err)
+	}
+	if !strings.Contains(string(raw), "ProjectSignalAuditActivityName") {
+		t.Fatal("orchestration worker must register the signal audit projection activity used by the workflow")
+	}
+}

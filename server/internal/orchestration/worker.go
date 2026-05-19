@@ -63,6 +63,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 	w.RegisterActivityWithOptions(activities.SummarizeOutcome, activity.RegisterOptions{Name: SummarizeOutcomeActivityName})
 	w.RegisterActivityWithOptions(activities.FinalizeWorkflow, activity.RegisterOptions{Name: FinalizeWorkflowActivityName})
 	w.RegisterActivityWithOptions(activities.ProjectAnalysis, activity.RegisterOptions{Name: ProjectAnalysisActivityName})
+	w.RegisterActivityWithOptions(activities.ProjectSignalAudit, activity.RegisterOptions{Name: ProjectSignalAuditActivityName})
 
 	slog.Info("temporal orchestration worker starting",
 		"task_queue", taskQueue,

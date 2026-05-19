@@ -16,7 +16,14 @@ type ActivitySet struct {
 	DB            service.OrchestrationDB
 	Queries       *db.Queries
 	Orchestration *service.OrchestrationService
+	Analyzer      IssueAnalyzer
 }
+
+type IssueAnalyzer interface {
+	AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error)
+}
+
+type StaticIssueAnalyzer struct{}
 
 type resultSchemaV1 struct {
 	SchemaVersion string           `json:"schema_version"`
@@ -69,6 +76,21 @@ func (a ActivitySet) LoadIssue(ctx context.Context, input IssueWorkflowInput) (I
 }
 
 func (a ActivitySet) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
+	analyzer := a.Analyzer
+	if analyzer == nil {
+		analyzer = StaticIssueAnalyzer{}
+	}
+	result, err := analyzer.AnalyzeIssue(ctx, issue, input)
+	if err != nil {
+		return AnalyzeIssueResult{}, err
+	}
+	if err := a.projectAnalysis(ctx, input, issue, result); err != nil {
+		return AnalyzeIssueResult{}, err
+	}
+	return result, nil
+}
+
+func (StaticIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
 	result := AnalyzeIssueResult{
 		ProblemSummary:         summarizeIssue(issue),
 		ExecutionAdvice:        "Dispatch the agent with a narrow fix, preserve the existing issue/task contract, and validate the result before marking the run complete.",
@@ -79,9 +101,6 @@ func (a ActivitySet) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, inpu
 	}
 	if len(issue.Description) > 0 {
 		result.Risks = append(result.Risks, "review the issue description for hidden acceptance criteria")
-	}
-	if err := a.projectAnalysis(ctx, input, issue, result); err != nil {
-		return AnalyzeIssueResult{}, err
 	}
 	return result, nil
 }
@@ -131,11 +150,25 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 	if err := json.Unmarshal(input.Outcome.Result, &parsed); err != nil {
 		return retryableEvidenceResult(input, "malformed structured result"), nil
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(input.Outcome.Result, &raw); err != nil {
+		return retryableEvidenceResult(input, "malformed structured result"), nil
+	}
+	for _, key := range []string{"changed_files", "artifacts", "tests", "risks", "evidence"} {
+		if _, ok := raw[key]; !ok {
+			return retryableEvidenceResult(input, "structured result is missing "+key), nil
+		}
+	}
 	if strings.TrimSpace(parsed.SchemaVersion) != "1" {
 		return retryableEvidenceResult(input, "unsupported structured result schema version"), nil
 	}
 	if strings.TrimSpace(parsed.Summary) == "" || len(parsed.Evidence) == 0 {
 		return retryableEvidenceResult(input, "structured result is missing required evidence"), nil
+	}
+	for _, artifact := range parsed.Artifacts {
+		if strings.TrimSpace(artifact.Label) == "" || strings.TrimSpace(artifact.Ref) == "" {
+			return retryableEvidenceResult(input, "structured result contains incomplete artifact reference"), nil
+		}
 	}
 	for _, evidence := range parsed.Evidence {
 		if strings.TrimSpace(evidence.Type) == "" || strings.TrimSpace(evidence.Ref) == "" {
@@ -277,7 +310,11 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 			reason_code = $3,
 			recommended_action = $4,
 			updated_at = now(),
-			completed_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled', 'waiting_human') THEN now() ELSE completed_at END
+			completed_at = CASE
+				WHEN $2 = 'running' THEN NULL
+				WHEN $2 IN ('completed', 'failed', 'cancelled', 'waiting_human') THEN now()
+				ELSE completed_at
+			END
 		WHERE id = $1 AND status NOT IN ('cancelled', 'completed', 'failed')
 	`, planID, status, validation.ReasonCode, validation.RecommendedAction)
 	if err != nil {
@@ -292,14 +329,22 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 		return err
 	}
 	if _, err := a.DB.Exec(ctx, `
-		UPDATE orchestration_node
-		SET status = $2,
-			reason_code = $3,
-			recommended_action = $4,
-			completed_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, now()) ELSE completed_at END,
-			updated_at = now()
-		WHERE id = $1 AND status NOT IN ('cancelled', 'completed', 'failed')
-	`, nodeID, validation.Status, validation.ReasonCode, validation.RecommendedAction); err != nil {
+			UPDATE orchestration_node
+			SET status = $2,
+				reason_code = $3,
+				recommended_action = $4,
+				completed_at = CASE
+					WHEN $2 IN ('running', 'waiting_human') THEN NULL
+					WHEN $2 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, now())
+					ELSE completed_at
+				END,
+				updated_at = now()
+			WHERE id = $1
+				AND (
+					status NOT IN ('cancelled', 'completed', 'failed')
+					OR ($2 = 'waiting_human' AND status IN ('completed', 'failed'))
+				)
+		`, nodeID, validation.Status, validation.ReasonCode, validation.RecommendedAction); err != nil {
 		return err
 	}
 
@@ -411,17 +456,18 @@ func (a ActivitySet) ProjectSignalAudit(ctx context.Context, input SignalAuditIn
 		return err
 	}
 	return a.recordEvent(ctx, planID, input.EventType, "system", input.Message, map[string]any{
-		"expected_workflow_id": input.ExpectedWorkflow,
-		"expected_plan_id":     input.ExpectedPlanID,
-		"expected_node_id":     input.ExpectedNodeID,
-		"expected_task_id":     input.ExpectedTaskID,
-		"expected_attempt":     input.ExpectedAttempt,
-		"signal_workflow_id":   input.Outcome.WorkflowID,
-		"signal_plan_id":       input.Outcome.PlanID,
-		"signal_node_id":       input.Outcome.NodeID,
-		"signal_task_id":       input.Outcome.TaskID,
-		"signal_attempt":       input.Outcome.Attempt,
-		"signal_status":        input.Outcome.Status,
+		"expected_workflow_id":   input.ExpectedWorkflow,
+		"expected_plan_id":       input.ExpectedPlanID,
+		"expected_node_id":       input.ExpectedNodeID,
+		"expected_task_id":       input.ExpectedTaskID,
+		"expected_attempt":       input.ExpectedAttempt,
+		"signal_workflow_id":     input.Outcome.WorkflowID,
+		"signal_plan_id":         input.Outcome.PlanID,
+		"signal_node_id":         input.Outcome.NodeID,
+		"signal_task_id":         input.Outcome.TaskID,
+		"signal_attempt":         input.Outcome.Attempt,
+		"signal_outcome_version": input.Outcome.OutcomeVersion,
+		"signal_status":          input.Outcome.Status,
 	})
 }
 

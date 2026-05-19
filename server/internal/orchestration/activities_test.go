@@ -136,6 +136,66 @@ func TestFinalizeWorkflowNeverAutoClosesIssue(t *testing.T) {
 	}
 }
 
+type stubIssueAnalyzer struct {
+	result AnalyzeIssueResult
+	err    error
+}
+
+func (a stubIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
+	return a.result, a.err
+}
+
+func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
+	var projected bool
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			if strings.Contains(strings.ToLower(sql), "orchestration_event") {
+				projected = true
+			}
+		}},
+		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
+			ProblemSummary:         "Adapter summary",
+			ExecutionAdvice:        "Adapter advice",
+			SuspectedContext:       "Adapter context",
+			Risks:                  []string{"adapter risk"},
+			RecommendedAgentPrompt: "Adapter prompt",
+			ReasonCode:             "adapter_ready",
+			RecommendedAction:      "none",
+		}},
+	}
+	result, err := activity.AnalyzeIssue(t.Context(), IssueSnapshot{
+		IssueID: "00000000-0000-0000-0000-000000000004",
+		Title:   "Use adapter",
+	}, IssueWorkflowInput{
+		PlanID: "00000000-0000-0000-0000-000000000001",
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeIssue returned error: %v", err)
+	}
+	if result.ProblemSummary != "Adapter summary" || result.RecommendedAgentPrompt != "Adapter prompt" {
+		t.Fatalf("AnalyzeIssue did not use injected analyzer adapter: %+v", result)
+	}
+	if !projected {
+		t.Fatal("AnalyzeIssue should project adapter output")
+	}
+}
+
+func TestAnalyzeIssueRejectsMalformedAnalyzerOutput(t *testing.T) {
+	activity := ActivitySet{
+		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
+			ProblemSummary: "Adapter summary",
+		}},
+	}
+	if _, err := activity.AnalyzeIssue(t.Context(), IssueSnapshot{
+		IssueID: "00000000-0000-0000-0000-000000000004",
+		Title:   "Use adapter",
+	}, IssueWorkflowInput{
+		PlanID: "00000000-0000-0000-0000-000000000001",
+	}); err == nil {
+		t.Fatal("AnalyzeIssue should reject malformed analyzer output")
+	}
+}
+
 func TestFinalizeWorkflowWritesReviewHandoffArtifact(t *testing.T) {
 	var artifactSQL []string
 	var artifactArgs [][]any
@@ -439,6 +499,62 @@ func TestValidateOutcomeAcceptsResultSchemaV1WithEvidence(t *testing.T) {
 	}
 	if result.Status != "completed" || result.TerminalPlanStatus != "completed" {
 		t.Fatalf("validation result = %+v, want completed", result)
+	}
+}
+
+func TestValidateOutcomeRejectsMissingChangedFiles(t *testing.T) {
+	result, err := (ActivitySet{}).ValidateOutcome(t.Context(), ValidateOutcomeInput{
+		Outcome: service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","artifacts":[],"tests":[{"name":"go test ./...","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		},
+		Dispatch: service.DispatchAgentTaskResult{
+			PlanID:  "plan-1",
+			NodeID:  "node-1",
+			TaskID:  "task-1",
+			Attempt: 1,
+		},
+		Analysis: AnalyzeIssueResult{ProblemSummary: "Fix issue"},
+	})
+	if err != nil {
+		t.Fatalf("ValidateOutcome returned error: %v", err)
+	}
+	if result.ReasonCode != "evidence_insufficient" || !result.ShouldRetry {
+		t.Fatalf("missing changed_files should be evidence_insufficient retryable result: %+v", result)
+	}
+}
+
+func TestValidateOutcomeRejectsIncompleteArtifacts(t *testing.T) {
+	result, err := (ActivitySet{}).ValidateOutcome(t.Context(), ValidateOutcomeInput{
+		Outcome: service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[{"label":"diff","ref":""}],"tests":[{"name":"go test ./...","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		},
+		Dispatch: service.DispatchAgentTaskResult{
+			PlanID:  "plan-1",
+			NodeID:  "node-1",
+			TaskID:  "task-1",
+			Attempt: 1,
+		},
+		Analysis: AnalyzeIssueResult{ProblemSummary: "Fix issue"},
+	})
+	if err != nil {
+		t.Fatalf("ValidateOutcome returned error: %v", err)
+	}
+	if result.ReasonCode != "evidence_insufficient" || !result.ShouldRetry {
+		t.Fatalf("incomplete artifacts should be evidence_insufficient retryable result: %+v", result)
 	}
 }
 

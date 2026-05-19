@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -66,13 +67,14 @@ func TestIssueWorkflowWaitsForOutcomeSignalAndFinalizes(t *testing.T) {
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-1",
-			TaskID:     "task-1",
-			Attempt:    1,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"ok":true}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"ok":true}`),
 		})
 	}, time.Second)
 
@@ -128,24 +130,26 @@ func TestIssueWorkflowIgnoresMismatchedTaskSignalUntilMatchingOutcomeArrives(t *
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-1",
-			TaskID:     "old-task",
-			Attempt:    1,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"ok":false}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "old-task",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"ok":false}`),
 		})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-1",
-			TaskID:     "task-1",
-			Attempt:    1,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"ok":true}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"ok":true}`),
 		})
 	}, 2*time.Second)
 
@@ -161,6 +165,60 @@ func TestIssueWorkflowIgnoresMismatchedTaskSignalUntilMatchingOutcomeArrives(t *
 	}
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
+	}
+	env.AssertExpectations(t)
+}
+
+func TestIssueWorkflowFailsClosedWhenSignalAuditProjectionFails(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	registerIssueWorkflowTestActivities(env)
+
+	env.OnActivity(LoadIssueActivityName, mock.Anything, mock.Anything).Return(IssueSnapshot{
+		IssueID:     "issue-1",
+		WorkspaceID: "ws-1",
+		Title:       "Fix audit failure",
+	}, nil)
+	env.OnActivity(AnalyzeIssueActivityName, mock.Anything, mock.Anything, mock.Anything).Return(AnalyzeIssueResult{
+		ProblemSummary:         "Fix audit failure",
+		ExecutionAdvice:        "Keep signal audit durable",
+		RecommendedAgentPrompt: "Implement the audit fix",
+		ReasonCode:             "analysis_ready",
+		RecommendedAction:      "none",
+	}, nil)
+	env.OnActivity(DispatchTaskActivityName, mock.Anything, mock.Anything).Return(service.DispatchAgentTaskResult{
+		PlanID:  "plan-1",
+		TaskID:  "task-1",
+		NodeID:  "node-1",
+		Attempt: 1,
+	}, nil)
+	env.OnActivity(ProjectSignalAuditActivityName, mock.Anything, mock.Anything).Return(errors.New("projection unavailable")).Once()
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "old-task",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+		})
+	}, time.Second)
+
+	env.ExecuteWorkflow(IssueWorkflow, IssueWorkflowInput{
+		WorkspaceID: "ws-1",
+		IssueID:     "issue-1",
+		PlanID:      "plan-1",
+		WorkflowID:  "wf-1",
+	})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("workflow did not complete after signal audit failure")
+	}
+	if err := env.GetWorkflowError(); err == nil {
+		t.Fatal("workflow should fail closed when signal audit projection fails")
 	}
 	env.AssertExpectations(t)
 }
@@ -235,24 +293,26 @@ func TestIssueWorkflowRetriesEvidenceInsufficientOnceBeforeFinalizing(t *testing
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-1",
-			TaskID:     "task-1",
-			Attempt:    1,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"schema_version":"1","summary":"missing evidence","changed_files":[],"artifacts":[],"tests":[],"risks":[],"evidence":[]}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"missing evidence","changed_files":[],"artifacts":[],"tests":[],"risks":[],"evidence":[]}`),
 		})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-2",
-			TaskID:     "task-2",
-			Attempt:    2,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-2",
+			TaskID:         "task-2",
+			Attempt:        2,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
 		})
 	}, 2*time.Second)
 
@@ -315,13 +375,14 @@ func TestIssueWorkflowWaitsForApprovalSignalBeforeCompletingHumanGate(t *testing
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-1",
-			TaskID:     "task-1",
-			Attempt:    1,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"failed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"failed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
 		})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
@@ -335,6 +396,130 @@ func TestIssueWorkflowWaitsForApprovalSignalBeforeCompletingHumanGate(t *testing
 			Reason:     "accept risk",
 		})
 	}, 2*time.Second)
+
+	env.ExecuteWorkflow(IssueWorkflow, IssueWorkflowInput{
+		WorkspaceID: "ws-1",
+		IssueID:     "issue-1",
+		PlanID:      "plan-1",
+		WorkflowID:  "wf-1",
+	})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("workflow did not complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	env.AssertExpectations(t)
+}
+
+func TestIssueWorkflowProjectsRunningStateAfterHumanRetryBeforeRedispatch(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	registerIssueWorkflowTestActivities(env)
+
+	env.OnActivity(LoadIssueActivityName, mock.Anything, mock.Anything).Return(IssueSnapshot{
+		IssueID:     "issue-1",
+		WorkspaceID: "ws-1",
+		Title:       "Fix retry state",
+	}, nil)
+	env.OnActivity(AnalyzeIssueActivityName, mock.Anything, mock.Anything, mock.Anything).Return(AnalyzeIssueResult{
+		ProblemSummary:         "Fix retry state",
+		ExecutionAdvice:        "Keep retry state observable",
+		RecommendedAgentPrompt: "Retry the work",
+		ReasonCode:             "analysis_ready",
+		RecommendedAction:      "none",
+	}, nil)
+	env.OnActivity(DispatchTaskActivityName, mock.Anything, mock.MatchedBy(func(input DispatchDaemonTaskInput) bool {
+		return input.Attempt == 1
+	})).Return(service.DispatchAgentTaskResult{
+		PlanID:  "plan-1",
+		TaskID:  "task-1",
+		NodeID:  "node-1",
+		Attempt: 1,
+	}, nil).Once()
+	env.OnActivity(DispatchTaskActivityName, mock.Anything, mock.MatchedBy(func(input DispatchDaemonTaskInput) bool {
+		return input.Attempt == 2
+	})).Return(service.DispatchAgentTaskResult{
+		PlanID:  "plan-1",
+		TaskID:  "task-2",
+		NodeID:  "node-2",
+		Attempt: 2,
+	}, nil).Once()
+	env.OnActivity(ValidateOutcomeActivityName, mock.Anything, mock.MatchedBy(func(input ValidateOutcomeInput) bool {
+		return input.Dispatch.Attempt == 1
+	})).Return(ValidateOutcomeResult{
+		Status:             "waiting_human",
+		ReasonCode:         "tests_failed",
+		RecommendedAction:  "review",
+		NeedsHumanReview:   true,
+		TerminalPlanStatus: "waiting_human",
+		ProjectionDetail:   "tests failed",
+	}, nil).Once()
+	env.OnActivity(ValidateOutcomeActivityName, mock.Anything, mock.MatchedBy(func(input ValidateOutcomeInput) bool {
+		return input.Dispatch.Attempt == 2
+	})).Return(ValidateOutcomeResult{
+		Status:             "completed",
+		RecommendedAction:  "none",
+		TerminalPlanStatus: "completed",
+		ProjectionDetail:   "structured result validated",
+	}, nil).Once()
+	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(ReviewOutcomeResult{Summary: "review"}, nil).Twice()
+	env.OnActivity(SummarizeOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(SummarizeOutcomeResult{Summary: "summary"}, nil).Twice()
+	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
+		return validation.TerminalPlanStatus == "waiting_human"
+	}), mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(dispatch service.DispatchAgentTaskResult) bool {
+		return dispatch.Attempt == 1
+	}), mock.Anything).Return(nil).Once()
+	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
+		return validation.TerminalPlanStatus == "running" &&
+			validation.Status == "running" &&
+			validation.ReasonCode == "human_retry"
+	}), mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(dispatch service.DispatchAgentTaskResult) bool {
+		return dispatch.Attempt == 1
+	}), mock.Anything).Return(nil).Once()
+	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
+		return validation.TerminalPlanStatus == "completed"
+	}), mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(dispatch service.DispatchAgentTaskResult) bool {
+		return dispatch.Attempt == 2
+	}), mock.Anything).Return(nil).Once()
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"failed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		})
+	}, time.Second)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(ApprovalActionSignalName, service.ApprovalActionSignalInput{
+			WorkflowID: "wf-1",
+			PlanID:     "plan-1",
+			NodeID:     "node-1",
+			ActorID:    "user-1",
+			ActorType:  "human",
+			Action:     "retry",
+			Reason:     "try again",
+		})
+	}, 2*time.Second)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-2",
+			TaskID:         "task-2",
+			Attempt:        2,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		})
+	}, 3*time.Second)
 
 	env.ExecuteWorkflow(IssueWorkflow, IssueWorkflowInput{
 		WorkspaceID: "ws-1",
@@ -402,13 +587,14 @@ func TestIssueWorkflowRoutesHighRiskReviewConcernToHumanGate(t *testing.T) {
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
-			WorkflowID: "wf-1",
-			PlanID:     "plan-1",
-			NodeID:     "node-1",
-			TaskID:     "task-1",
-			Attempt:    1,
-			Status:     "completed",
-			Result:     json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
 		})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
@@ -456,44 +642,60 @@ func TestCorrelateAgentTaskOutcomeClassifiesIgnoredSignals(t *testing.T) {
 		{
 			name: "stale attempt",
 			outcome: service.AgentTaskOutcomeSignalInput{
-				WorkflowID: "wf-1",
-				PlanID:     "plan-1",
-				NodeID:     "node-1",
-				TaskID:     "task-1",
-				Attempt:    1,
+				WorkflowID:     "wf-1",
+				PlanID:         "plan-1",
+				NodeID:         "node-old",
+				TaskID:         "task-old",
+				Attempt:        1,
+				OutcomeVersion: 1,
 			},
 			eventType: "signal.stale_ignored",
 		},
 		{
 			name: "wrong task",
 			outcome: service.AgentTaskOutcomeSignalInput{
-				WorkflowID: "wf-1",
-				PlanID:     "plan-1",
-				NodeID:     "node-1",
-				TaskID:     "task-old",
-				Attempt:    2,
+				WorkflowID:     "wf-1",
+				PlanID:         "plan-1",
+				NodeID:         "node-1",
+				TaskID:         "task-old",
+				Attempt:        2,
+				OutcomeVersion: 1,
 			},
 			eventType: "signal.mismatched_rejected",
 		},
 		{
 			name: "wrong node",
 			outcome: service.AgentTaskOutcomeSignalInput{
-				WorkflowID: "wf-1",
-				PlanID:     "plan-1",
-				NodeID:     "node-old",
-				TaskID:     "task-1",
-				Attempt:    2,
+				WorkflowID:     "wf-1",
+				PlanID:         "plan-1",
+				NodeID:         "node-old",
+				TaskID:         "task-1",
+				Attempt:        2,
+				OutcomeVersion: 1,
 			},
 			eventType: "signal.mismatched_rejected",
 		},
 		{
 			name: "wrong plan",
 			outcome: service.AgentTaskOutcomeSignalInput{
-				WorkflowID: "wf-1",
-				PlanID:     "plan-old",
-				NodeID:     "node-1",
-				TaskID:     "task-1",
-				Attempt:    2,
+				WorkflowID:     "wf-1",
+				PlanID:         "plan-old",
+				NodeID:         "node-1",
+				TaskID:         "task-1",
+				Attempt:        2,
+				OutcomeVersion: 1,
+			},
+			eventType: "signal.mismatched_rejected",
+		},
+		{
+			name: "unsupported outcome version",
+			outcome: service.AgentTaskOutcomeSignalInput{
+				WorkflowID:     "wf-1",
+				PlanID:         "plan-1",
+				NodeID:         "node-1",
+				TaskID:         "task-1",
+				Attempt:        2,
+				OutcomeVersion: 2,
 			},
 			eventType: "signal.mismatched_rejected",
 		},
@@ -515,11 +717,12 @@ func TestCorrelateAgentTaskOutcomeClassifiesIgnoredSignals(t *testing.T) {
 	}
 
 	matches, audit := correlateAgentTaskOutcome(input, dispatch, service.AgentTaskOutcomeSignalInput{
-		WorkflowID: "wf-1",
-		PlanID:     "plan-1",
-		NodeID:     "node-1",
-		TaskID:     "task-1",
-		Attempt:    2,
+		WorkflowID:     "wf-1",
+		PlanID:         "plan-1",
+		NodeID:         "node-1",
+		TaskID:         "task-1",
+		Attempt:        2,
+		OutcomeVersion: 1,
 	})
 	if !matches {
 		t.Fatalf("matching outcome was rejected: %+v", audit)

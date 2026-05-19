@@ -227,37 +227,56 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 	}
 
 	var activeID pgtype.UUID
+	var activeStatus, activeWorkflowID string
 	if err := tx.QueryRow(ctx, `
-		SELECT id
+		SELECT id, status, COALESCE(temporal_workflow_id, '')
 		FROM orchestration_plan
 		WHERE issue_id = $1 AND status IN ('starting', 'running', 'waiting_human')
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, issueID).Scan(&activeID); err == nil {
-		if err := tx.Commit(ctx); err != nil {
-			return StartOrchestrationResult{}, err
+	`, issueID).Scan(&activeID, &activeStatus, &activeWorkflowID); err == nil {
+		if activeStatus != "starting" || activeWorkflowID != "" {
+			if err := tx.Commit(ctx); err != nil {
+				return StartOrchestrationResult{}, err
+			}
+			plan, err := s.getPlan(ctx, activeID)
+			if err != nil {
+				return StartOrchestrationResult{}, err
+			}
+			return StartOrchestrationResult{Plan: plan, Reused: true, Available: true}, nil
 		}
-		plan, err := s.getPlan(ctx, activeID)
-		if err != nil {
-			return StartOrchestrationResult{}, err
-		}
-		return StartOrchestrationResult{Plan: plan, Reused: true, Available: true}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return StartOrchestrationResult{}, err
 	}
 
-	var planID pgtype.UUID
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO orchestration_plan (
-			workspace_id, issue_id, status, reason_code, recommended_action,
-			workflow_type, projection_version, last_synced_at, sync_error,
-			completed_at
-		)
-		VALUES ($1, $2, 'starting', '', 'none',
-			'issue_mvp', 1, now(), NULL, NULL)
-		RETURNING id
-	`, workspaceID, issueID).Scan(&planID); err != nil {
-		return StartOrchestrationResult{}, err
+	planID := activeID
+	reusedExisting := activeID.Valid
+	if !reusedExisting {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO orchestration_plan (
+				workspace_id, issue_id, status, reason_code, recommended_action,
+				workflow_type, projection_version, last_synced_at, sync_error,
+				completed_at
+			)
+			VALUES ($1, $2, 'starting', '', 'none',
+				'issue_mvp', 1, now(), NULL, NULL)
+			RETURNING id
+		`, workspaceID, issueID).Scan(&planID); err != nil {
+			return StartOrchestrationResult{}, err
+		}
+	}
+
+	workflowID := fmt.Sprintf("multica/%s/issue/%s/run/%s", workspaceIDStr, issueIDStr, util.UUIDToString(planID))
+	if s.Starter != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE orchestration_plan
+			SET temporal_workflow_id = $2,
+				updated_at = now()
+			WHERE id = $1
+				AND COALESCE(temporal_workflow_id, '') = ''
+		`, planID, workflowID); err != nil {
+			return StartOrchestrationResult{}, err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -269,10 +288,9 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 		if err != nil {
 			return StartOrchestrationResult{}, err
 		}
-		return StartOrchestrationResult{Plan: plan, Available: false}, nil
+		return StartOrchestrationResult{Plan: plan, Reused: reusedExisting, Available: false}, nil
 	}
 
-	workflowID := fmt.Sprintf("multica/%s/issue/%s/run/%s", workspaceIDStr, issueIDStr, util.UUIDToString(planID))
 	start, err := s.Starter.StartIssueWorkflow(ctx, IssueWorkflowStartInput{
 		WorkspaceID: workspaceIDStr,
 		IssueID:     issueIDStr,
@@ -290,20 +308,20 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 			if repairErr != nil {
 				return StartOrchestrationResult{}, repairErr
 			}
-			return StartOrchestrationResult{Plan: plan, Available: true}, nil
+			return StartOrchestrationResult{Plan: plan, Reused: reusedExisting, Available: true}, nil
 		}
 		plan, updateErr := s.markPlanFailed(ctx, planID, err.Error())
 		if updateErr != nil {
 			return StartOrchestrationResult{}, updateErr
 		}
-		return StartOrchestrationResult{Plan: plan, Available: false}, nil
+		return StartOrchestrationResult{Plan: plan, Reused: reusedExisting, Available: false}, nil
 	}
 
 	plan, err := s.markPlanRunning(ctx, planID, start.WorkflowID, start.RunID)
 	if err != nil {
 		return StartOrchestrationResult{}, err
 	}
-	return StartOrchestrationResult{Plan: plan, Available: true}, nil
+	return StartOrchestrationResult{Plan: plan, Reused: reusedExisting, Available: true}, nil
 }
 
 func (s *OrchestrationService) ApplyApprovalAction(ctx context.Context, input ApprovalActionInput) (ApprovalActionResult, error) {
@@ -502,14 +520,6 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 		return ApprovalActionResult{}, err
 	}
 
-	if s.TaskCanceler != nil {
-		for _, taskID := range taskIDs {
-			if _, err := s.TaskCanceler.CancelTask(ctx, taskID); err != nil {
-				return ApprovalActionResult{}, fmt.Errorf("cancel orchestration task: %w", err)
-			}
-		}
-	}
-
 	if _, err := s.DB.Exec(ctx, `
 		UPDATE orchestration_plan
 		SET status = 'cancelled',
@@ -530,6 +540,14 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 		WHERE plan_id = $1 AND status IN ('pending', 'running', 'waiting_human')
 	`, input.PlanID); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration nodes: %w", err)
+	}
+
+	if s.TaskCanceler != nil {
+		for _, taskID := range taskIDs {
+			if _, err := s.TaskCanceler.CancelTask(ctx, taskID); err != nil {
+				return ApprovalActionResult{}, fmt.Errorf("cancel orchestration task: %w", err)
+			}
+		}
 	}
 	return result, nil
 }
