@@ -182,6 +182,7 @@ func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 
 func TestAnalyzeIssueRejectsMalformedAnalyzerOutput(t *testing.T) {
 	activity := ActivitySet{
+		DB: &captureArtifactDB{},
 		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
 			ProblemSummary: "Adapter summary",
 		}},
