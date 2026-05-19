@@ -84,6 +84,17 @@ func (a ActivitySet) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, inpu
 	if err != nil {
 		return AnalyzeIssueResult{}, err
 	}
+	if strings.TrimSpace(result.ProblemSummary) == "" ||
+		strings.TrimSpace(result.ExecutionAdvice) == "" ||
+		strings.TrimSpace(result.RecommendedAgentPrompt) == "" {
+		return AnalyzeIssueResult{}, fmt.Errorf("malformed analyzer output")
+	}
+	if strings.TrimSpace(result.ReasonCode) == "" {
+		result.ReasonCode = "analysis_ready"
+	}
+	if strings.TrimSpace(result.RecommendedAction) == "" {
+		result.RecommendedAction = "none"
+	}
 	if err := a.projectAnalysis(ctx, input, issue, result); err != nil {
 		return AnalyzeIssueResult{}, err
 	}
