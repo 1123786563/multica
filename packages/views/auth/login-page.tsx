@@ -442,7 +442,7 @@ export function LoginPage({
             form="login-form"
             className="w-full"
             size="lg"
-            disabled={!email || loading}
+            disabled={!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || loading}
           >
             {loading
               ? t(($) => $.signin.sending)
