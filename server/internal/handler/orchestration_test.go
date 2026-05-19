@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/events"
+	orchestrationpkg "github.com/multica-ai/multica/server/internal/orchestration"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -93,6 +94,346 @@ func TestStartIssueOrchestrationFailClosedWhenTemporalUnavailable(t *testing.T) 
 	}
 	if snapshot.Plans[0].Summary.RecommendedAction != "configure_temporal" {
 		t.Fatalf("expected configure_temporal action, got %q", snapshot.Plans[0].Summary.RecommendedAction)
+	}
+}
+
+func TestStartIssueOrchestrationFailClosedCreatesAttentionForIssueRelevantHumansOnly(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration fail closed attention")
+	relevantMemberID := createRuntimeLocalSkillTestMember(t, "member")
+	humanAssigneeID := createRuntimeLocalSkillTestMember(t, "member")
+	unrelatedMemberID := createRuntimeLocalSkillTestMember(t, "member")
+	agentSubscriberID := createHandlerTestAgent(t, "attention agent subscriber", []byte(`{}`))
+
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE issue
+		SET assignee_type = 'member', assignee_id = $2
+		WHERE id = $1
+	`, issueID, humanAssigneeID); err != nil {
+		t.Fatalf("set human assignee: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO issue_subscriber (issue_id, user_type, user_id, reason)
+		VALUES
+			($1, 'member', $2, 'manual'),
+			($1, 'agent', $3, 'manual')
+		ON CONFLICT (issue_id, user_type, user_id) DO NOTHING
+	`, issueID, relevantMemberID, agentSubscriberID); err != nil {
+		t.Fatalf("seed subscribers: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("StartIssueOrchestration: expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var attentionComments int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM comment
+		WHERE issue_id = $1
+			AND author_type = 'member'
+			AND type = 'system'
+			AND content LIKE '%Temporal unavailable%'
+	`, issueID).Scan(&attentionComments); err != nil {
+		t.Fatalf("count attention comments: %v", err)
+	}
+	if attentionComments != 1 {
+		t.Fatalf("expected one attention comment, got %d", attentionComments)
+	}
+
+	assertInboxCount := func(userType, userID string, want int) {
+		t.Helper()
+		var count int
+		if err := testPool.QueryRow(t.Context(), `
+			SELECT count(*)
+			FROM inbox_item
+			WHERE issue_id = $1
+				AND recipient_type = $2
+				AND recipient_id = $3
+				AND type = 'orchestration_attention'
+				AND severity = 'attention'
+		`, issueID, userType, userID).Scan(&count); err != nil {
+			t.Fatalf("count inbox for %s/%s: %v", userType, userID, err)
+		}
+		if count != want {
+			t.Fatalf("inbox count for %s/%s = %d, want %d", userType, userID, count, want)
+		}
+	}
+	assertInboxCount("member", testUserID, 1)
+	assertInboxCount("member", humanAssigneeID, 1)
+	assertInboxCount("member", relevantMemberID, 1)
+	assertInboxCount("member", unrelatedMemberID, 0)
+	assertInboxCount("agent", agentSubscriberID, 0)
+}
+
+func TestFinalizeWorkflowWaitingHumanCreatesAttention(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration waiting human attention")
+	relevantMemberID := createRuntimeLocalSkillTestMember(t, "member")
+	if _, err := testPool.Exec(t.Context(), `
+		INSERT INTO issue_subscriber (issue_id, user_type, user_id, reason)
+		VALUES ($1, 'member', $2, 'manual')
+		ON CONFLICT (issue_id, user_type, user_id) DO NOTHING
+	`, issueID, relevantMemberID); err != nil {
+		t.Fatalf("seed subscriber: %v", err)
+	}
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "dispatch",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+
+	activity := orchestrationpkg.ActivitySet{DB: testPool}
+	if err := activity.FinalizeWorkflow(t.Context(), orchestrationpkg.ValidateOutcomeResult{
+		Status:             "waiting_human",
+		ReasonCode:         "tests_failed",
+		RecommendedAction:  "review",
+		NeedsHumanReview:   true,
+		TerminalPlanStatus: "waiting_human",
+		ProjectionDetail:   "structured result reported failed tests",
+		FailedTests:        []string{"TestBilling"},
+	}, orchestrationpkg.ReviewOutcomeResult{
+		Summary:           "review failed tests",
+		RecommendedAction: "review",
+	}, orchestrationpkg.SummarizeOutcomeResult{
+		Summary:  "handoff needs review",
+		TraceRef: startBody.Plan.ID + "/" + dispatched.NodeID + "/" + dispatched.TaskID,
+	}, orchestrationpkg.IssueWorkflowInput{
+		PlanID:     startBody.Plan.ID,
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+	}, orchestrationpkg.IssueSnapshot{
+		IssueID: issueID,
+	}, orchestrationpkg.AnalyzeIssueResult{
+		ProblemSummary: "Fix billing",
+	}, dispatched, service.AgentTaskOutcomeSignalInput{
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+		Status:     "completed",
+	}); err != nil {
+		t.Fatalf("finalize workflow: %v", err)
+	}
+	if err := activity.FinalizeWorkflow(t.Context(), orchestrationpkg.ValidateOutcomeResult{
+		Status:             "waiting_human",
+		ReasonCode:         "tests_failed",
+		RecommendedAction:  "review",
+		NeedsHumanReview:   true,
+		TerminalPlanStatus: "waiting_human",
+		ProjectionDetail:   "structured result reported failed tests",
+		FailedTests:        []string{"TestBilling"},
+	}, orchestrationpkg.ReviewOutcomeResult{
+		Summary:           "review failed tests",
+		RecommendedAction: "review",
+	}, orchestrationpkg.SummarizeOutcomeResult{
+		Summary:  "handoff needs review",
+		TraceRef: startBody.Plan.ID + "/" + dispatched.NodeID + "/" + dispatched.TaskID,
+	}, orchestrationpkg.IssueWorkflowInput{
+		PlanID:     startBody.Plan.ID,
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+	}, orchestrationpkg.IssueSnapshot{
+		IssueID: issueID,
+	}, orchestrationpkg.AnalyzeIssueResult{
+		ProblemSummary: "Fix billing",
+	}, dispatched, service.AgentTaskOutcomeSignalInput{
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+		Status:     "completed",
+	}); err != nil {
+		t.Fatalf("repeat finalize workflow: %v", err)
+	}
+
+	var comments int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM comment
+		WHERE issue_id = $1
+			AND type = 'system'
+			AND content LIKE '%Approval required%'
+	`, issueID).Scan(&comments); err != nil {
+		t.Fatalf("count attention comments: %v", err)
+	}
+	if comments != 1 {
+		t.Fatalf("expected one waiting_human attention comment, got %d", comments)
+	}
+	var inbox int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM inbox_item
+		WHERE issue_id = $1
+			AND recipient_type = 'member'
+			AND recipient_id = $2
+			AND type = 'orchestration_attention'
+	`, issueID, relevantMemberID).Scan(&inbox); err != nil {
+		t.Fatalf("count relevant inbox: %v", err)
+	}
+	if inbox != 1 {
+		t.Fatalf("expected relevant member inbox attention, got %d", inbox)
+	}
+}
+
+func TestFinalizeWorkflowRetryExhaustedCreatesAttention(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration retry exhausted attention")
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "dispatch",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+	activity := orchestrationpkg.ActivitySet{DB: testPool}
+	if err := activity.FinalizeWorkflow(t.Context(), orchestrationpkg.ValidateOutcomeResult{
+		Status:             "failed",
+		ReasonCode:         "retry_exhausted",
+		RecommendedAction:  "none",
+		TerminalPlanStatus: "failed",
+		ProjectionDetail:   "orchestration retry budget exhausted",
+	}, orchestrationpkg.ReviewOutcomeResult{}, orchestrationpkg.SummarizeOutcomeResult{
+		Summary:  "retry budget exhausted",
+		TraceRef: startBody.Plan.ID + "/" + dispatched.NodeID + "/" + dispatched.TaskID,
+	}, orchestrationpkg.IssueWorkflowInput{
+		PlanID:     startBody.Plan.ID,
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+	}, orchestrationpkg.IssueSnapshot{
+		IssueID: issueID,
+	}, orchestrationpkg.AnalyzeIssueResult{
+		ProblemSummary: "Fix billing",
+	}, dispatched, service.AgentTaskOutcomeSignalInput{
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+		Status:     "failed",
+	}); err != nil {
+		t.Fatalf("finalize workflow: %v", err)
+	}
+	var comments int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM comment
+		WHERE issue_id = $1
+			AND type = 'system'
+			AND content LIKE '%Retries exhausted%'
+	`, issueID).Scan(&comments); err != nil {
+		t.Fatalf("count retry attention comments: %v", err)
+	}
+	if comments != 1 {
+		t.Fatalf("expected one retry exhausted attention comment, got %d", comments)
+	}
+}
+
+func TestFinalizeWorkflowSuccessDoesNotCreateAttention(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration success no attention")
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "dispatch",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+	activity := orchestrationpkg.ActivitySet{DB: testPool}
+	if err := activity.FinalizeWorkflow(t.Context(), orchestrationpkg.ValidateOutcomeResult{
+		Status:             "completed",
+		RecommendedAction:  "none",
+		TerminalPlanStatus: "completed",
+		ProjectionDetail:   "structured result validated",
+	}, orchestrationpkg.ReviewOutcomeResult{}, orchestrationpkg.SummarizeOutcomeResult{
+		Summary:  "done",
+		TraceRef: startBody.Plan.ID + "/" + dispatched.NodeID + "/" + dispatched.TaskID,
+	}, orchestrationpkg.IssueWorkflowInput{
+		PlanID:     startBody.Plan.ID,
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+	}, orchestrationpkg.IssueSnapshot{
+		IssueID: issueID,
+	}, orchestrationpkg.AnalyzeIssueResult{
+		ProblemSummary: "Fix billing",
+	}, dispatched, service.AgentTaskOutcomeSignalInput{
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+		Status:     "completed",
+	}); err != nil {
+		t.Fatalf("finalize workflow: %v", err)
+	}
+	var inbox int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM inbox_item
+		WHERE issue_id = $1
+			AND type = 'orchestration_attention'
+	`, issueID).Scan(&inbox); err != nil {
+		t.Fatalf("count attention inbox: %v", err)
+	}
+	if inbox != 0 {
+		t.Fatalf("expected no success attention inbox items, got %d", inbox)
 	}
 }
 
@@ -1057,6 +1398,211 @@ func TestCancelOrchestrationPlanIsIdempotentAfterAlreadyCancelled(t *testing.T) 
 	}
 	if auditCount != 1 {
 		t.Fatalf("repeated cancel should write one audit event, got %d", auditCount)
+	}
+}
+
+func TestCancelOrchestrationPlanTemporalCancelFailureLeavesPlanRetryable(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration cancel temporal failure")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	canceler := &recordingWorkflowCanceler{err: errors.New("temporal cancel unavailable")}
+	previousWorkflowCanceler := testHandler.OrchestrationService.WorkflowCanceler
+	testHandler.OrchestrationService.WorkflowCanceler = canceler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.WorkflowCanceler = previousWorkflowCanceler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID string `json:"id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	cancelW := httptest.NewRecorder()
+	cancelReq := withURLParam(
+		newRequest("POST", "/api/orchestration/plans/"+startBody.Plan.ID+"/cancel", map[string]any{"reason": "stop"}),
+		"planId",
+		startBody.Plan.ID,
+	)
+	testHandler.CancelOrchestrationPlan(cancelW, cancelReq)
+	if cancelW.Code != http.StatusInternalServerError {
+		t.Fatalf("CancelOrchestrationPlan: expected 500, got %d: %s", cancelW.Code, cancelW.Body.String())
+	}
+
+	var planStatus string
+	if err := testPool.QueryRow(t.Context(), `SELECT status FROM orchestration_plan WHERE id = $1`, startBody.Plan.ID).Scan(&planStatus); err != nil {
+		t.Fatalf("load plan status: %v", err)
+	}
+	if planStatus == "cancelled" {
+		t.Fatal("failed Temporal cancellation must not leave plan permanently cancelled")
+	}
+	var auditCount int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM orchestration_event
+		WHERE plan_id = $1 AND type = 'approval.cancel'
+	`, startBody.Plan.ID).Scan(&auditCount); err != nil {
+		t.Fatalf("count cancel audit events: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("cancel attempt should keep one audit event for retry/debugging, got %d", auditCount)
+	}
+}
+
+func TestFinalizeWorkflowAfterCancelledPlanDoesNotMoveIssueOrWriteHandoff(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration late finalize after cancel")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	canceler := &recordingWorkflowCanceler{}
+	previousWorkflowCanceler := testHandler.OrchestrationService.WorkflowCanceler
+	testHandler.OrchestrationService.WorkflowCanceler = canceler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.OrchestrationService.WorkflowCanceler = previousWorkflowCanceler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "dispatch",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+
+	cancelW := httptest.NewRecorder()
+	cancelReq := withURLParam(newRequest("POST", "/api/orchestration/plans/"+startBody.Plan.ID+"/cancel", nil), "planId", startBody.Plan.ID)
+	testHandler.CancelOrchestrationPlan(cancelW, cancelReq)
+	if cancelW.Code != http.StatusAccepted {
+		t.Fatalf("CancelOrchestrationPlan: expected 202, got %d: %s", cancelW.Code, cancelW.Body.String())
+	}
+
+	activity := orchestrationpkg.ActivitySet{DB: testPool}
+	if err := activity.FinalizeWorkflow(t.Context(), orchestrationpkg.ValidateOutcomeResult{
+		Status:             "completed",
+		RecommendedAction:  "none",
+		TerminalPlanStatus: "completed",
+		ProjectionDetail:   "late completion after cancel",
+	}, orchestrationpkg.ReviewOutcomeResult{
+		Summary:           "late review clean",
+		RecommendedAction: "accept",
+	}, orchestrationpkg.SummarizeOutcomeResult{
+		Summary:  "late done",
+		TraceRef: startBody.Plan.ID + "/" + dispatched.NodeID + "/" + dispatched.TaskID,
+	}, orchestrationpkg.IssueWorkflowInput{
+		PlanID:     startBody.Plan.ID,
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+	}, orchestrationpkg.IssueSnapshot{
+		IssueID: issueID,
+	}, orchestrationpkg.AnalyzeIssueResult{
+		ProblemSummary: "Fix billing",
+	}, dispatched, service.AgentTaskOutcomeSignalInput{
+		WorkflowID: startBody.Plan.TemporalWorkflowID,
+		Status:     "completed",
+	}); err != nil {
+		t.Fatalf("late finalize workflow: %v", err)
+	}
+
+	var issueStatus string
+	if err := testPool.QueryRow(t.Context(), `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
+		t.Fatalf("load issue status: %v", err)
+	}
+	if issueStatus == "in_review" {
+		t.Fatal("late finalize after cancellation must not move issue to review")
+	}
+	var completedEvents int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM orchestration_event
+		WHERE plan_id = $1 AND type = 'workflow.completed'
+	`, startBody.Plan.ID).Scan(&completedEvents); err != nil {
+		t.Fatalf("count completed events: %v", err)
+	}
+	if completedEvents != 0 {
+		t.Fatalf("late finalize after cancellation must not write workflow.completed, got %d", completedEvents)
+	}
+	var handoffArtifacts int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM orchestration_artifact
+		WHERE plan_id = $1 AND type = 'review_handoff'
+	`, startBody.Plan.ID).Scan(&handoffArtifacts); err != nil {
+		t.Fatalf("count handoff artifacts: %v", err)
+	}
+	if handoffArtifacts != 0 {
+		t.Fatalf("late finalize after cancellation must not write review_handoff, got %d", handoffArtifacts)
+	}
+}
+
+func TestRepeatedTemporalUnavailableRunsCreatePerPlanAttentionComments(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration repeated unavailable attention")
+
+	start := func() {
+		t.Helper()
+		w := httptest.NewRecorder()
+		req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+		testHandler.StartIssueOrchestration(w, req)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("StartIssueOrchestration: expected 503, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	start()
+	start()
+
+	var failedPlans int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM orchestration_plan
+		WHERE issue_id = $1 AND status = 'failed' AND reason_code = 'temporal_unavailable'
+	`, issueID).Scan(&failedPlans); err != nil {
+		t.Fatalf("count failed plans: %v", err)
+	}
+	if failedPlans != 2 {
+		t.Fatalf("expected two failed orchestration plans, got %d", failedPlans)
+	}
+	var attentionComments int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM comment
+		WHERE issue_id = $1
+			AND type = 'system'
+			AND content LIKE '%Temporal unavailable%'
+	`, issueID).Scan(&attentionComments); err != nil {
+		t.Fatalf("count attention comments: %v", err)
+	}
+	if attentionComments != 2 {
+		t.Fatalf("each failed plan should create issue-visible attention, got %d comments", attentionComments)
 	}
 }
 

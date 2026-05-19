@@ -226,6 +226,18 @@ func (a ActivitySet) ReviewOutcome(ctx context.Context, validation ValidateOutco
 		validation.ProjectionDetail,
 	}, " "))
 	result := ReviewOutcomeResult{Summary: summary}
+	if len(validation.FailedTests) > 0 {
+		result.Evidence = append(result.Evidence, validation.FailedTests...)
+	}
+	result.Risks = append(append(result.Risks, validation.Risks...), analysis.Risks...)
+	switch {
+	case validation.NeedsHumanReview:
+		result.RecommendedAction = "review"
+	case validation.Status == "completed":
+		result.RecommendedAction = "accept"
+	default:
+		result.RecommendedAction = "review"
+	}
 	for _, risk := range analysis.Risks {
 		normalized := strings.ToLower(strings.TrimSpace(risk))
 		if strings.Contains(normalized, "high") || strings.Contains(normalized, "destructive") || strings.Contains(normalized, "migration") {
@@ -243,7 +255,8 @@ func (a ActivitySet) SummarizeOutcome(ctx context.Context, review ReviewOutcomeR
 		analysis.ExecutionAdvice,
 		review.Summary,
 	}, "\n"))
-	return SummarizeOutcomeResult{Summary: summary}, nil
+	traceRef := strings.Join([]string{dispatch.PlanID, dispatch.NodeID, dispatch.TaskID}, "/")
+	return SummarizeOutcomeResult{Summary: summary, TraceRef: traceRef}, nil
 }
 
 func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOutcomeResult, review ReviewOutcomeResult, summary SummarizeOutcomeResult, input IssueWorkflowInput, issue IssueSnapshot, analysis AnalyzeIssueResult, dispatch service.DispatchAgentTaskResult, outcome service.AgentTaskOutcomeSignalInput) error {
@@ -258,17 +271,20 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 	if status == "" {
 		status = "running"
 	}
-	_, err = a.DB.Exec(ctx, `
+	tag, err := a.DB.Exec(ctx, `
 		UPDATE orchestration_plan
 		SET status = $2,
 			reason_code = $3,
 			recommended_action = $4,
 			updated_at = now(),
 			completed_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled', 'waiting_human') THEN now() ELSE completed_at END
-		WHERE id = $1
+		WHERE id = $1 AND status NOT IN ('cancelled', 'completed', 'failed')
 	`, planID, status, validation.ReasonCode, validation.RecommendedAction)
 	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 
 	nodeID, err := util.ParseUUID(dispatch.NodeID)
@@ -282,7 +298,7 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 			recommended_action = $4,
 			completed_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, now()) ELSE completed_at END,
 			updated_at = now()
-		WHERE id = $1
+		WHERE id = $1 AND status NOT IN ('cancelled', 'completed', 'failed')
 	`, nodeID, validation.Status, validation.ReasonCode, validation.RecommendedAction); err != nil {
 		return err
 	}
@@ -314,6 +330,9 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 		}); err != nil {
 			return err
 		}
+		if err := service.CreateOrchestrationAttention(ctx, a.DB, planID, "waiting_human:"+validation.ReasonCode, "Approval required: "+validation.ProjectionDetail); err != nil {
+			return err
+		}
 	} else {
 		eventType := "workflow.completed"
 		if status == "failed" {
@@ -327,7 +346,44 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 		}); err != nil {
 			return err
 		}
+		if status == "failed" {
+			message := "Runtime failed: " + strings.TrimSpace(summary.Summary)
+			dedupeKey := "failed:" + validation.ReasonCode
+			if validation.ReasonCode == "retry_exhausted" {
+				message = "Retries exhausted: " + strings.TrimSpace(summary.Summary)
+				dedupeKey = "retry_exhausted"
+			}
+			if err := service.CreateOrchestrationAttention(ctx, a.DB, planID, dedupeKey, message); err != nil {
+				return err
+			}
+		}
 	}
+	if status == "completed" && validation.Status == "completed" {
+		issueID, err := util.ParseUUID(issue.IssueID)
+		if err != nil {
+			return err
+		}
+		if _, err := a.DB.Exec(ctx, `
+			UPDATE issue
+			SET status = $2,
+				updated_at = now()
+			WHERE id = $1
+				AND status NOT IN ('done', 'cancelled')
+		`, issueID, "in_review"); err != nil {
+			return err
+		}
+	}
+	if err := a.recordArtifact(ctx, planID, "review_handoff", "system", "review handoff summary", map[string]any{
+		"summary":            summary.Summary,
+		"trace_ref":          summary.TraceRef,
+		"plan_status":        status,
+		"validation_reason":  validation.ReasonCode,
+		"review_concern":     review.Concern,
+		"recommended_action": review.RecommendedAction,
+	}); err != nil {
+		return err
+	}
+
 	return nil
 }
 

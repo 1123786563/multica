@@ -16,13 +16,13 @@ This slice is complete only when it gives maintainers repeatable commands and ev
 
 ## Acceptance criteria
 
-- [ ] Documentation explains explicit local Temporal setup and orchestration worker startup.
-- [ ] Happy path validates start, analyze, dispatch, completed Signal, validation, review, summary, and review handoff.
-- [ ] Fail-closed path validates Temporal unavailable behavior and no direct Agent Task fallback.
-- [ ] Failure path validates malformed or insufficient evidence leading to retry or Approval Gate.
-- [ ] Issue Detail shows the full trace through Linear Orchestration Panel, expanded events, evidence, artifacts, and relevant audit events.
-- [ ] Validation commands include focused Go workflow/activity tests, backend API tests, frontend contract/component tests, and minimal E2E coverage.
-- [ ] Final evidence states which commands passed and any residual manual setup requirements.
+- [x] Documentation explains explicit local Temporal setup and orchestration worker startup.
+- [x] Happy path validates start, analyze, dispatch, completed Signal, validation, review, summary, and review handoff.
+- [x] Fail-closed path validates Temporal unavailable behavior and no direct Agent Task fallback.
+- [x] Failure path validates malformed or insufficient evidence leading to retry or Approval Gate.
+- [x] Issue Detail shows the full trace through Linear Orchestration Panel, expanded events, evidence, artifacts, and relevant audit events.
+- [x] Validation commands include focused Go workflow/activity tests, backend API tests, frontend contract/component tests, and minimal E2E coverage.
+- [x] Final evidence states which commands passed and any residual manual setup requirements.
 
 ## Blocked by
 
@@ -38,4 +38,3 @@ This slice is complete only when it gives maintainers repeatable commands and ev
 - 10-cancellation-propagates-to-temporal-and-active-agent-task
 - 11-review-handoff-completes-orchestration-without-auto-closing-issue
 - 12-attention-comments-notify-issue-relevant-humans-only
-

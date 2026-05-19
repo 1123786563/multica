@@ -455,29 +455,14 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO orchestration_event (plan_id, type, source, message, details)
-		VALUES ($1, 'approval.cancel', 'server', $2, $3::jsonb)
+		SELECT $1, 'approval.cancel', 'server', $2, $3::jsonb
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM orchestration_event
+			WHERE plan_id = $1 AND type = 'approval.cancel'
+		)
 	`, input.PlanID, "Approval action recorded", details); err != nil {
 		return ApprovalActionResult{}, fmt.Errorf("write approval audit event: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE orchestration_plan
-		SET status = 'cancelled',
-			reason_code = 'human_cancelled',
-			recommended_action = 'none',
-			completed_at = COALESCE(completed_at, now()),
-			updated_at = now()
-		WHERE id = $1
-	`, input.PlanID); err != nil {
-		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration plan: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE orchestration_node
-		SET status = 'cancelled',
-			completed_at = COALESCE(completed_at, now()),
-			updated_at = now()
-		WHERE plan_id = $1 AND status IN ('pending', 'running', 'waiting_human')
-	`, input.PlanID); err != nil {
-		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration nodes: %w", err)
 	}
 	taskRows, err := tx.Query(ctx, `
 		SELECT id
@@ -507,14 +492,6 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 		return ApprovalActionResult{}, err
 	}
 
-	if s.TaskCanceler != nil {
-		for _, taskID := range taskIDs {
-			if _, err := s.TaskCanceler.CancelTask(ctx, taskID); err != nil {
-				return ApprovalActionResult{}, fmt.Errorf("cancel orchestration task: %w", err)
-			}
-		}
-	}
-
 	result := ApprovalActionResult{
 		PlanID:      util.UUIDToString(input.PlanID),
 		Action:      input.Action,
@@ -523,6 +500,36 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	}
 	if err := s.WorkflowCanceler.CancelWorkflow(ctx, result.WorkflowID); err != nil {
 		return ApprovalActionResult{}, err
+	}
+
+	if s.TaskCanceler != nil {
+		for _, taskID := range taskIDs {
+			if _, err := s.TaskCanceler.CancelTask(ctx, taskID); err != nil {
+				return ApprovalActionResult{}, fmt.Errorf("cancel orchestration task: %w", err)
+			}
+		}
+	}
+
+	if _, err := s.DB.Exec(ctx, `
+		UPDATE orchestration_plan
+		SET status = 'cancelled',
+			reason_code = 'human_cancelled',
+			recommended_action = 'none',
+			completed_at = COALESCE(completed_at, now()),
+			updated_at = now()
+		WHERE id = $1
+			AND status IN ('starting', 'running', 'waiting_human')
+	`, input.PlanID); err != nil {
+		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration plan: %w", err)
+	}
+	if _, err := s.DB.Exec(ctx, `
+		UPDATE orchestration_node
+		SET status = 'cancelled',
+			completed_at = COALESCE(completed_at, now()),
+			updated_at = now()
+		WHERE plan_id = $1 AND status IN ('pending', 'running', 'waiting_human')
+	`, input.PlanID); err != nil {
+		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration nodes: %w", err)
 	}
 	return result, nil
 }
@@ -726,11 +733,114 @@ func (s *OrchestrationService) markPlanFailed(ctx context.Context, planID pgtype
 	`, planID, syncError); err != nil {
 		return OrchestrationPlan{}, err
 	}
+	if err := CreateOrchestrationAttention(ctx, s.DB, planID, "temporal_unavailable", "Temporal unavailable: configure Temporal before retrying orchestration."); err != nil {
+		return OrchestrationPlan{}, err
+	}
 	plan, err := s.getPlan(ctx, planID)
 	if err != nil {
 		return OrchestrationPlan{}, err
 	}
 	return plan, nil
+}
+
+func CreateOrchestrationAttention(ctx context.Context, store OrchestrationDB, planID pgtype.UUID, dedupeKey, message string) error {
+	if store == nil {
+		return nil
+	}
+	dedupe := fmt.Sprintf("orchestration_attention:%s:%s", util.UUIDToString(planID), dedupeKey)
+	details, err := json.Marshal(map[string]any{
+		"dedupe_key": dedupe,
+		"plan_id":    util.UUIDToString(planID),
+		"reason":     dedupeKey,
+	})
+	if err != nil {
+		return err
+	}
+
+	commentMessage := fmt.Sprintf("%s\n\nPlan: %s", message, util.UUIDToString(planID))
+	if _, err := store.Exec(ctx, `
+		WITH plan_issue AS (
+			SELECT p.workspace_id, p.issue_id, i.title, i.creator_type, i.creator_id, i.assignee_type, i.assignee_id
+			FROM orchestration_plan p
+			JOIN issue i ON i.id = p.issue_id
+			WHERE p.id = $1
+		),
+		author AS (
+			SELECT creator_id AS id
+			FROM plan_issue
+			WHERE creator_type = 'member'
+			UNION ALL
+			SELECT assignee_id AS id
+			FROM plan_issue
+			WHERE assignee_type = 'member' AND assignee_id IS NOT NULL
+			UNION ALL
+			SELECT s.user_id AS id
+			FROM issue_subscriber s
+			JOIN plan_issue pi ON pi.issue_id = s.issue_id
+			WHERE s.user_type = 'member'
+			LIMIT 1
+		)
+		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type)
+		SELECT pi.issue_id, pi.workspace_id, 'member', author.id, $2, 'system'
+		FROM plan_issue pi
+		JOIN author ON TRUE
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM comment c
+			WHERE c.issue_id = pi.issue_id
+				AND c.type = 'system'
+				AND c.content = $2
+		)
+	`, planID, commentMessage); err != nil {
+		return err
+	}
+
+	if _, err := store.Exec(ctx, `
+		WITH plan_issue AS (
+			SELECT p.workspace_id, p.issue_id, i.title, i.creator_type, i.creator_id, i.assignee_type, i.assignee_id
+			FROM orchestration_plan p
+			JOIN issue i ON i.id = p.issue_id
+			WHERE p.id = $1
+		),
+		audience AS (
+			SELECT creator_id AS user_id
+			FROM plan_issue
+			WHERE creator_type = 'member'
+			UNION
+			SELECT assignee_id AS user_id
+			FROM plan_issue
+			WHERE assignee_type = 'member' AND assignee_id IS NOT NULL
+			UNION
+			SELECT s.user_id
+			FROM issue_subscriber s
+			JOIN plan_issue pi ON pi.issue_id = s.issue_id
+			WHERE s.user_type = 'member'
+		)
+		INSERT INTO inbox_item (
+			workspace_id, recipient_type, recipient_id,
+			type, severity, issue_id, title, body,
+			actor_type, actor_id, details
+		)
+		SELECT
+			pi.workspace_id, 'member', audience.user_id,
+			'orchestration_attention', 'attention', pi.issue_id,
+			'Orchestration needs attention', $2,
+			'system', NULL, $3::jsonb
+		FROM plan_issue pi
+		JOIN audience ON audience.user_id IS NOT NULL
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM inbox_item existing
+			WHERE existing.issue_id = pi.issue_id
+				AND existing.recipient_type = 'member'
+				AND existing.recipient_id = audience.user_id
+				AND existing.type = 'orchestration_attention'
+				AND existing.details->>'dedupe_key' = $4
+		)
+	`, planID, message, details, dedupe); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *OrchestrationService) Snapshot(ctx context.Context, issueID pgtype.UUID) (OrchestrationSnapshot, error) {

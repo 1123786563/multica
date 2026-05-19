@@ -16,17 +16,16 @@ This slice should prove low-noise collaboration behavior for approval waits, fai
 
 ## Acceptance criteria
 
-- [ ] `waiting_human` creates an attention comment or equivalent Issue-visible activity.
-- [ ] Run failed, retry exhausted, repair failed, and Temporal unavailable fail-closed states create attention comments.
-- [ ] Successful orchestration does not create a default attention comment.
-- [ ] Attention audience includes Issue creator, human assignee, and subscribers/watchers.
-- [ ] Attention audience excludes agent assignee and unrelated workspace members.
-- [ ] Attention comments are deduplicated for repeated projection/repair events.
-- [ ] Tests cover each trigger condition, success no-comment behavior, audience selection, deduplication, and no agent mention loop.
+- [x] `waiting_human` creates an attention comment or equivalent Issue-visible activity.
+- [x] Run failed, retry exhausted, repair failed, and Temporal unavailable fail-closed states create attention comments.
+- [x] Successful orchestration does not create a default attention comment.
+- [x] Attention audience includes Issue creator, human assignee, and subscribers/watchers.
+- [x] Attention audience excludes agent assignee and unrelated workspace members.
+- [x] Attention comments are deduplicated for repeated projection/repair events.
+- [x] Tests cover each trigger condition, success no-comment behavior, audience selection, deduplication, and no agent mention loop.
 
 ## Blocked by
 
 - 08-outcome-policy-routes-risks-and-failed-tests-to-approval-gate
 - 09-human-only-approval-actions-with-audit-events
 - 10-cancellation-propagates-to-temporal-and-active-agent-task
-

@@ -16,12 +16,12 @@ This slice should share the human approval permission and audit boundary where c
 
 ## Acceptance criteria
 
-- [ ] Cancel endpoint locates the active run and Temporal Workflow identity.
-- [ ] Cancelling a run calls Temporal cancellation and updates projection after cancellation is accepted or observed.
-- [ ] If an active linked Agent Task exists, cancellation propagates to that task.
-- [ ] Completed node evidence, events, and artifacts remain inspectable after cancellation.
-- [ ] Cancel audit/event trail is visible in expanded events.
-- [ ] Tests cover cancel with active task, cancel with no active task, repeated cancel idempotency, projection status, and evidence preservation.
+- [x] Cancel endpoint locates the active run and Temporal Workflow identity.
+- [x] Cancelling a run calls Temporal cancellation and updates projection after cancellation is accepted or observed.
+- [x] If an active linked Agent Task exists, cancellation propagates to that task.
+- [x] Completed node evidence, events, and artifacts remain inspectable after cancellation.
+- [x] Cancel audit/event trail is visible in expanded events.
+- [x] Tests cover cancel with active task, cancel with no active task, repeated cancel idempotency, projection status, and evidence preservation.
 
 ## Blocked by
 

@@ -93,14 +93,18 @@ type ValidateOutcomeResult struct {
 }
 
 type ReviewOutcomeResult struct {
-	Summary       string
-	HighRisk      bool
-	Concern       string
-	SeverityLabel string
+	Summary           string
+	HighRisk          bool
+	Concern           string
+	SeverityLabel     string
+	Evidence          []string
+	Risks             []string
+	RecommendedAction string
 }
 
 type SummarizeOutcomeResult struct {
-	Summary string
+	Summary  string
+	TraceRef string
 }
 
 func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
@@ -201,15 +205,6 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 				validation.TerminalPlanStatus = "failed"
 				validation.ProjectionDetail = "orchestration retry budget exhausted"
 				return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
-			case "cancel":
-				validation.Status = "cancelled"
-				validation.ReasonCode = "human_cancelled"
-				validation.RecommendedAction = "none"
-				validation.NeedsHumanReview = false
-				validation.ShouldRetry = false
-				validation.TerminalPlanStatus = "cancelled"
-				validation.ProjectionDetail = "human cancelled orchestration"
-				return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
 			}
 		}
 
@@ -219,7 +214,7 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 }
 
 func applyOutcomePolicy(validation ValidateOutcomeResult, review ReviewOutcomeResult) ValidateOutcomeResult {
-	if validation.NeedsHumanReview || validation.TerminalPlanStatus == "waiting_human" {
+	if validation.NeedsHumanReview || validation.ShouldRetry || validation.TerminalPlanStatus == "waiting_human" {
 		return validation
 	}
 	if review.HighRisk {
@@ -269,7 +264,7 @@ func waitForApprovalAction(ctx workflow.Context, input IssueWorkflowInput, dispa
 			candidate.PlanID == input.PlanID &&
 			candidate.NodeID == dispatch.NodeID &&
 			candidate.ActorType == "human" &&
-			(candidate.Action == "approve" || candidate.Action == "retry" || candidate.Action == "cancel") {
+			(candidate.Action == "approve" || candidate.Action == "retry") {
 			approval = candidate
 			received = true
 		}
