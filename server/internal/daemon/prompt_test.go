@@ -51,6 +51,23 @@ func TestBuildQuickCreatePromptRules(t *testing.T) {
 	}
 }
 
+func TestBuildPromptUsesOrchestrationPromptAndResultSchemaContract(t *testing.T) {
+	out := BuildPrompt(Task{
+		IssueID:             "MUL-123",
+		OrchestrationPrompt: "Analyzer says: make the smallest safe code change.",
+	}, "codex")
+
+	if !strings.Contains(out, "Analyzer says: make the smallest safe code change.") {
+		t.Fatalf("orchestration prompt missing analyzer guidance:\n%s", out)
+	}
+	if !strings.Contains(out, `"schema_version":"1"`) {
+		t.Fatalf("orchestration prompt missing Result Schema v1 contract:\n%s", out)
+	}
+	if strings.Contains(out, "Start by running `multica issue get") {
+		t.Fatalf("orchestration prompt should not fall back to the generic issue prompt:\n%s", out)
+	}
+}
+
 // TestBuildQuickCreatePromptAssigneeIncludesSquads locks in the MUL-2165
 // fix: the assignee-resolution rules must tell the agent to consult the
 // squad list alongside members and agents. Before this, a quick-create

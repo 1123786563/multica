@@ -1,4 +1,4 @@
-# Self-hosting Docker Compose — starts PostgreSQL, backend, and frontend.
+# Self-hosting Docker Compose — starts PostgreSQL, Temporal, backend, orchestration worker, and frontend.
 #
 # Usage:
 #   cp .env.example .env
@@ -7,6 +7,7 @@
 #
 # Frontend: http://localhost:3000
 # Backend:  http://localhost:8080 (also used by CLI/daemon)
+# Temporal: localhost:7233 (gRPC, used by worker + backend)
 
 name: multica
 
@@ -28,11 +29,29 @@ services:
       timeout: 5s
       retries: 5
 
+  temporal:
+    image: temporalio/auto-setup:1.26
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-multica}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-multica}
+      - POSTGRES_SEEDS=postgres
+      - DISABLE_ES=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   backend:
     image: ${MULTICA_BACKEND_IMAGE:-ghcr.io/multica-ai/multica-backend}:${MULTICA_IMAGE_TAG:-latest}
     depends_on:
       postgres:
         condition: service_healthy
+      temporal:
+        condition: service_started
     ports:
       - "${PORT:-8080}:8080"
     volumes:
@@ -68,6 +87,25 @@ services:
       ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      TEMPORAL_HOST_PORT: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-multica-orchestration}
+    restart: unless-stopped
+
+  orchestration-worker:
+    image: ${MULTICA_BACKEND_IMAGE:-ghcr.io/multica-ai/multica-backend}:${MULTICA_IMAGE_TAG:-latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    entrypoint: ["./entrypoint-worker.sh"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable
+      TEMPORAL_HOST_PORT: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-multica-orchestration}
+      REDIS_URL: ${REDIS_URL:-}
     restart: unless-stopped
 
   frontend:

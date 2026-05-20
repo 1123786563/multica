@@ -41,6 +41,7 @@ func main() {
 		HostPort:  os.Getenv("TEMPORAL_HOST_PORT"),
 		Namespace: os.Getenv("TEMPORAL_NAMESPACE"),
 		TaskQueue: os.Getenv("TEMPORAL_TASK_QUEUE"),
+		RedisURL:  os.Getenv("REDIS_URL"),
 	}
 	if err := orchestration.Run(ctx, pool, cfg); err != nil {
 		slog.Error("orchestration worker stopped with error", "error", err)

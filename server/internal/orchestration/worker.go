@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -20,6 +21,7 @@ type WorkerConfig struct {
 	HostPort  string
 	Namespace string
 	TaskQueue string
+	RedisURL  string
 }
 
 func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
@@ -47,11 +49,18 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 
 	queries := db.New(pool)
 	orchestrationSvc := service.NewOrchestrationService(pool, pool, nil)
-	activities := ActivitySet{
-		DB:            pool,
-		Queries:       queries,
-		Orchestration: orchestrationSvc,
+	taskSvc := service.NewTaskService(queries, pool, nil, nil)
+	if redisURL := strings.TrimSpace(cfg.RedisURL); redisURL != "" {
+		opts, err := redis.ParseURL(redisURL)
+		if err != nil {
+			return fmt.Errorf("parse redis url: %w", err)
+		}
+		rdb := redis.NewClient(opts)
+		defer rdb.Close()
+		taskSvc.EmptyClaim = service.NewEmptyClaimCache(rdb)
 	}
+	orchestrationSvc.TaskNotifier = taskSvc
+	activities := NewWorkerActivitySet(pool, queries, orchestrationSvc)
 
 	w := worker.New(c, taskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(IssueWorkflow, workflow.RegisterOptions{Name: IssueWorkflowName})
@@ -71,4 +80,13 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 		"host_port", hostPort,
 	)
 	return w.Run(worker.InterruptCh())
+}
+
+func NewWorkerActivitySet(pool service.OrchestrationDB, queries *db.Queries, orchestrationSvc *service.OrchestrationService) ActivitySet {
+	return ActivitySet{
+		DB:            pool,
+		Queries:       queries,
+		Orchestration: orchestrationSvc,
+		Analyzer:      NewEinoIssueAnalyzer(),
+	}
 }

@@ -58,6 +58,7 @@ type DispatchDaemonTaskInput struct {
 	WorkflowNodeKey    string
 	Attempt            int
 	TemporalWorkflowID string
+	AgentPrompt        string
 }
 
 type ValidateOutcomeInput struct {
@@ -133,6 +134,7 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 			WorkflowNodeKey:    "dispatch",
 			Attempt:            attempt,
 			TemporalWorkflowID: input.WorkflowID,
+			AgentPrompt:        analysis.RecommendedAgentPrompt,
 		}).Get(ctx, &dispatch); err != nil {
 			return err
 		}
@@ -302,7 +304,9 @@ func correlateAgentTaskOutcome(input IssueWorkflowInput, dispatch service.Dispat
 
 	eventType := "signal.mismatched_rejected"
 	message := "Agent Task outcome signal did not match the active orchestration node"
-	if outcome.PlanID == dispatch.PlanID && outcome.Attempt < dispatch.Attempt {
+	if outcome.WorkflowID == input.WorkflowID &&
+		outcome.PlanID == dispatch.PlanID &&
+		outcome.Attempt < dispatch.Attempt {
 		eventType = "signal.stale_ignored"
 		message = "Agent Task outcome signal was for a stale orchestration attempt"
 	}

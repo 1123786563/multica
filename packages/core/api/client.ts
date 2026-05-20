@@ -539,21 +539,24 @@ export class ApiClient {
     });
   }
 
-  async approveOrchestrationNode(nodeId: string): Promise<void> {
+  async approveOrchestrationNode(nodeId: string, reason?: string): Promise<void> {
     await this.fetch(`/api/orchestration/nodes/${nodeId}/approve`, {
       method: "POST",
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   }
 
-  async retryOrchestrationNode(nodeId: string): Promise<void> {
+  async retryOrchestrationNode(nodeId: string, reason?: string): Promise<void> {
     await this.fetch(`/api/orchestration/nodes/${nodeId}/retry`, {
       method: "POST",
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   }
 
-  async cancelOrchestrationPlan(planId: string): Promise<void> {
+  async cancelOrchestrationPlan(planId: string, reason?: string): Promise<void> {
     await this.fetch(`/api/orchestration/plans/${planId}/cancel`, {
       method: "POST",
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   }
 

@@ -640,7 +640,19 @@ func TestCorrelateAgentTaskOutcomeClassifiesIgnoredSignals(t *testing.T) {
 		eventType string
 	}{
 		{
-			name: "stale attempt",
+			name: "stale attempt for same task",
+			outcome: service.AgentTaskOutcomeSignalInput{
+				WorkflowID:     "wf-1",
+				PlanID:         "plan-1",
+				NodeID:         "node-1",
+				TaskID:         "task-1",
+				Attempt:        1,
+				OutcomeVersion: 1,
+			},
+			eventType: "signal.stale_ignored",
+		},
+		{
+			name: "older attempt for wrong task",
 			outcome: service.AgentTaskOutcomeSignalInput{
 				WorkflowID:     "wf-1",
 				PlanID:         "plan-1",

@@ -27,11 +27,27 @@ func BuildPrompt(task Task, provider string) string {
 	if task.QuickCreatePrompt != "" {
 		return buildQuickCreatePrompt(task)
 	}
+	if task.OrchestrationPrompt != "" {
+		return buildOrchestrationPrompt(task)
+	}
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
 	fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
 	fmt.Fprintf(&b, "If you need comment history, `multica issue comment list %s --output json` returns all comments for the issue (server caps at 2000). Pass `--since <RFC3339>` to fetch only comments newer than a known cursor.\n", task.IssueID)
+	return b.String()
+}
+
+func buildOrchestrationPrompt(task Task) string {
+	var b strings.Builder
+	b.WriteString("You are running as a local coding agent for a Multica orchestration workflow.\n\n")
+	if task.IssueID != "" {
+		fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
+	}
+	b.WriteString(strings.TrimSpace(task.OrchestrationPrompt))
+	b.WriteString("\n\nWhen finished, return only a JSON object matching Result Schema v1, with no markdown fences or prose. Required shape:\n")
+	b.WriteString(`{"schema_version":"1","summary":"...","changed_files":[],"artifacts":[],"tests":[],"risks":[],"evidence":[]}`)
+	b.WriteString("\n")
 	return b.String()
 }
 

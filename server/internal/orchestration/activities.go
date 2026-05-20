@@ -25,6 +25,12 @@ type IssueAnalyzer interface {
 
 type StaticIssueAnalyzer struct{}
 
+type EinoIssueAnalyzer struct{}
+
+func NewEinoIssueAnalyzer() EinoIssueAnalyzer {
+	return EinoIssueAnalyzer{}
+}
+
 type resultSchemaV1 struct {
 	SchemaVersion string           `json:"schema_version"`
 	Summary       string           `json:"summary"`
@@ -116,6 +122,30 @@ func (StaticIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot
 	return result, nil
 }
 
+func (EinoIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
+	contextParts := []string{issue.Title, issue.Description, issue.AcceptanceText}
+	contextText := strings.TrimSpace(strings.Join(nonEmptyStrings(contextParts), "\n\n"))
+	if contextText == "" {
+		contextText = "No issue context was provided."
+	}
+	risks := []string{}
+	if strings.TrimSpace(issue.AcceptanceText) == "" {
+		risks = append(risks, "acceptance criteria are missing or implicit")
+	}
+	if issue.Priority == "urgent" || issue.Priority == "high" {
+		risks = append(risks, "high-priority issue requires narrow validation before handoff")
+	}
+	return AnalyzeIssueResult{
+		ProblemSummary:         summarizeIssue(issue),
+		ExecutionAdvice:        "Use the issue context and acceptance criteria to make a narrow code change, preserve existing contracts, and report Result Schema v1 evidence for validation.",
+		SuspectedContext:       contextText,
+		Risks:                  risks,
+		RecommendedAgentPrompt: buildAgentPrompt(issue, input),
+		ReasonCode:             "eino_analysis_ready",
+		RecommendedAction:      "none",
+	}, nil
+}
+
 func (a ActivitySet) DispatchDaemonTask(ctx context.Context, input DispatchDaemonTaskInput) (service.DispatchAgentTaskResult, error) {
 	if a.Orchestration == nil {
 		return service.DispatchAgentTaskResult{}, fmt.Errorf("orchestration service unavailable")
@@ -125,6 +155,7 @@ func (a ActivitySet) DispatchDaemonTask(ctx context.Context, input DispatchDaemo
 		WorkflowNodeKey:    input.WorkflowNodeKey,
 		Attempt:            input.Attempt,
 		TemporalWorkflowID: input.TemporalWorkflowID,
+		AgentPrompt:        input.AgentPrompt,
 	})
 }
 
@@ -496,7 +527,16 @@ func (a ActivitySet) recordEvent(ctx context.Context, planID pgtype.UUID, eventT
 	}
 	_, err = a.DB.Exec(ctx, `
 		INSERT INTO orchestration_event (plan_id, type, source, message, details)
-		VALUES ($1, $2, $3, $4, $5)
+		SELECT $1, $2, $3, $4, $5::jsonb
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM orchestration_event
+			WHERE plan_id = $1
+				AND type = $2
+				AND source = $3
+				AND message = $4
+				AND details = $5::jsonb
+		)
 	`, planID, eventType, source, message, raw)
 	return err
 }
@@ -511,7 +551,16 @@ func (a ActivitySet) recordArtifact(ctx context.Context, planID pgtype.UUID, art
 	}
 	_, err = a.DB.Exec(ctx, `
 		INSERT INTO orchestration_artifact (plan_id, type, source, label, data)
-		VALUES ($1, $2, $3, $4, $5)
+		SELECT $1, $2, $3, $4, $5::jsonb
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM orchestration_artifact
+			WHERE plan_id = $1
+				AND type = $2
+				AND source = $3
+				AND label = $4
+				AND data = $5::jsonb
+		)
 	`, planID, artifactType, source, label, raw)
 	return err
 }

@@ -8,6 +8,9 @@ services:
       context: .
       dockerfile: Dockerfile
 
+  orchestration-worker:
+    image: multica-backend:dev
+
   frontend:
     image: multica-web:dev
     build:

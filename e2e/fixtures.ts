@@ -133,6 +133,16 @@ export class TestApiClient {
     return issue;
   }
 
+  async startIssueOrchestration(id: string) {
+    const res = await this.authedFetch(`/api/issues/${id}/orchestration/start`, {
+      method: "POST",
+    });
+    if (res.status !== 202 && res.status !== 503) {
+      throw new Error(`start orchestration failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
   async deleteIssue(id: string) {
     await this.authedFetch(`/api/issues/${id}`, { method: "DELETE" });
   }

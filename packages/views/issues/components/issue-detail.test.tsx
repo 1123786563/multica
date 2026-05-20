@@ -636,10 +636,10 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("Approval action recorded")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Request changes" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-    await waitFor(() => expect(mockApiObj.approveOrchestrationNode).toHaveBeenCalledWith("node-1"));
+    await waitFor(() => expect(mockApiObj.approveOrchestrationNode).toHaveBeenCalledWith("node-1", "Approved from Issue Detail"));
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(mockApiObj.cancelOrchestrationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() => expect(mockApiObj.cancelOrchestrationPlan).toHaveBeenCalledWith("plan-1", "Cancelled from Issue Detail"));
   });
 
   it("shows loading skeleton while data is loading", () => {

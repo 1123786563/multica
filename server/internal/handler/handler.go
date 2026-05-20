@@ -127,6 +127,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	})
 	orchestrationSvc := service.NewOrchestrationService(executor, txStarter, orchestrationStarter)
 	orchestrationSvc.TaskCanceler = taskSvc
+	orchestrationSvc.TaskNotifier = taskSvc
 	approvalClient := service.NewTemporalApprovalActionSignaler(service.TemporalStarterConfig{
 		HostPort:  cfg.TemporalHostPort,
 		Namespace: cfg.TemporalNamespace,

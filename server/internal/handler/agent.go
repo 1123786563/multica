@@ -176,6 +176,7 @@ type AgentTaskResponse struct {
 	QuickCreatePrompt       string                `json:"quick_create_prompt,omitempty"`       // user's natural-language input for quick-create tasks
 	SquadID                 string                `json:"squad_id,omitempty"`                  // for quick-create tasks where the picker was a squad; Agent is still the resolved leader
 	SquadName               string                `json:"squad_name,omitempty"`                // display name for the picker squad
+	OrchestrationPrompt     string                `json:"orchestration_prompt,omitempty"`      // analyzer-produced prompt for orchestration dispatch tasks
 	Kind                    string                `json:"kind"`                                // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "direct" — used by the activity row to label tasks that have no linked issue
 }
 
@@ -217,6 +218,14 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 	if t.WorkDir.Valid {
 		workDir = t.WorkDir.String
 	}
+	orchestrationPrompt := ""
+	if t.Context != nil {
+		var orchestrationContext service.OrchestrationTaskContext
+		if err := json.Unmarshal(t.Context, &orchestrationContext); err == nil &&
+			orchestrationContext.Type == service.OrchestrationTaskContextType {
+			orchestrationPrompt = orchestrationContext.Prompt
+		}
+	}
 	return AgentTaskResponse{
 		ID:               uuidToString(t.ID),
 		AgentID:          uuidToString(t.AgentID),
@@ -240,9 +249,10 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 		// Surface task source so the UI can distinguish issue-linked tasks
 		// from chat-spawned or autopilot-spawned ones; all three may arrive
 		// with issue_id = "" once a task has no linked issue.
-		ChatSessionID:  uuidToString(t.ChatSessionID),
-		AutopilotRunID: uuidToString(t.AutopilotRunID),
-		Kind:           computeTaskKind(t),
+		ChatSessionID:       uuidToString(t.ChatSessionID),
+		AutopilotRunID:      uuidToString(t.AutopilotRunID),
+		OrchestrationPrompt: orchestrationPrompt,
+		Kind:                computeTaskKind(t),
 	}
 }
 

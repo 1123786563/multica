@@ -85,6 +85,8 @@ export interface AgentTask {
   chat_session_id?: string;
   /** Non-empty when the task was spawned by an autopilot run. */
   autopilot_run_id?: string;
+  /** Analyzer-produced prompt for orchestration dispatch tasks. */
+  orchestration_prompt?: string;
   /** Set when this task was created as an auto-retry of a parent task. */
   parent_task_id?: string;
   /** 1-based attempt counter; >1 means this is a retry. */

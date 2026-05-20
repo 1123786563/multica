@@ -1556,7 +1556,8 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
 	// Verify the caller owns this task's workspace.
-	if _, ok := h.requireDaemonTaskAccess(w, r, taskID); !ok {
+	taskAccess, ok := h.requireDaemonTaskAccess(w, r, taskID)
+	if !ok {
 		return
 	}
 
@@ -1566,7 +1567,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, _ := json.Marshal(req)
+	result := h.taskCompleteResult(r.Context(), taskAccess.ID, req)
 	task, err := h.TaskService.CompleteTask(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir)
 	if err != nil {
 		slog.Warn("complete task failed", "task_id", taskID, "error", err)
@@ -1578,6 +1579,34 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("task completed", "task_id", taskID, "agent_id", uuidToString(task.AgentID))
 	writeJSON(w, http.StatusOK, taskToResponse(*task))
+}
+
+func (h *Handler) taskCompleteResult(ctx context.Context, taskID pgtype.UUID, req TaskCompleteRequest) []byte {
+	if h.DB != nil {
+		var linked bool
+		if err := h.DB.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM agent_task_queue
+				WHERE id = $1
+					AND orchestration_plan_id IS NOT NULL
+					AND orchestration_node_id IS NOT NULL
+			)
+		`, taskID).Scan(&linked); err == nil && linked {
+			return normalizeOrchestrationTaskOutput(req.Output)
+		}
+	}
+	result, _ := json.Marshal(req)
+	return result
+}
+
+func normalizeOrchestrationTaskOutput(output string) []byte {
+	trimmed := strings.TrimSpace(output)
+	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		return []byte(trimmed)
+	}
+	normalized, _ := json.Marshal(output)
+	return normalized
 }
 
 // emitIssueExecutedOnFirstCompletion atomically flips issue.first_executed_at

@@ -187,10 +187,10 @@ function priorityLabel(priority: string, t: ActivityT): string {
 function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationPlan; issueId: string; wsId: string }) {
   const queryClient = useQueryClient();
   const approvalAction = useMutation({
-    mutationFn: ({ action, id }: { action: string; id: string }) => {
-      if (action === "approve") return api.approveOrchestrationNode(id);
-      if (action === "retry") return api.retryOrchestrationNode(id);
-      if (action === "cancel") return api.cancelOrchestrationPlan(id);
+    mutationFn: ({ action, id, reason }: { action: string; id: string; reason: string }) => {
+      if (action === "approve") return api.approveOrchestrationNode(id, reason);
+      if (action === "retry") return api.retryOrchestrationNode(id, reason);
+      if (action === "cancel") return api.cancelOrchestrationPlan(id, reason);
       return Promise.reject(new Error(`Unsupported orchestration action: ${action}`));
     },
     onSuccess: () => {
@@ -208,7 +208,7 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
   };
   const runAction = (action: string, id: string) => {
     if (approvalAction.isPending) return;
-    approvalAction.mutate({ action, id });
+    approvalAction.mutate({ action, id, reason: orchestrationActionReason(action) });
   };
   return (
     <div className="space-y-2 pl-2">
@@ -282,6 +282,13 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
       )}
     </div>
   );
+}
+
+function orchestrationActionReason(action: string): string {
+  if (action === "approve") return "Approved from Issue Detail";
+  if (action === "retry") return "Retry requested from Issue Detail";
+  if (action === "cancel") return "Cancelled from Issue Detail";
+  return "Orchestration action from Issue Detail";
 }
 
 function formatActivity(

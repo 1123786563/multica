@@ -739,16 +739,14 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 		return nil
 	}
 
-	tx, err := s.TxStarter.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
 	var planID, nodeID pgtype.UUID
 	var attempt int
 	var workflowID string
-	if err := tx.QueryRow(ctx, `
+	linkTx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := linkTx.QueryRow(ctx, `
 		SELECT orchestration_plan_id, orchestration_node_id,
 			COALESCE(orchestration_attempt, 1), COALESCE(temporal_workflow_id, '')
 		FROM agent_task_queue
@@ -756,11 +754,41 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 			AND orchestration_plan_id IS NOT NULL
 			AND orchestration_node_id IS NOT NULL
 	`, task.ID).Scan(&planID, &nodeID, &attempt, &workflowID); err != nil {
+		linkTx.Rollback(ctx)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		return fmt.Errorf("load orchestration task link: %w", err)
 	}
+	if err := linkTx.Commit(ctx); err != nil {
+		return err
+	}
+
+	if s.OrchestrationSignaler != nil && workflowID != "" {
+		signal := AgentTaskOutcomeSignalInput{
+			WorkflowID:      workflowID,
+			PlanID:          util.UUIDToString(planID),
+			NodeID:          util.UUIDToString(nodeID),
+			TaskID:          util.UUIDToString(task.ID),
+			Attempt:         attempt,
+			OutcomeVersion:  1,
+			Status:          status,
+			ResultReference: fmt.Sprintf("agent_task_queue:%s:result", util.UUIDToString(task.ID)),
+			Error:           errMsg,
+		}
+		if len(result) > 0 {
+			signal.Result = append(json.RawMessage(nil), result...)
+		}
+		if err := s.OrchestrationSignaler.SignalAgentTaskOutcome(ctx, signal); err != nil {
+			return fmt.Errorf("signal orchestration task outcome: %w", err)
+		}
+	}
+
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
 
 	nodeStatus := status
 	if status == "failed" {
@@ -800,26 +828,6 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 		}
 	}
 
-	if s.OrchestrationSignaler == nil || workflowID == "" {
-		return nil
-	}
-	signal := AgentTaskOutcomeSignalInput{
-		WorkflowID:      workflowID,
-		PlanID:          util.UUIDToString(planID),
-		NodeID:          util.UUIDToString(nodeID),
-		TaskID:          util.UUIDToString(task.ID),
-		Attempt:         attempt,
-		OutcomeVersion:  1,
-		Status:          status,
-		ResultReference: fmt.Sprintf("agent_task_queue:%s:result", util.UUIDToString(task.ID)),
-		Error:           errMsg,
-	}
-	if len(result) > 0 {
-		signal.Result = append(json.RawMessage(nil), result...)
-	}
-	if err := s.OrchestrationSignaler.SignalAgentTaskOutcome(ctx, signal); err != nil {
-		return fmt.Errorf("signal orchestration task outcome: %w", err)
-	}
 	return nil
 }
 
@@ -1072,6 +1080,11 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 					"current_status", existing.Status,
 					"agent_id", util.UUIDToString(existing.AgentID),
 				)
+				if existing.Status == "completed" {
+					if signalErr := s.recordOrchestrationTaskOutcome(ctx, existing, "completed", existing.Result, ""); signalErr != nil {
+						return &existing, signalErr
+					}
+				}
 				return &existing, nil
 			}
 			slog.Warn("complete task failed",
@@ -1094,7 +1107,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	slog.Info("task completed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskCompleted(ctx, task)
 	if err := s.recordOrchestrationTaskOutcome(ctx, task, "completed", result, ""); err != nil {
-		slog.Warn("orchestration completion outcome failed", "task_id", util.UUIDToString(task.ID), "error", err)
+		return &task, err
 	}
 
 	// Invariant: every completed issue task must have at least one agent
@@ -1248,6 +1261,15 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 					"current_status", existing.Status,
 					"agent_id", util.UUIDToString(existing.AgentID),
 				)
+				if existing.Status == "failed" {
+					errText := ""
+					if existing.Error.Valid {
+						errText = existing.Error.String
+					}
+					if signalErr := s.recordOrchestrationTaskOutcome(ctx, existing, "failed", nil, errText); signalErr != nil {
+						return &existing, signalErr
+					}
+				}
 				return &existing, nil
 			}
 			slog.Warn("fail task failed",
@@ -1270,7 +1292,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	slog.Warn("task failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", errMsg, "failure_reason", failureReason)
 	s.captureTaskFailed(ctx, task)
 	if err := s.recordOrchestrationTaskOutcome(ctx, task, "failed", nil, errMsg); err != nil {
-		slog.Warn("orchestration failure outcome failed", "task_id", util.UUIDToString(task.ID), "error", err)
+		return &task, err
 	}
 
 	// Auto-retry eligible failures (orphan, timeout, runtime_offline,
@@ -1360,6 +1382,13 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	if !retryableReasons[reason] {
 		return nil, nil
 	}
+	linked, err := s.taskHasOrchestrationLink(ctx, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	if linked {
+		return nil, nil
+	}
 	if parent.Attempt >= parent.MaxAttempts {
 		slog.Info("task auto-retry skipped: budget exhausted",
 			"task_id", util.UUIDToString(parent.ID),
@@ -1398,6 +1427,30 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
 	s.NotifyTaskEnqueued(ctx, child)
 	return &child, nil
+}
+
+func (s *TaskService) taskHasOrchestrationLink(ctx context.Context, taskID pgtype.UUID) (bool, error) {
+	if s.TxStarter == nil {
+		return false, nil
+	}
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var linked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM agent_task_queue
+			WHERE id = $1
+				AND orchestration_plan_id IS NOT NULL
+				AND orchestration_node_id IS NOT NULL
+		)
+	`, taskID).Scan(&linked); err != nil {
+		return false, err
+	}
+	return linked, nil
 }
 
 // RerunIssue creates a fresh queued task for the agent currently assigned

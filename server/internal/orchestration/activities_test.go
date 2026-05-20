@@ -180,6 +180,16 @@ func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 	}
 }
 
+func TestNewWorkerActivitySetInjectsProductionAnalyzer(t *testing.T) {
+	activity := NewWorkerActivitySet(nil, nil, nil)
+	if activity.Analyzer == nil {
+		t.Fatal("worker activity set must inject the production Eino analyzer")
+	}
+	if _, ok := activity.Analyzer.(StaticIssueAnalyzer); ok {
+		t.Fatal("worker activity set must not use StaticIssueAnalyzer in the production path")
+	}
+}
+
 func TestAnalyzeIssueRejectsMalformedAnalyzerOutput(t *testing.T) {
 	activity := ActivitySet{
 		DB: &captureArtifactDB{},
@@ -194,6 +204,43 @@ func TestAnalyzeIssueRejectsMalformedAnalyzerOutput(t *testing.T) {
 		PlanID: "00000000-0000-0000-0000-000000000001",
 	}); err == nil {
 		t.Fatal("AnalyzeIssue should reject malformed analyzer output")
+	}
+}
+
+func TestProjectionWritesUseIdempotentInserts(t *testing.T) {
+	var eventSQL, artifactSQL string
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			lower := strings.ToLower(sql)
+			if strings.Contains(lower, "orchestration_event") {
+				eventSQL = sql
+			}
+			if strings.Contains(lower, "orchestration_artifact") {
+				artifactSQL = sql
+			}
+		}},
+		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
+			ProblemSummary:         "Adapter summary",
+			ExecutionAdvice:        "Adapter advice",
+			SuspectedContext:       "Adapter context",
+			RecommendedAgentPrompt: "Adapter prompt",
+			ReasonCode:             "adapter_ready",
+			RecommendedAction:      "none",
+		}},
+	}
+	if _, err := activity.AnalyzeIssue(t.Context(), IssueSnapshot{
+		IssueID: "00000000-0000-0000-0000-000000000004",
+		Title:   "Use adapter",
+	}, IssueWorkflowInput{
+		PlanID: "00000000-0000-0000-0000-000000000001",
+	}); err != nil {
+		t.Fatalf("AnalyzeIssue returned error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(eventSQL), "where not exists") {
+		t.Fatalf("event projection insert must be idempotent under Temporal activity retry, sql=%s", eventSQL)
+	}
+	if !strings.Contains(strings.ToLower(artifactSQL), "where not exists") {
+		t.Fatalf("artifact projection insert must be idempotent under Temporal activity retry, sql=%s", artifactSQL)
 	}
 }
 

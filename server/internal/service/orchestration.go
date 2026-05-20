@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -60,6 +61,10 @@ type TaskCanceler interface {
 	CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.AgentTaskQueue, error)
 }
 
+type TaskEnqueueNotifier interface {
+	NotifyTaskEnqueued(ctx context.Context, task db.AgentTaskQueue)
+}
+
 type IssueWorkflowStartInput struct {
 	WorkspaceID string
 	IssueID     string
@@ -102,6 +107,7 @@ type OrchestrationService struct {
 	ApprovalSignaler ApprovalActionSignaler
 	WorkflowCanceler WorkflowCanceler
 	TaskCanceler     TaskCanceler
+	TaskNotifier     TaskEnqueueNotifier
 }
 
 func NewOrchestrationService(db OrchestrationDB, tx TxStarter, starter TemporalWorkflowStarter) *OrchestrationService {
@@ -176,6 +182,7 @@ type DispatchAgentTaskInput struct {
 	WorkflowNodeKey    string
 	Attempt            int
 	TemporalWorkflowID string
+	AgentPrompt        string
 }
 
 type DispatchAgentTaskResult struct {
@@ -184,6 +191,13 @@ type DispatchAgentTaskResult struct {
 	NodeID  string
 	Attempt int
 	Reused  bool
+}
+
+const OrchestrationTaskContextType = "orchestration_dispatch"
+
+type OrchestrationTaskContext struct {
+	Type   string `json:"type"`
+	Prompt string `json:"prompt"`
 }
 
 type ApprovalActionInput struct {
@@ -228,14 +242,18 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 
 	var activeID pgtype.UUID
 	var activeStatus, activeWorkflowID string
+	var activeUpdatedAt time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT id, status, COALESCE(temporal_workflow_id, '')
+		SELECT id, status, COALESCE(temporal_workflow_id, ''), updated_at
 		FROM orchestration_plan
 		WHERE issue_id = $1 AND status IN ('starting', 'running', 'waiting_human')
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, issueID).Scan(&activeID, &activeStatus, &activeWorkflowID); err == nil {
-		if activeStatus != "starting" || activeWorkflowID != "" {
+	`, issueID).Scan(&activeID, &activeStatus, &activeWorkflowID, &activeUpdatedAt); err == nil {
+		recentStartingWithWorkflowID := activeStatus == "starting" &&
+			activeWorkflowID != "" &&
+			activeUpdatedAt.After(time.Now().Add(-30*time.Second))
+		if activeStatus != "starting" || recentStartingWithWorkflowID {
 			if err := tx.Commit(ctx); err != nil {
 				return StartOrchestrationResult{}, err
 			}
@@ -273,7 +291,6 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 			SET temporal_workflow_id = $2,
 				updated_at = now()
 			WHERE id = $1
-				AND COALESCE(temporal_workflow_id, '') = ''
 		`, planID, workflowID); err != nil {
 			return StartOrchestrationResult{}, err
 		}
@@ -446,41 +463,33 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 	if !allowed {
 		return ApprovalActionResult{}, ErrForbidden
 	}
-	if planStatus == "cancelled" {
-		if err := tx.Commit(ctx); err != nil {
-			return ApprovalActionResult{}, err
-		}
-		return ApprovalActionResult{
-			PlanID:      util.UUIDToString(input.PlanID),
-			Action:      input.Action,
-			WorkflowID:  workflowID,
-			WorkspaceID: util.UUIDToString(workspaceID),
-		}, nil
-	}
-	if planStatus != "starting" && planStatus != "running" && planStatus != "waiting_human" {
+	alreadyCancelled := planStatus == "cancelled"
+	if !alreadyCancelled && planStatus != "starting" && planStatus != "running" && planStatus != "waiting_human" {
 		return ApprovalActionResult{}, ErrInvalidState
 	}
 
-	details, err := json.Marshal(map[string]any{
-		"actor_id":   util.UUIDToString(input.ActorID),
-		"actor_type": "human",
-		"action":     input.Action,
-		"reason":     input.Reason,
-		"plan_id":    util.UUIDToString(input.PlanID),
-	})
-	if err != nil {
-		return ApprovalActionResult{}, err
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO orchestration_event (plan_id, type, source, message, details)
-		SELECT $1, 'approval.cancel', 'server', $2, $3::jsonb
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM orchestration_event
-			WHERE plan_id = $1 AND type = 'approval.cancel'
-		)
-	`, input.PlanID, "Approval action recorded", details); err != nil {
-		return ApprovalActionResult{}, fmt.Errorf("write approval audit event: %w", err)
+	if !alreadyCancelled {
+		details, err := json.Marshal(map[string]any{
+			"actor_id":   util.UUIDToString(input.ActorID),
+			"actor_type": "human",
+			"action":     input.Action,
+			"reason":     input.Reason,
+			"plan_id":    util.UUIDToString(input.PlanID),
+		})
+		if err != nil {
+			return ApprovalActionResult{}, err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO orchestration_event (plan_id, type, source, message, details)
+			SELECT $1, 'approval.cancel', 'server', $2, $3::jsonb
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM orchestration_event
+				WHERE plan_id = $1 AND type = 'approval.cancel'
+			)
+		`, input.PlanID, "Approval action recorded", details); err != nil {
+			return ApprovalActionResult{}, fmt.Errorf("write approval audit event: %w", err)
+		}
 	}
 	taskRows, err := tx.Query(ctx, `
 		SELECT id
@@ -516,30 +525,10 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 		WorkflowID:  workflowID,
 		WorkspaceID: util.UUIDToString(workspaceID),
 	}
-	if err := s.WorkflowCanceler.CancelWorkflow(ctx, result.WorkflowID); err != nil {
-		return ApprovalActionResult{}, err
-	}
-
-	if _, err := s.DB.Exec(ctx, `
-		UPDATE orchestration_plan
-		SET status = 'cancelled',
-			reason_code = 'human_cancelled',
-			recommended_action = 'none',
-			completed_at = COALESCE(completed_at, now()),
-			updated_at = now()
-		WHERE id = $1
-			AND status IN ('starting', 'running', 'waiting_human')
-	`, input.PlanID); err != nil {
-		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration plan: %w", err)
-	}
-	if _, err := s.DB.Exec(ctx, `
-		UPDATE orchestration_node
-		SET status = 'cancelled',
-			completed_at = COALESCE(completed_at, now()),
-			updated_at = now()
-		WHERE plan_id = $1 AND status IN ('pending', 'running', 'waiting_human')
-	`, input.PlanID); err != nil {
-		return ApprovalActionResult{}, fmt.Errorf("cancel orchestration nodes: %w", err)
+	if !alreadyCancelled {
+		if err := s.WorkflowCanceler.CancelWorkflow(ctx, result.WorkflowID); err != nil {
+			return ApprovalActionResult{}, err
+		}
 	}
 
 	if s.TaskCanceler != nil {
@@ -547,6 +536,29 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 			if _, err := s.TaskCanceler.CancelTask(ctx, taskID); err != nil {
 				return ApprovalActionResult{}, fmt.Errorf("cancel orchestration task: %w", err)
 			}
+		}
+	}
+	if !alreadyCancelled {
+		if _, err := s.DB.Exec(ctx, `
+			UPDATE orchestration_plan
+			SET status = 'cancelled',
+				reason_code = 'human_cancelled',
+				recommended_action = 'none',
+				completed_at = COALESCE(completed_at, now()),
+				updated_at = now()
+			WHERE id = $1
+				AND status IN ('starting', 'running', 'waiting_human')
+		`, input.PlanID); err != nil {
+			return ApprovalActionResult{}, fmt.Errorf("cancel orchestration plan: %w", err)
+		}
+		if _, err := s.DB.Exec(ctx, `
+			UPDATE orchestration_node
+			SET status = 'cancelled',
+				completed_at = COALESCE(completed_at, now()),
+				updated_at = now()
+			WHERE plan_id = $1 AND status IN ('pending', 'running', 'waiting_human')
+		`, input.PlanID); err != nil {
+			return ApprovalActionResult{}, fmt.Errorf("cancel orchestration nodes: %w", err)
 		}
 	}
 	return result, nil
@@ -682,17 +694,33 @@ func (s *OrchestrationService) DispatchAgentTask(ctx context.Context, input Disp
 		return DispatchAgentTaskResult{}, fmt.Errorf("load dispatch agent: %w", err)
 	}
 
+	var taskContext []byte
+	if prompt := strings.TrimSpace(input.AgentPrompt); prompt != "" {
+		taskContext, err = json.Marshal(OrchestrationTaskContext{
+			Type:   OrchestrationTaskContextType,
+			Prompt: prompt,
+		})
+		if err != nil {
+			return DispatchAgentTaskResult{}, err
+		}
+	}
+
 	var taskID pgtype.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (
 			agent_id, runtime_id, issue_id, status, priority,
 			orchestration_plan_id, orchestration_node_id, orchestration_attempt,
-			temporal_workflow_id
+			temporal_workflow_id, context
 		)
-		VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, $9)
 		RETURNING id
-	`, agentID, runtimeID, issueID, priorityToInt(priority), planID, nodeID, input.Attempt, input.TemporalWorkflowID).Scan(&taskID); err != nil {
+	`, agentID, runtimeID, issueID, priorityToInt(priority), planID, nodeID, input.Attempt, input.TemporalWorkflowID, taskContext).Scan(&taskID); err != nil {
 		return DispatchAgentTaskResult{}, fmt.Errorf("create orchestration task: %w", err)
+	}
+
+	createdTask, err := db.New(tx).GetAgentTask(ctx, taskID)
+	if err != nil {
+		return DispatchAgentTaskResult{}, fmt.Errorf("load created orchestration task: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -708,6 +736,9 @@ func (s *OrchestrationService) DispatchAgentTask(ctx context.Context, input Disp
 
 	if err := tx.Commit(ctx); err != nil {
 		return DispatchAgentTaskResult{}, err
+	}
+	if s.TaskNotifier != nil {
+		s.TaskNotifier.NotifyTaskEnqueued(ctx, createdTask)
 	}
 	return DispatchAgentTaskResult{
 		PlanID:  util.UUIDToString(planID),
@@ -1062,9 +1093,11 @@ func (s *OrchestrationService) projectedNodes(ctx context.Context, planID pgtype
 	nodes := make([]OrchestrationNode, len(defaults))
 	copy(nodes, defaults)
 	byKey := make(map[string]int, len(nodes))
+	replaced := make(map[string]bool, len(nodes))
 	for i := range nodes {
 		byKey[nodes[i].WorkflowNodeKey] = i
 	}
+	sawProjectedNode := false
 	for rows.Next() {
 		var node OrchestrationNode
 		var id pgtype.UUID
@@ -1081,19 +1114,29 @@ func (s *OrchestrationService) projectedNodes(ctx context.Context, planID pgtype
 		}
 		node.ID = util.UUIDToString(id)
 		node.NodeKey = node.WorkflowNodeKey
-		if idx, ok := byKey[node.WorkflowNodeKey]; ok {
+		sawProjectedNode = true
+		if idx, ok := byKey[node.WorkflowNodeKey]; ok && !replaced[node.WorkflowNodeKey] {
 			if node.Title == "" {
 				node.Title = nodes[idx].Title
 			}
 			node.AvailableActions = availableNodeActions(node, canAct)
 			nodes[idx] = node
+			replaced[node.WorkflowNodeKey] = true
 			continue
+		}
+		if node.Title == "" {
+			node.Title = orchestrationNodeTitle(node.WorkflowNodeKey)
 		}
 		node.AvailableActions = availableNodeActions(node, canAct)
 		nodes = append(nodes, node)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if sawProjectedNode && len(nodes) > 0 && nodes[0].ID == "analyze" && nodes[0].ReasonCode == "temporal_unavailable" {
+		nodes[0].Status = "pending"
+		nodes[0].ReasonCode = ""
+		nodes[0].RecommendedAction = "none"
 	}
 	return nodes, nil
 }
