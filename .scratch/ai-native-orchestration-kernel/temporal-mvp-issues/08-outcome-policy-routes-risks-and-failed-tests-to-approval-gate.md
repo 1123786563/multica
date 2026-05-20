@@ -16,15 +16,14 @@ This slice should make `waiting_human` visible through the read API and Linear O
 
 ## Acceptance criteria
 
-- [ ] Outcome Policy combines validation outcome, advisory Eino review, risks, failed tests, missing evidence, approval state, and retry budget.
-- [ ] Failed tests route to Approval Gate instead of automatic retry.
-- [ ] Non-empty risks route to Approval Gate instead of automatic retry.
-- [ ] High-risk advisory review concerns route to Approval Gate without letting Eino directly decide final outcome.
-- [ ] Approval Gate projection includes reason, recommended action, failed tests or risks summary, and retry budget.
-- [ ] Linear Orchestration Panel shows `waiting_human` state and available server-projected actions.
-- [ ] Tests cover failed tests, risks, high-risk review, retry exhaustion, and positive Eino review not overriding policy.
+- [x] Outcome Policy combines validation outcome, advisory Eino review, risks, failed tests, missing evidence, approval state, and retry budget.
+- [x] Failed tests route to Approval Gate instead of automatic retry.
+- [x] Non-empty risks route to Approval Gate instead of automatic retry.
+- [x] High-risk advisory review concerns route to Approval Gate without letting Eino directly decide final outcome.
+- [x] Approval Gate projection includes reason, recommended action, failed tests or risks summary, and retry budget.
+- [x] Linear Orchestration Panel shows `waiting_human` state and available server-projected actions.
+- [x] Tests cover failed tests, risks, high-risk review, retry exhaustion, and positive Eino review not overriding policy.
 
 ## Blocked by
 
 - 07-deterministic-result-validation-and-evidence-insufficient-retry
-

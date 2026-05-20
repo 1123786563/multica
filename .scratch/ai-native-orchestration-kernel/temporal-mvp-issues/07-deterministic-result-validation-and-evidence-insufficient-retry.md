@@ -16,15 +16,14 @@ Malformed schema and insufficient evidence may trigger one bounded retry attempt
 
 ## Acceptance criteria
 
-- [ ] Result Schema v1 parser validates schema version, summary, changed files, artifacts, tests, risks, and evidence references.
-- [ ] Unknown schema versions and malformed payloads become evidence insufficient rather than successful completion.
-- [ ] `validate_result` is deterministic and does not call daemon, shell, CLI, Eino, HTTP, or filesystem side effects.
-- [ ] Evidence insufficient or malformed schema can auto-retry only while retry budget remains.
-- [ ] MVP node retry allows at most two attempts total.
-- [ ] Prior evidence summary is preserved across retry attempts.
-- [ ] Tests cover valid schema, malformed schema, unknown version, missing evidence, retry scheduling, retry budget exhaustion, and no external execution from validation.
+- [x] Result Schema v1 parser validates schema version, summary, changed files, artifacts, tests, risks, and evidence references.
+- [x] Unknown schema versions and malformed payloads become evidence insufficient rather than successful completion.
+- [x] `validate_result` is deterministic and does not call daemon, shell, CLI, Eino, HTTP, or filesystem side effects.
+- [x] Evidence insufficient or malformed schema can auto-retry only while retry budget remains.
+- [x] MVP node retry allows at most two attempts total.
+- [x] Prior evidence summary is preserved across retry attempts.
+- [x] Tests cover valid schema, malformed schema, unknown version, missing evidence, retry scheduling, retry budget exhaustion, and no external execution from validation.
 
 ## Blocked by
 
 - 05-daemonbridge-dispatches-agent-task-and-waits-for-outcome-signal
-

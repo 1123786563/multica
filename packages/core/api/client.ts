@@ -539,6 +539,12 @@ export class ApiClient {
     });
   }
 
+  async startIssueOrchestration(id: string): Promise<void> {
+    await this.fetch(`/api/issues/${id}/orchestration/start`, {
+      method: "POST",
+    });
+  }
+
   async approveOrchestrationNode(nodeId: string, reason?: string): Promise<void> {
     await this.fetch(`/api/orchestration/nodes/${nodeId}/approve`, {
       method: "POST",

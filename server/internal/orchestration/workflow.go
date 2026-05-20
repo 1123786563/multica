@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/workflow"
@@ -53,6 +54,21 @@ type AnalyzeIssueResult struct {
 	RecommendedAction      string
 }
 
+type ResultArtifactRef struct {
+	Label string `json:"label"`
+	Ref   string `json:"ref"`
+}
+
+type ResultTestRef struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type ResultEvidenceRef struct {
+	Type string `json:"type"`
+	Ref  string `json:"ref"`
+}
+
 type DispatchDaemonTaskInput struct {
 	PlanID             string
 	WorkflowNodeKey    string
@@ -81,16 +97,22 @@ type SignalAuditInput struct {
 }
 
 type ValidateOutcomeResult struct {
-	Status             string
-	ReasonCode         string
-	RecommendedAction  string
-	NeedsHumanReview   bool
-	ShouldRetry        bool
-	TerminalPlanStatus string
-	ProjectionSummary  string
-	ProjectionDetail   string
-	FailedTests        []string
-	Risks              []string
+	Status               string
+	ReasonCode           string
+	RecommendedAction    string
+	NeedsHumanReview     bool
+	ShouldRetry          bool
+	TerminalPlanStatus   string
+	ProjectionSummary    string
+	ProjectionDetail     string
+	FailedTests          []string
+	Risks                []string
+	ResultSummary        string
+	ChangedFiles         []string
+	Artifacts            []ResultArtifactRef
+	Tests                []ResultTestRef
+	Evidence             []ResultEvidenceRef
+	PriorEvidenceSummary string
 }
 
 type ReviewOutcomeResult struct {
@@ -174,6 +196,7 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 		if validation.ShouldRetry && attempt < maxNodeAttempts {
 			validation.Status = "failed"
 			validation.TerminalPlanStatus = "running"
+			validation.PriorEvidenceSummary = buildPriorEvidenceSummary(validation)
 			if err := workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil); err != nil {
 				return err
 			}
@@ -223,6 +246,35 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 		return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
 	}
 	return nil
+}
+
+func buildPriorEvidenceSummary(validation ValidateOutcomeResult) string {
+	parts := []string{}
+	if detail := strings.TrimSpace(validation.ProjectionDetail); detail != "" {
+		parts = append(parts, "reason: "+detail)
+	}
+	if summary := strings.TrimSpace(validation.ResultSummary); summary != "" {
+		parts = append(parts, "summary: "+summary)
+	}
+	if len(validation.ChangedFiles) > 0 {
+		parts = append(parts, "changed_files: "+strings.Join(validation.ChangedFiles, ", "))
+	}
+	if len(validation.Evidence) > 0 {
+		refs := make([]string, 0, len(validation.Evidence))
+		for _, evidence := range validation.Evidence {
+			if ref := strings.TrimSpace(evidence.Ref); ref != "" {
+				if typ := strings.TrimSpace(evidence.Type); typ != "" {
+					refs = append(refs, typ+":"+ref)
+				} else {
+					refs = append(refs, ref)
+				}
+			}
+		}
+		if len(refs) > 0 {
+			parts = append(parts, "evidence: "+strings.Join(refs, ", "))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func applyOutcomePolicy(validation ValidateOutcomeResult, review ReviewOutcomeResult) ValidateOutcomeResult {

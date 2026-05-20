@@ -208,6 +208,7 @@ const mockApiObj = vi.hoisted(() => ({
   getActiveTasksForIssue: vi.fn().mockResolvedValue({ tasks: [] }),
   listTasksByIssue: vi.fn().mockResolvedValue([]),
   getIssueOrchestration: vi.fn().mockResolvedValue({ plans: [] }),
+  startIssueOrchestration: vi.fn().mockResolvedValue({}),
   approveOrchestrationNode: vi.fn().mockResolvedValue({}),
   retryOrchestrationNode: vi.fn().mockResolvedValue({}),
   cancelOrchestrationPlan: vi.fn().mockResolvedValue({}),
@@ -508,6 +509,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [] });
     mockApiObj.listTasksByIssue.mockResolvedValue([]);
     mockApiObj.getIssueOrchestration.mockResolvedValue({ plans: [] });
+    mockApiObj.startIssueOrchestration.mockResolvedValue({});
     mockApiObj.listMembers.mockResolvedValue([
       { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
@@ -562,7 +564,19 @@ describe("IssueDetail (shared)", () => {
               details: { signal_task_id: "old-task", expected_task_id: "task-1" },
             },
           ],
-          artifacts: [],
+          artifacts: [
+            {
+              id: "artifact-1",
+              type: "result_evidence",
+              source: "agent",
+              label: "agent result evidence",
+              data: {
+                summary: "Implemented fix",
+                changed_files: ["server/internal/orchestration/activities.go"],
+                evidence: [{ type: "test", ref: "go test ./internal/orchestration" }],
+              },
+            },
+          ],
         },
       ],
     });
@@ -576,6 +590,20 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("Dispatch agent task")).toBeInTheDocument();
     expect(screen.getByText("Audit trail")).toBeInTheDocument();
     expect(screen.getByText("signal.mismatched_rejected")).toBeInTheDocument();
+    expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    expect(screen.getByText("agent result evidence")).toBeInTheDocument();
+    expect(screen.getByText("Implemented fix")).toBeInTheDocument();
+    expect(screen.getByText("server/internal/orchestration/activities.go")).toBeInTheDocument();
+  });
+
+  it("lets users start orchestration when no plan exists", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({ plans: [] });
+
+    renderIssueDetail();
+
+    expect(await screen.findByRole("button", { name: "Start orchestration" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start orchestration" }));
+    await waitFor(() => expect(mockApiObj.startIssueOrchestration).toHaveBeenCalledWith("issue-1"));
   });
 
   it("renders approval gate state with server-projected actions", async () => {

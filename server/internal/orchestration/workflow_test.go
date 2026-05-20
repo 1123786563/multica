@@ -3,6 +3,7 @@ package orchestration
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,6 +314,112 @@ func TestIssueWorkflowRetriesEvidenceInsufficientOnceBeforeFinalizing(t *testing
 			OutcomeVersion: 1,
 			Status:         "completed",
 			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		})
+	}, 2*time.Second)
+
+	env.ExecuteWorkflow(IssueWorkflow, IssueWorkflowInput{
+		WorkspaceID: "ws-1",
+		IssueID:     "issue-1",
+		PlanID:      "plan-1",
+		WorkflowID:  "wf-1",
+	})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("workflow did not complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	env.AssertExpectations(t)
+}
+
+func TestIssueWorkflowRetryProjectionIncludesPriorEvidenceSummary(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	registerIssueWorkflowTestActivities(env)
+
+	env.OnActivity(LoadIssueActivityName, mock.Anything, mock.Anything).Return(IssueSnapshot{
+		IssueID:     "issue-1",
+		WorkspaceID: "ws-1",
+		Title:       "Fix the orchestration path",
+	}, nil)
+	env.OnActivity(AnalyzeIssueActivityName, mock.Anything, mock.Anything, mock.Anything).Return(AnalyzeIssueResult{
+		ProblemSummary:         "Fix the orchestration path",
+		ExecutionAdvice:        "Keep the flow deterministic",
+		RecommendedAgentPrompt: "Implement the orchestration fix",
+		ReasonCode:             "analysis_ready",
+		RecommendedAction:      "none",
+	}, nil)
+	env.OnActivity(DispatchTaskActivityName, mock.Anything, mock.Anything).Return(service.DispatchAgentTaskResult{
+		PlanID:  "plan-1",
+		TaskID:  "task-1",
+		NodeID:  "node-1",
+		Attempt: 1,
+	}, nil).Once()
+	env.OnActivity(ValidateOutcomeActivityName, mock.Anything, mock.Anything).Return(ValidateOutcomeResult{
+		Status:             "waiting_human",
+		ReasonCode:         "evidence_insufficient",
+		RecommendedAction:  "retry",
+		ShouldRetry:        true,
+		TerminalPlanStatus: "waiting_human",
+		ProjectionDetail:   "missing evidence",
+		ResultSummary:      "partial result",
+		ChangedFiles:       []string{"server/a.go"},
+		Evidence:           []ResultEvidenceRef{{Type: "log", Ref: "task log"}},
+	}, nil).Once()
+	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(ReviewOutcomeResult{Summary: "review"}, nil).Once()
+	env.OnActivity(SummarizeOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(SummarizeOutcomeResult{Summary: "summary"}, nil).Once()
+	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
+		return validation.ShouldRetry &&
+			validation.TerminalPlanStatus == "running" &&
+			strings.Contains(validation.PriorEvidenceSummary, "partial result") &&
+			strings.Contains(validation.PriorEvidenceSummary, "server/a.go")
+	}), mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(dispatch service.DispatchAgentTaskResult) bool {
+		return dispatch.Attempt == 1 && dispatch.TaskID == "task-1"
+	}), mock.Anything).Return(nil).Once()
+	env.OnActivity(DispatchTaskActivityName, mock.Anything, mock.Anything).Return(service.DispatchAgentTaskResult{
+		PlanID:  "plan-1",
+		TaskID:  "task-2",
+		NodeID:  "node-2",
+		Attempt: 2,
+	}, nil).Once()
+	env.OnActivity(ValidateOutcomeActivityName, mock.Anything, mock.Anything).Return(ValidateOutcomeResult{
+		Status:             "completed",
+		RecommendedAction:  "none",
+		TerminalPlanStatus: "completed",
+		ProjectionDetail:   "structured result validated",
+	}, nil).Once()
+	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(ReviewOutcomeResult{Summary: "review clean"}, nil).Once()
+	env.OnActivity(SummarizeOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(SummarizeOutcomeResult{Summary: "summary"}, nil).Once()
+	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
+		return validation.TerminalPlanStatus == "completed"
+	}), mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(dispatch service.DispatchAgentTaskResult) bool {
+		return dispatch.Attempt == 2 && dispatch.TaskID == "task-2"
+	}), mock.Anything).Return(nil).Once()
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"partial result","changed_files":["server/a.go"],"artifacts":[],"tests":[],"risks":[],"evidence":[{"type":"log","ref":"task log"}]}`),
+		})
+	}, time.Second)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-2",
+			TaskID:         "task-2",
+			Attempt:        2,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
 		})
 	}, 2*time.Second)
 

@@ -280,6 +280,36 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
           ))}
         </div>
       )}
+      {plan.artifacts.length > 0 && (
+        <div className="space-y-1 border-t border-border/60 pt-2">
+          <div className="px-2 text-[11px] font-medium text-muted-foreground">Artifacts</div>
+          {plan.artifacts.map((artifact) => (
+            <div key={artifact.id} className="rounded-md px-2 py-1 text-[11px] text-muted-foreground">
+              <div className="font-medium text-foreground">{artifact.label || artifact.type}</div>
+              <ArtifactDetails data={artifact.data} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArtifactDetails({ data }: { data: Record<string, unknown> }) {
+  const summary = typeof data.summary === "string" ? data.summary : "";
+  const changedFiles = Array.isArray(data.changed_files)
+    ? data.changed_files.filter((value): value is string => typeof value === "string")
+    : [];
+  return (
+    <div className="space-y-0.5">
+      {summary && <div className="line-clamp-2">{summary}</div>}
+      {changedFiles.length > 0 && (
+        <div className="space-y-0.5">
+          {changedFiles.slice(0, 3).map((file) => (
+            <div key={file} className="truncate font-mono text-[10px]">{file}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -707,6 +737,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
   // Issue navigation — read from TQ list cache
   const wsId = useWorkspaceId();
+  const queryClient = useQueryClient();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   // Workspace owners and admins moderate any comment authored by anyone
@@ -1032,6 +1063,16 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     enabled: !!issue,
   });
   const activeOrchestrationPlan = orchestration?.plans[0] ?? null;
+  const canStartOrchestration = !!orchestration && !activeOrchestrationPlan;
+  const startOrchestration = useMutation({
+    mutationFn: () => api.startIssueOrchestration(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: issueKeys.orchestration(wsId, id) });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to start orchestration");
+    },
+  });
 
   // Attachments uploaded against this issue. Drives the description
   // editor's click-time fresh-sign download: NodeViews match
@@ -1474,7 +1515,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         </div>}
       </div>
 
-      {activeOrchestrationPlan && (
+      {activeOrchestrationPlan ? (
         <div>
           <button
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${orchestrationOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
@@ -1485,7 +1526,20 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           </button>
           {orchestrationOpen && <OrchestrationPanel plan={activeOrchestrationPlan} issueId={id} wsId={wsId} />}
         </div>
-      )}
+      ) : canStartOrchestration ? (
+        <div className="pl-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={startOrchestration.isPending}
+            onClick={() => startOrchestration.mutate()}
+            className="h-7 text-xs"
+          >
+            Start orchestration
+          </Button>
+        </div>
+      ) : null}
 
       {/* Execution log — active runs + collapsed past runs. Self-contained;
           owns its own collapse state and WS subscriptions. Hides itself

@@ -32,28 +32,13 @@ func NewEinoIssueAnalyzer() EinoIssueAnalyzer {
 }
 
 type resultSchemaV1 struct {
-	SchemaVersion string           `json:"schema_version"`
-	Summary       string           `json:"summary"`
-	ChangedFiles  []string         `json:"changed_files"`
-	Artifacts     []resultRef      `json:"artifacts"`
-	Tests         []resultTest     `json:"tests"`
-	Risks         []string         `json:"risks"`
-	Evidence      []resultEvidence `json:"evidence"`
-}
-
-type resultRef struct {
-	Label string `json:"label"`
-	Ref   string `json:"ref"`
-}
-
-type resultTest struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-}
-
-type resultEvidence struct {
-	Type string `json:"type"`
-	Ref  string `json:"ref"`
+	SchemaVersion string              `json:"schema_version"`
+	Summary       string              `json:"summary"`
+	ChangedFiles  []string            `json:"changed_files"`
+	Artifacts     []ResultArtifactRef `json:"artifacts"`
+	Tests         []ResultTestRef     `json:"tests"`
+	Risks         []string            `json:"risks"`
+	Evidence      []ResultEvidenceRef `json:"evidence"`
 }
 
 func (a ActivitySet) LoadIssue(ctx context.Context, input IssueWorkflowInput) (IssueSnapshot, error) {
@@ -207,6 +192,11 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 	if strings.TrimSpace(parsed.Summary) == "" || len(parsed.Evidence) == 0 {
 		return retryableEvidenceResult(input, "structured result is missing required evidence"), nil
 	}
+	changedFiles := nonEmptyStrings(parsed.ChangedFiles)
+	if len(changedFiles) == 0 {
+		return retryableEvidenceResult(input, "structured result is missing changed files"), nil
+	}
+	parsed.ChangedFiles = changedFiles
 	for _, artifact := range parsed.Artifacts {
 		if strings.TrimSpace(artifact.Label) == "" || strings.TrimSpace(artifact.Ref) == "" {
 			return retryableEvidenceResult(input, "structured result contains incomplete artifact reference"), nil
@@ -218,10 +208,13 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 		}
 	}
 	for _, test := range parsed.Tests {
+		if strings.TrimSpace(test.Name) == "" || strings.TrimSpace(test.Status) == "" {
+			return retryableEvidenceResult(input, "structured result contains incomplete test result"), nil
+		}
 		status := strings.ToLower(strings.TrimSpace(test.Status))
 		if status != "" && status != "passed" && status != "skipped" {
 			failedTests := failedTestNames(parsed.Tests)
-			return ValidateOutcomeResult{
+			result := ValidateOutcomeResult{
 				Status:             "waiting_human",
 				ReasonCode:         "tests_failed",
 				RecommendedAction:  "review",
@@ -230,12 +223,14 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 				ProjectionSummary:  input.Analysis.ProblemSummary,
 				ProjectionDetail:   "structured result reported failed tests: " + strings.Join(failedTests, ", "),
 				FailedTests:        failedTests,
-			}, nil
+			}
+			attachResultSchemaDetails(&result, parsed)
+			return result, nil
 		}
 	}
 	if len(parsed.Risks) > 0 {
 		risks := nonEmptyStrings(parsed.Risks)
-		return ValidateOutcomeResult{
+		result := ValidateOutcomeResult{
 			Status:             "waiting_human",
 			ReasonCode:         "risks_present",
 			RecommendedAction:  "review",
@@ -244,9 +239,11 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 			ProjectionSummary:  input.Analysis.ProblemSummary,
 			ProjectionDetail:   "structured result reported risks: " + strings.Join(risks, ", "),
 			Risks:              risks,
-		}, nil
+		}
+		attachResultSchemaDetails(&result, parsed)
+		return result, nil
 	}
-	return ValidateOutcomeResult{
+	result := ValidateOutcomeResult{
 		Status:             "completed",
 		ReasonCode:         "",
 		RecommendedAction:  "none",
@@ -254,10 +251,12 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 		TerminalPlanStatus: "completed",
 		ProjectionSummary:  input.Analysis.ProblemSummary,
 		ProjectionDetail:   "structured result validated",
-	}, nil
+	}
+	attachResultSchemaDetails(&result, parsed)
+	return result, nil
 }
 
-func failedTestNames(tests []resultTest) []string {
+func failedTestNames(tests []ResultTestRef) []string {
 	names := make([]string, 0)
 	for _, test := range tests {
 		status := strings.ToLower(strings.TrimSpace(test.Status))
@@ -271,6 +270,14 @@ func failedTestNames(tests []resultTest) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func attachResultSchemaDetails(result *ValidateOutcomeResult, parsed resultSchemaV1) {
+	result.ResultSummary = strings.TrimSpace(parsed.Summary)
+	result.ChangedFiles = nonEmptyStrings(parsed.ChangedFiles)
+	result.Artifacts = parsed.Artifacts
+	result.Tests = parsed.Tests
+	result.Evidence = parsed.Evidence
 }
 
 func nonEmptyStrings(values []string) []string {
@@ -392,9 +399,10 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 
 	if validation.ShouldRetry {
 		if err := a.recordEvent(ctx, planID, "workflow.retrying", "system", validation.ProjectionDetail, map[string]any{
-			"analysis":           analysis.ProblemSummary,
-			"reason_code":        validation.ReasonCode,
-			"recommended_action": validation.RecommendedAction,
+			"analysis":               analysis.ProblemSummary,
+			"reason_code":            validation.ReasonCode,
+			"recommended_action":     validation.RecommendedAction,
+			"prior_evidence_summary": validation.PriorEvidenceSummary,
 			"retry_budget": map[string]any{
 				"used": dispatch.Attempt,
 				"max":  maxNodeAttempts,
@@ -404,12 +412,13 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 		}
 	} else if validation.NeedsHumanReview {
 		if err := a.recordEvent(ctx, planID, "workflow.waiting_human", "system", validation.ProjectionDetail, map[string]any{
-			"analysis":           analysis.ProblemSummary,
-			"review":             review.Summary,
-			"reason_code":        validation.ReasonCode,
-			"recommended_action": validation.RecommendedAction,
-			"failed_tests":       validation.FailedTests,
-			"risks":              validation.Risks,
+			"analysis":               analysis.ProblemSummary,
+			"review":                 review.Summary,
+			"reason_code":            validation.ReasonCode,
+			"recommended_action":     validation.RecommendedAction,
+			"failed_tests":           validation.FailedTests,
+			"risks":                  validation.Risks,
+			"prior_evidence_summary": validation.PriorEvidenceSummary,
 			"retry_budget": map[string]any{
 				"used": dispatch.Attempt,
 				"max":  maxNodeAttempts,
@@ -460,6 +469,11 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 			return err
 		}
 	}
+	if payload := resultEvidencePayload(validation); payload != nil {
+		if err := a.recordArtifact(ctx, planID, "result_evidence", "agent", "agent result evidence", payload); err != nil {
+			return err
+		}
+	}
 	if err := a.recordArtifact(ctx, planID, "review_handoff", "system", "review handoff summary", map[string]any{
 		"summary":            summary.Summary,
 		"trace_ref":          summary.TraceRef,
@@ -472,6 +486,23 @@ func (a ActivitySet) FinalizeWorkflow(ctx context.Context, validation ValidateOu
 	}
 
 	return nil
+}
+
+func resultEvidencePayload(validation ValidateOutcomeResult) map[string]any {
+	if strings.TrimSpace(validation.ResultSummary) == "" &&
+		len(validation.ChangedFiles) == 0 &&
+		len(validation.Artifacts) == 0 &&
+		len(validation.Tests) == 0 &&
+		len(validation.Evidence) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"summary":       validation.ResultSummary,
+		"changed_files": validation.ChangedFiles,
+		"artifacts":     validation.Artifacts,
+		"tests":         validation.Tests,
+		"evidence":      validation.Evidence,
+	}
 }
 
 func (a ActivitySet) ProjectAnalysis(ctx context.Context, input IssueWorkflowInput, issue IssueSnapshot, analysis AnalyzeIssueResult) error {

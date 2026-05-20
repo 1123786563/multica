@@ -548,6 +548,68 @@ func TestValidateOutcomeAcceptsResultSchemaV1WithEvidence(t *testing.T) {
 	if result.Status != "completed" || result.TerminalPlanStatus != "completed" {
 		t.Fatalf("validation result = %+v, want completed", result)
 	}
+	if result.ResultSummary != "done" || len(result.ChangedFiles) != 1 || result.ChangedFiles[0] != "server/a.go" {
+		t.Fatalf("validation did not preserve result summary/changed files: %+v", result)
+	}
+	if len(result.Artifacts) != 1 || result.Artifacts[0].Label != "diff" || result.Artifacts[0].Ref != "artifact://diff" {
+		t.Fatalf("validation did not preserve result artifacts: %+v", result.Artifacts)
+	}
+	if len(result.Evidence) != 1 || result.Evidence[0].Type != "test" || result.Evidence[0].Ref != "go test ./..." {
+		t.Fatalf("validation did not preserve result evidence: %+v", result.Evidence)
+	}
+}
+
+func TestFinalizeWorkflowProjectsResultEvidenceArtifact(t *testing.T) {
+	var sawResultEvidence bool
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			if !strings.Contains(strings.ToLower(sql), "orchestration_artifact") {
+				return
+			}
+			if len(args) >= 5 && args[1] == "result_evidence" {
+				sawResultEvidence = true
+				raw, ok := args[4].([]byte)
+				if !ok {
+					t.Fatalf("result evidence payload type = %T, want []byte", args[4])
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					t.Fatalf("decode result evidence payload: %v", err)
+				}
+				if payload["summary"] != "done" {
+					t.Fatalf("result evidence summary = %v, want done", payload["summary"])
+				}
+			}
+		}},
+	}
+
+	err := activity.FinalizeWorkflow(t.Context(), ValidateOutcomeResult{
+		Status:             "completed",
+		TerminalPlanStatus: "completed",
+		ResultSummary:      "done",
+		ChangedFiles:       []string{"server/a.go"},
+		Artifacts:          []ResultArtifactRef{{Label: "diff", Ref: "artifact://diff"}},
+		Evidence:           []ResultEvidenceRef{{Type: "test", Ref: "go test ./..."}},
+		Tests:              []ResultTestRef{{Name: "go test ./...", Status: "passed"}},
+	}, ReviewOutcomeResult{Summary: "review clean"}, SummarizeOutcomeResult{
+		Summary:  "done",
+		TraceRef: "plan/node/task",
+	}, IssueWorkflowInput{
+		PlanID:  "00000000-0000-0000-0000-000000000001",
+		IssueID: "00000000-0000-0000-0000-000000000004",
+	}, IssueSnapshot{
+		IssueID: "00000000-0000-0000-0000-000000000004",
+	}, AnalyzeIssueResult{ProblemSummary: "Fix issue"}, service.DispatchAgentTaskResult{
+		PlanID: "00000000-0000-0000-0000-000000000001",
+		NodeID: "00000000-0000-0000-0000-000000000002",
+		TaskID: "00000000-0000-0000-0000-000000000003",
+	}, service.AgentTaskOutcomeSignalInput{})
+	if err != nil {
+		t.Fatalf("FinalizeWorkflow returned error: %v", err)
+	}
+	if !sawResultEvidence {
+		t.Fatal("FinalizeWorkflow must project Result Schema v1 evidence as an artifact")
+	}
 }
 
 func TestValidateOutcomeRejectsMissingChangedFiles(t *testing.T) {
@@ -578,6 +640,34 @@ func TestValidateOutcomeRejectsMissingChangedFiles(t *testing.T) {
 	}
 }
 
+func TestValidateOutcomeRejectsEmptyChangedFiles(t *testing.T) {
+	result, err := (ActivitySet{}).ValidateOutcome(t.Context(), ValidateOutcomeInput{
+		Outcome: service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":[],"artifacts":[],"tests":[{"name":"go test ./...","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		},
+		Dispatch: service.DispatchAgentTaskResult{
+			PlanID:  "plan-1",
+			NodeID:  "node-1",
+			TaskID:  "task-1",
+			Attempt: 1,
+		},
+		Analysis: AnalyzeIssueResult{ProblemSummary: "Fix issue"},
+	})
+	if err != nil {
+		t.Fatalf("ValidateOutcome returned error: %v", err)
+	}
+	if result.ReasonCode != "evidence_insufficient" || !result.ShouldRetry {
+		t.Fatalf("empty changed_files should be evidence_insufficient retryable result: %+v", result)
+	}
+}
+
 func TestValidateOutcomeRejectsIncompleteArtifacts(t *testing.T) {
 	result, err := (ActivitySet{}).ValidateOutcome(t.Context(), ValidateOutcomeInput{
 		Outcome: service.AgentTaskOutcomeSignalInput{
@@ -603,6 +693,34 @@ func TestValidateOutcomeRejectsIncompleteArtifacts(t *testing.T) {
 	}
 	if result.ReasonCode != "evidence_insufficient" || !result.ShouldRetry {
 		t.Fatalf("incomplete artifacts should be evidence_insufficient retryable result: %+v", result)
+	}
+}
+
+func TestValidateOutcomeRejectsIncompleteTests(t *testing.T) {
+	result, err := (ActivitySet{}).ValidateOutcome(t.Context(), ValidateOutcomeInput{
+		Outcome: service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-1",
+			TaskID:         "task-1",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"","status":""}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`),
+		},
+		Dispatch: service.DispatchAgentTaskResult{
+			PlanID:  "plan-1",
+			NodeID:  "node-1",
+			TaskID:  "task-1",
+			Attempt: 1,
+		},
+		Analysis: AnalyzeIssueResult{ProblemSummary: "Fix issue"},
+	})
+	if err != nil {
+		t.Fatalf("ValidateOutcome returned error: %v", err)
+	}
+	if result.ReasonCode != "evidence_insufficient" || !result.ShouldRetry {
+		t.Fatalf("incomplete tests should be evidence_insufficient retryable result: %+v", result)
 	}
 }
 

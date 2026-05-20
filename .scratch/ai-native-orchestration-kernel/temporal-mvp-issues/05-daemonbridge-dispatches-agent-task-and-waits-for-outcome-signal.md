@@ -16,15 +16,14 @@ This slice should prove the happy path where daemon task completion records outc
 
 ## Acceptance criteria
 
-- [ ] Dispatch Activity creates or reuses exactly one Agent Task for the current run, node, and attempt.
-- [ ] The Agent Task is linked to orchestration plan, node, attempt, task identity, and Temporal Workflow identity.
-- [ ] Dispatch Activity returns after task creation/linking and does not poll for completion.
-- [ ] Existing task completion/failure/cancellation APIs can send the corresponding Temporal Signal or Update.
-- [ ] A matching completed-task Signal advances the Workflow to the next node.
-- [ ] Tests cover dispatch idempotency, happy-path completion Signal, projection update, and no polling wait inside the Activity.
+- [x] Dispatch Activity creates or reuses exactly one Agent Task for the current run, node, and attempt.
+- [x] The Agent Task is linked to orchestration plan, node, attempt, task identity, and Temporal Workflow identity.
+- [x] Dispatch Activity returns after task creation/linking and does not poll for completion.
+- [x] Existing task completion/failure/cancellation APIs can send the corresponding Temporal Signal or Update.
+- [x] A matching completed-task Signal advances the Workflow to the next node.
+- [x] Tests cover dispatch idempotency, happy-path completion Signal, projection update, and no polling wait inside the Activity.
 
 ## Blocked by
 
 - 03-projection-activities-render-fixed-workflow-progress
 - 04-eino-analyze-activity-produces-coding-guidance
-

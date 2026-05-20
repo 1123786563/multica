@@ -2783,3 +2783,29 @@ func TestGetTaskGCCheck(t *testing.T) {
 		t.Fatal("expected completed_at to be set for completed task")
 	}
 }
+
+func TestNormalizeOrchestrationTaskOutput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"valid JSON object", `{"key": "value"}`},
+		{"valid JSON with nested", `{"schema_version":"1","summary":"test","changed_files":[],"artifacts":[],"tests":[],"risks":[],"evidence":[]}`},
+		{"plain text output", "I implemented the feature.\n\nFiles changed:\n- auth.go"},
+		{"output with null bytes", "before\x00after"},
+		{"empty output", ""},
+		{"whitespace only", "   \n\t  "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := normalizeOrchestrationTaskOutput(tt.input)
+			if !json.Valid(result) {
+				t.Fatalf("result is not valid JSON: %q", string(result))
+			}
+			if bytes.Contains(result, []byte{0x00}) {
+				t.Fatalf("result contains null byte")
+			}
+		})
+	}
+}

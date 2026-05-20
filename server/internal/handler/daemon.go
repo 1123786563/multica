@@ -1603,7 +1603,14 @@ func (h *Handler) taskCompleteResult(ctx context.Context, taskID pgtype.UUID, re
 func normalizeOrchestrationTaskOutput(output string) []byte {
 	trimmed := strings.TrimSpace(output)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		return []byte(trimmed)
+		// Re-marshal through json.Marshal to strip null bytes and other
+		// characters that PostgreSQL JSONB rejects (json.Valid only checks
+		// structural correctness, not byte-level compatibility).
+		var raw json.RawMessage = []byte(trimmed)
+		normalized, err := json.Marshal(raw)
+		if err == nil {
+			return normalized
+		}
 	}
 	normalized, _ := json.Marshal(output)
 	return normalized
