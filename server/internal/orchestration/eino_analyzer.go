@@ -1,7 +1,6 @@
 package orchestration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,8 @@ import (
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
 const (
@@ -75,14 +76,84 @@ func NewEinoIssueAnalyzer(ctx context.Context, cfg EinoReasoningConfig) (EinoIss
 		Timeout:             cfg.Timeout,
 		Temperature:         &temperature,
 		MaxCompletionTokens: &maxTokens,
-		ResponseFormat: &einoopenai.ChatCompletionResponseFormat{
-			Type: einoopenai.ChatCompletionResponseFormatTypeJSONObject,
-		},
+		ResponseFormat:      einoAnalyzeIssueResponseFormat(),
 	})
 	if err != nil {
 		return EinoIssueAnalyzer{}, fmt.Errorf("initialize Eino OpenAI-compatible ChatModel: %w", err)
 	}
 	return EinoIssueAnalyzer{model: cm, maxOutputTokens: maxTokens}, nil
+}
+
+func einoAnalyzeIssueResponseFormat() *einoopenai.ChatCompletionResponseFormat {
+	return &einoopenai.ChatCompletionResponseFormat{
+		Type: einoopenai.ChatCompletionResponseFormatTypeJSONSchema,
+		JSONSchema: &einoopenai.ChatCompletionResponseFormatJSONSchema{
+			Name:        "multica_analyze_issue",
+			Description: "Structured analysis and coding guidance for a fixed Multica orchestration AnalyzeIssue activity.",
+			Strict:      true,
+			JSONSchema:  einoAnalyzeIssueJSONSchema(),
+		},
+	}
+}
+
+func einoAnalyzeIssueJSONSchema() *jsonschema.Schema {
+	stringSchema := func(description string) *jsonschema.Schema {
+		return &jsonschema.Schema{
+			Type:        string(schema.String),
+			Description: description,
+		}
+	}
+	return &jsonschema.Schema{
+		Type: string(schema.Object),
+		Properties: orderedmap.New[string, *jsonschema.Schema](
+			orderedmap.WithInitialData[string, *jsonschema.Schema](
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key:   "problem_summary",
+					Value: stringSchema("Concise summary of the issue being analyzed."),
+				},
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key:   "execution_advice",
+					Value: stringSchema("Practical execution guidance for the daemon-backed coding task."),
+				},
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key:   "suspected_context",
+					Value: stringSchema("Likely code or product context the coding agent should inspect."),
+				},
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key: "risks",
+					Value: &jsonschema.Schema{
+						Type:        string(schema.Array),
+						Description: "Risk notes for the coding agent and reviewer.",
+						Items: &jsonschema.Schema{
+							Type: string(schema.String),
+						},
+					},
+				},
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key:   "recommended_agent_prompt",
+					Value: stringSchema("Prompt to send to the daemon-backed agent task."),
+				},
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key:   "reason_code",
+					Value: stringSchema("Machine-readable reason code for the analysis node."),
+				},
+				orderedmap.Pair[string, *jsonschema.Schema]{
+					Key:   "recommended_action",
+					Value: stringSchema("Recommended next action for the orchestration node."),
+				},
+			),
+		),
+		Required: []string{
+			"problem_summary",
+			"execution_advice",
+			"suspected_context",
+			"risks",
+			"recommended_agent_prompt",
+			"reason_code",
+			"recommended_action",
+		},
+		AdditionalProperties: jsonschema.FalseSchema,
+	}
 }
 
 func (a EinoIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
@@ -113,13 +184,13 @@ func parseEinoAnalyzeIssueOutput(raw string) (AnalyzeIssueResult, error) {
 	}
 
 	var payload einoAnalyzeIssueJSON
-	dec := json.NewDecoder(bytes.NewBufferString(raw))
+	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&payload); err != nil {
 		return AnalyzeIssueResult{}, fmt.Errorf("malformed Eino analyze issue output: %w", err)
 	}
-	if dec.More() {
-		return AnalyzeIssueResult{}, errors.New("malformed Eino analyze issue output: multiple JSON values")
+	if _, err := dec.Token(); err == nil {
+		return AnalyzeIssueResult{}, errors.New("malformed Eino analyze issue output: trailing data")
 	}
 
 	result := AnalyzeIssueResult{

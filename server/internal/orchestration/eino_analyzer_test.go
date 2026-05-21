@@ -2,8 +2,10 @@ package orchestration
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -119,6 +121,66 @@ func TestEinoIssueAnalyzerRejectsMalformedChatModelResponse(t *testing.T) {
 	}
 	if _, err := analyzer.AnalyzeIssue(t.Context(), IssueSnapshot{Title: "wire Eino"}, IssueWorkflowInput{}); err == nil {
 		t.Fatal("AnalyzeIssue should reject malformed provider output")
+	}
+}
+
+func TestEinoIssueAnalyzerLiveProviderSmoke(t *testing.T) {
+	if os.Getenv("ORCHESTRATION_EINO_LIVE_TEST") != "1" {
+		t.Skip("set ORCHESTRATION_EINO_LIVE_TEST=1 to run live Eino provider smoke test")
+	}
+	apiKey := strings.TrimSpace(os.Getenv("ORCHESTRATION_EINO_API_KEY"))
+	model := strings.TrimSpace(os.Getenv("ORCHESTRATION_EINO_MODEL"))
+	var missing []string
+	if apiKey == "" {
+		missing = append(missing, "ORCHESTRATION_EINO_API_KEY")
+	}
+	if model == "" {
+		missing = append(missing, "ORCHESTRATION_EINO_MODEL")
+	}
+	if len(missing) > 0 {
+		t.Fatalf("live Eino provider smoke test missing %s", strings.Join(missing, " and "))
+	}
+	timeout := 60 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("ORCHESTRATION_EINO_TIMEOUT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("invalid ORCHESTRATION_EINO_TIMEOUT %q: %v", raw, err)
+		}
+		timeout = parsed
+	}
+
+	analyzer, err := NewEinoIssueAnalyzer(t.Context(), EinoReasoningConfig{
+		Provider: EinoProviderOpenAICompatible,
+		APIKey:   apiKey,
+		Model:    model,
+		BaseURL:  strings.TrimSpace(os.Getenv("ORCHESTRATION_EINO_BASE_URL")),
+		Timeout:  timeout,
+	})
+	if err != nil {
+		t.Fatalf("NewEinoIssueAnalyzer returned error: %v", err)
+	}
+	result, err := analyzer.AnalyzeIssue(t.Context(), IssueSnapshot{
+		IssueID:        "live-smoke",
+		Title:          "Verify AnalyzeIssue live provider wiring",
+		Description:    "Return strict JSON for a narrow orchestration analyzer smoke test.",
+		AcceptanceText: "The response must satisfy the AnalyzeIssue structured output contract.",
+		Priority:       "medium",
+		Status:         "todo",
+		AssigneeType:   "agent",
+	}, IssueWorkflowInput{
+		WorkspaceID: "live-smoke-workspace",
+		PlanID:      "live-smoke-plan",
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeIssue live provider call returned error: %v", err)
+	}
+	if strings.TrimSpace(result.ProblemSummary) == "" ||
+		strings.TrimSpace(result.ExecutionAdvice) == "" ||
+		strings.TrimSpace(result.SuspectedContext) == "" ||
+		strings.TrimSpace(result.RecommendedAgentPrompt) == "" ||
+		strings.TrimSpace(result.ReasonCode) == "" ||
+		strings.TrimSpace(result.RecommendedAction) == "" {
+		t.Fatalf("AnalyzeIssue live provider returned incomplete result: %+v", result)
 	}
 }
 

@@ -194,7 +194,7 @@ func TestIssueWorkflowFailsClosedWhenSignalAuditProjectionFails(t *testing.T) {
 		NodeID:  "node-1",
 		Attempt: 1,
 	}, nil)
-	env.OnActivity(ProjectSignalAuditActivityName, mock.Anything, mock.Anything).Return(errors.New("projection unavailable")).Once()
+	env.OnActivity(ProjectSignalAuditActivityName, mock.Anything, mock.Anything).Return(errors.New("projection unavailable"))
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{

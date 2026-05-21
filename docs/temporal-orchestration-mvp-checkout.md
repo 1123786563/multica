@@ -88,6 +88,14 @@ Backend workflow and activity checks:
 cd server && go test -count=1 ./internal/orchestration
 ```
 
+AnalyzeIssue live provider smoke test:
+
+```bash
+cd server && set -a; source ../.env; set +a; ORCHESTRATION_EINO_LIVE_TEST=1 go test -count=1 ./internal/orchestration -run TestEinoIssueAnalyzerLiveProviderSmoke -v
+```
+
+This smoke test only verifies AnalyzeIssue against the real Eino OpenAI-compatible ChatModel provider path. It does not start Temporal, connect to the database, create an Issue, dispatch an Agent Task, or verify `ReviewOutcome` / `SummarizeOutcome` with a live provider. Without `ORCHESTRATION_EINO_LIVE_TEST=1`, the live provider test is skipped and no external provider call is made.
+
 Backend API and DB-backed orchestration checks:
 
 ```bash
@@ -126,6 +134,7 @@ For a completed checkout, paste the exact commands and outcomes here:
 
 - `make -n orchestration-worker`: passed; target resolves to env check, Postgres setup, and `cd server && go run ./cmd/orchestration-worker`.
 - `cd server && go test -count=1 ./internal/orchestration ./internal/service`: passed.
+- `cd server && set -a; source ../.env; set +a; ORCHESTRATION_EINO_LIVE_TEST=1 go test -count=1 ./internal/orchestration -run TestEinoIssueAnalyzerLiveProviderSmoke -v`: passed against the real provider configured in local `.env`.
 - `cd server && go test -count=1 ./internal/handler -run 'Test(StartIssueOrchestration|CompleteLinkedAgentTask|ApproveOrchestration|CancelOrchestration|FinalizeWorkflow.*Attention)'`: passed.
 - `pnpm --filter @multica/core exec vitest run api/schema.test.ts`: passed, 21 tests.
 - `pnpm --filter @multica/views exec vitest run issues/components/issue-detail.test.tsx`: passed, 19 tests.
