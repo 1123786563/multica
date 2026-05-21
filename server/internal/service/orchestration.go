@@ -468,26 +468,42 @@ func (s *OrchestrationService) ApplyPlanApprovalAction(ctx context.Context, inpu
 		return ApprovalActionResult{}, ErrInvalidState
 	}
 
+	var activeNodeID pgtype.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id
+		FROM orchestration_node
+		WHERE plan_id = $1
+			AND status IN ('pending', 'running', 'waiting_human')
+		ORDER BY updated_at DESC, created_at DESC
+		LIMIT 1
+	`, input.PlanID).Scan(&activeNodeID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return ApprovalActionResult{}, fmt.Errorf("load active approval node: %w", err)
+	}
+
 	if !alreadyCancelled {
-		details, err := json.Marshal(map[string]any{
+		detail := map[string]any{
 			"actor_id":   util.UUIDToString(input.ActorID),
 			"actor_type": "human",
 			"action":     input.Action,
 			"reason":     input.Reason,
 			"plan_id":    util.UUIDToString(input.PlanID),
-		})
+		}
+		if activeNodeID.Valid {
+			detail["node_id"] = util.UUIDToString(activeNodeID)
+		}
+		details, err := json.Marshal(detail)
 		if err != nil {
 			return ApprovalActionResult{}, err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO orchestration_event (plan_id, type, source, message, details)
-			SELECT $1, 'approval.cancel', 'server', $2, $3::jsonb
+			INSERT INTO orchestration_event (plan_id, node_id, type, source, message, details)
+			SELECT $1, $2, 'approval.cancel', 'server', $3, $4::jsonb
 			WHERE NOT EXISTS (
 				SELECT 1
 				FROM orchestration_event
 				WHERE plan_id = $1 AND type = 'approval.cancel'
 			)
-		`, input.PlanID, "Approval action recorded", details); err != nil {
+		`, input.PlanID, activeNodeID, "Approval action recorded", details); err != nil {
 			return ApprovalActionResult{}, fmt.Errorf("write approval audit event: %w", err)
 		}
 	}

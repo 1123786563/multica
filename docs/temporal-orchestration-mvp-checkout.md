@@ -122,12 +122,12 @@ For a completed checkout, paste the exact commands and outcomes here:
 - `cd server && go test -count=1 ./internal/orchestration ./internal/service`: passed.
 - `cd server && go test -count=1 ./internal/handler -run 'Test(StartIssueOrchestration|CompleteLinkedAgentTask|ApproveOrchestration|CancelOrchestration|FinalizeWorkflow.*Attention)'`: passed.
 - `pnpm --filter @multica/core exec vitest run api/schema.test.ts`: passed, 21 tests.
-- `pnpm --filter @multica/views exec vitest run issues/components/issue-detail.test.tsx`: passed, 18 tests.
-- Minimal E2E or manual browser validation: `e2e/orchestration.spec.ts` is not present in this checkout; run the manual happy/failure paths above with Temporal, worker, daemon, and web processes running.
+- `pnpm --filter @multica/views exec vitest run issues/components/issue-detail.test.tsx`: passed, 19 tests.
+- Minimal E2E or manual browser validation: `e2e/orchestration.spec.ts` is present and covers Issue Detail projection after start; run it with Temporal, worker, daemon, and web processes running before treating browser-level E2E as complete.
 
 Residual manual setup requirements:
 
 - Temporal must be started explicitly with `temporal server start-dev`.
 - API and worker must share `TEMPORAL_HOST_PORT=127.0.0.1:7233`, namespace, and task queue.
 - A local daemon runtime must be authenticated and online for real Agent Task execution.
-- Add `e2e/orchestration.spec.ts` or capture manual browser evidence before treating browser-level E2E as automated.
+- Extend `e2e/orchestration.spec.ts` or capture manual browser evidence for the full happy/failure paths before treating browser-level E2E as complete.

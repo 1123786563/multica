@@ -563,6 +563,13 @@ describe("IssueDetail (shared)", () => {
               message: "Agent Task outcome signal did not match the active orchestration node",
               details: { signal_task_id: "old-task", expected_task_id: "task-1" },
             },
+            {
+              id: "event-2",
+              type: "workflow.analysis",
+              source: "system",
+              message: "Issue analysis completed",
+              details: { execution_advice: "Use the existing orchestration path" },
+            },
           ],
           artifacts: [
             {
@@ -574,6 +581,16 @@ describe("IssueDetail (shared)", () => {
                 summary: "Implemented fix",
                 changed_files: ["server/internal/orchestration/activities.go"],
                 evidence: [{ type: "test", ref: "go test ./internal/orchestration" }],
+              },
+            },
+            {
+              id: "artifact-2",
+              type: "analysis_prompt",
+              source: "system",
+              label: "recommended agent prompt",
+              data: {
+                prompt: "Follow the Temporal MVP path",
+                issue: "issue-1",
               },
             },
           ],
@@ -589,11 +606,16 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("completed")).toBeInTheDocument();
     expect(screen.getByText("Dispatch agent task")).toBeInTheDocument();
     expect(screen.getByText("Audit trail")).toBeInTheDocument();
-    expect(screen.getByText("signal.mismatched_rejected")).toBeInTheDocument();
+    expect(screen.getAllByText("signal.mismatched_rejected").length).toBeGreaterThan(0);
+    expect(screen.getByText("workflow.analysis")).toBeInTheDocument();
+    expect(screen.getByText("Issue analysis completed")).toBeInTheDocument();
     expect(screen.getByText("Artifacts")).toBeInTheDocument();
     expect(screen.getByText("agent result evidence")).toBeInTheDocument();
     expect(screen.getByText("Implemented fix")).toBeInTheDocument();
     expect(screen.getByText("server/internal/orchestration/activities.go")).toBeInTheDocument();
+    expect(screen.getByText("go test ./internal/orchestration")).toBeInTheDocument();
+    expect(screen.getByText("recommended agent prompt")).toBeInTheDocument();
+    expect(screen.getByText("Follow the Temporal MVP path")).toBeInTheDocument();
   });
 
   it("lets users start orchestration when no plan exists", async () => {
@@ -660,8 +682,8 @@ describe("IssueDetail (shared)", () => {
 
     await screen.findAllByText("waiting_human");
     expect(screen.getByText("tests_failed")).toBeInTheDocument();
-    expect(screen.getByText("approval.cancel")).toBeInTheDocument();
-    expect(screen.getByText("Approval action recorded")).toBeInTheDocument();
+    expect(screen.getAllByText("approval.cancel").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Approval action recorded").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Request changes" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(mockApiObj.approveOrchestrationNode).toHaveBeenCalledWith("node-1", "Approved from Issue Detail"));

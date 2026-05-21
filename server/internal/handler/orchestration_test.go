@@ -1273,6 +1273,17 @@ func TestCancelOrchestrationPlanAuditsSignalsAndCancelsLinkedTask(t *testing.T) 
 	if planStatus != "cancelled" || taskStatus != "cancelled" {
 		t.Fatalf("expected cancelled plan/task, got plan=%q task=%q", planStatus, taskStatus)
 	}
+	var auditEventNodeID, auditDetailsNodeID string
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT COALESCE(node_id::text, ''), details->>'node_id'
+		FROM orchestration_event
+		WHERE plan_id = $1 AND type = 'approval.cancel'
+	`, startBody.Plan.ID).Scan(&auditEventNodeID, &auditDetailsNodeID); err != nil {
+		t.Fatalf("load cancel audit node identity: %v", err)
+	}
+	if auditEventNodeID != dispatched.NodeID || auditDetailsNodeID != dispatched.NodeID {
+		t.Fatalf("cancel audit node identity = event:%q details:%q, want %q", auditEventNodeID, auditDetailsNodeID, dispatched.NodeID)
+	}
 }
 
 func TestCancelOrchestrationPlanDoesNotProjectCancelledWhenTaskCancelFails(t *testing.T) {
@@ -2616,6 +2627,79 @@ func TestCompleteLinkedAgentTaskSignalsTemporalAndCompletesProjectionNode(t *tes
 	}
 	if !sawCompletedDispatch {
 		t.Fatalf("snapshot did not expose completed dispatch node: %+v", snapshot.Plans[0].Nodes)
+	}
+}
+
+func TestCompleteLinkedAgentTaskDuplicateCompletionAuditsWithoutResignaling(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration duplicate completion signal")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	signaler := &recordingAgentTaskOutcomeSignaler{}
+	previousSignaler := testHandler.TaskService.OrchestrationSignaler
+	testHandler.TaskService.OrchestrationSignaler = signaler
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.TaskService.OrchestrationSignaler = previousSignaler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "dispatch",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, dispatched.TaskID); err != nil {
+		t.Fatalf("mark task running: %v", err)
+	}
+
+	result := []byte(`{"schema_version":"1","summary":"done","changed_files":["server/internal/orchestration/workflow.go"],"artifacts":[],"tests":[{"name":"go test ./internal/orchestration","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./internal/orchestration"}]}`)
+	if _, err := testHandler.TaskService.CompleteTask(t.Context(), parseUUID(dispatched.TaskID), result, "session-1", "/tmp/work"); err != nil {
+		t.Fatalf("complete linked task first time: %v", err)
+	}
+	if _, err := testHandler.TaskService.CompleteTask(t.Context(), parseUUID(dispatched.TaskID), result, "session-1", "/tmp/work"); err != nil {
+		t.Fatalf("complete linked task second time: %v", err)
+	}
+	if calls := signaler.recordedCalls(); len(calls) != 1 {
+		t.Fatalf("duplicate completion should signal Temporal once, got %d calls: %+v", len(calls), calls)
+	}
+	var auditCount int
+	if err := testPool.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM orchestration_event
+		WHERE plan_id = $1
+			AND node_id = $2
+			AND type = 'signal.duplicate_ignored'
+			AND details->>'signal_task_id' = $3
+	`, startBody.Plan.ID, dispatched.NodeID, dispatched.TaskID).Scan(&auditCount); err != nil {
+		t.Fatalf("count duplicate signal audit: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("expected one duplicate signal audit event, got %d", auditCount)
 	}
 }
 

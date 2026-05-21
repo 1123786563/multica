@@ -741,19 +741,21 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 
 	var planID, nodeID pgtype.UUID
 	var attempt int
-	var workflowID string
+	var workflowID, nodeStatus string
 	linkTx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	if err := linkTx.QueryRow(ctx, `
-		SELECT orchestration_plan_id, orchestration_node_id,
-			COALESCE(orchestration_attempt, 1), COALESCE(temporal_workflow_id, '')
-		FROM agent_task_queue
-		WHERE id = $1
-			AND orchestration_plan_id IS NOT NULL
-			AND orchestration_node_id IS NOT NULL
-	`, task.ID).Scan(&planID, &nodeID, &attempt, &workflowID); err != nil {
+		SELECT q.orchestration_plan_id, q.orchestration_node_id,
+			COALESCE(q.orchestration_attempt, 1), COALESCE(q.temporal_workflow_id, ''),
+			n.status
+		FROM agent_task_queue q
+		JOIN orchestration_node n ON n.id = q.orchestration_node_id
+		WHERE q.id = $1
+			AND q.orchestration_plan_id IS NOT NULL
+			AND q.orchestration_node_id IS NOT NULL
+	`, task.ID).Scan(&planID, &nodeID, &attempt, &workflowID, &nodeStatus); err != nil {
 		linkTx.Rollback(ctx)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -762,6 +764,10 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 	}
 	if err := linkTx.Commit(ctx); err != nil {
 		return err
+	}
+
+	if isTerminalOrchestrationNodeStatus(nodeStatus) {
+		return s.recordDuplicateOrchestrationSignal(ctx, planID, nodeID, task, status, attempt, workflowID)
 	}
 
 	if s.OrchestrationSignaler != nil && workflowID != "" {
@@ -790,7 +796,7 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 	}
 	defer tx.Rollback(ctx)
 
-	nodeStatus := status
+	nodeStatus = status
 	if status == "failed" {
 		nodeStatus = "failed"
 	}
@@ -829,6 +835,59 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 	}
 
 	return nil
+}
+
+func isTerminalOrchestrationNodeStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "waiting_human":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *TaskService) recordDuplicateOrchestrationSignal(ctx context.Context, planID, nodeID pgtype.UUID, task db.AgentTaskQueue, status string, attempt int, workflowID string) error {
+	if s.TxStarter == nil {
+		return nil
+	}
+	details, err := json.Marshal(map[string]any{
+		"expected_workflow_id": workflowID,
+		"expected_plan_id":     util.UUIDToString(planID),
+		"expected_node_id":     util.UUIDToString(nodeID),
+		"expected_task_id":     util.UUIDToString(task.ID),
+		"expected_attempt":     attempt,
+		"signal_workflow_id":   workflowID,
+		"signal_plan_id":       util.UUIDToString(planID),
+		"signal_node_id":       util.UUIDToString(nodeID),
+		"signal_task_id":       util.UUIDToString(task.ID),
+		"signal_attempt":       attempt,
+		"signal_status":        status,
+	})
+	if err != nil {
+		return err
+	}
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO orchestration_event (plan_id, node_id, type, source, message, details)
+		SELECT $1, $2, 'signal.duplicate_ignored', 'server',
+			'Agent Task outcome signal was already processed for this orchestration node',
+			$3::jsonb
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM orchestration_event
+			WHERE plan_id = $1
+				AND node_id = $2
+				AND type = 'signal.duplicate_ignored'
+				AND details->>'signal_task_id' = $4
+		)
+	`, planID, nodeID, details, util.UUIDToString(task.ID)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ClaimTask atomically claims the next queued task for an agent,

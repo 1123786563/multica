@@ -147,10 +147,15 @@ func (a stubIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot
 
 func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 	var projected bool
+	var projectedAnalyzeNode bool
 	activity := ActivitySet{
 		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
-			if strings.Contains(strings.ToLower(sql), "orchestration_event") {
+			lower := strings.ToLower(sql)
+			if strings.Contains(lower, "orchestration_event") {
 				projected = true
+			}
+			if strings.Contains(lower, "orchestration_node") && containsArg(args, "analyze") && containsArg(args, "completed") {
+				projectedAnalyzeNode = true
 			}
 		}},
 		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
@@ -178,6 +183,83 @@ func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 	if !projected {
 		t.Fatal("AnalyzeIssue should project adapter output")
 	}
+	if !projectedAnalyzeNode {
+		t.Fatal("AnalyzeIssue should project the analyze node as completed")
+	}
+}
+
+func TestValidateOutcomeProjectsValidateNodeState(t *testing.T) {
+	var projectedValidateNode bool
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			if strings.Contains(strings.ToLower(sql), "orchestration_node") && containsArg(args, "validate") && containsArg(args, "completed") {
+				projectedValidateNode = true
+			}
+		}},
+	}
+	result, err := activity.ValidateOutcome(t.Context(), ValidateOutcomeInput{
+		Outcome: service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "wf-1",
+			PlanID:         "00000000-0000-0000-0000-000000000001",
+			NodeID:         "00000000-0000-0000-0000-000000000002",
+			TaskID:         "00000000-0000-0000-0000-000000000003",
+			Attempt:        1,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/internal/orchestration/activities.go"],"artifacts":[],"tests":[{"name":"go test ./internal/orchestration","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./internal/orchestration"}]}`),
+		},
+		Analysis: AnalyzeIssueResult{ProblemSummary: "Fix issue"},
+		Dispatch: service.DispatchAgentTaskResult{
+			PlanID:  "00000000-0000-0000-0000-000000000001",
+			NodeID:  "00000000-0000-0000-0000-000000000002",
+			TaskID:  "00000000-0000-0000-0000-000000000003",
+			Attempt: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ValidateOutcome returned error: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("validation status = %q, want completed", result.Status)
+	}
+	if !projectedValidateNode {
+		t.Fatal("ValidateOutcome should project the validate node as completed")
+	}
+}
+
+func TestReviewOutcomeProjectsReviewNodeState(t *testing.T) {
+	var projectedReviewNode bool
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			if strings.Contains(strings.ToLower(sql), "orchestration_node") && containsArg(args, "review") && containsArg(args, "completed") {
+				projectedReviewNode = true
+			}
+		}},
+	}
+	_, err := activity.ReviewOutcome(t.Context(), ValidateOutcomeResult{
+		Status:             "completed",
+		TerminalPlanStatus: "completed",
+	}, AnalyzeIssueResult{ProblemSummary: "Fix issue"}, IssueSnapshot{}, service.DispatchAgentTaskResult{
+		PlanID:  "00000000-0000-0000-0000-000000000001",
+		NodeID:  "00000000-0000-0000-0000-000000000002",
+		TaskID:  "00000000-0000-0000-0000-000000000003",
+		Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("ReviewOutcome returned error: %v", err)
+	}
+	if !projectedReviewNode {
+		t.Fatal("ReviewOutcome should project the review node as completed")
+	}
+}
+
+func containsArg(args []any, want string) bool {
+	for _, arg := range args {
+		if s, ok := arg.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNewWorkerActivitySetInjectsProductionAnalyzer(t *testing.T) {

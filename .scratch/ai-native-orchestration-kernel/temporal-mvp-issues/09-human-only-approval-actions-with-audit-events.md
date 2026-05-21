@@ -20,9 +20,9 @@ This slice should prove approval accountability through API, projection, permiss
 - [x] Workspace owner, workspace admin, Issue creator, and human Issue assignee can perform allowed Approval Actions.
 - [x] Agent assignee, initiating agent, executing agent, unrelated members, and non-human actors are denied.
 - [x] Every Approval Action writes an audit event before dispatching Temporal Signal/Update or cancellation request.
-- [ ] Audit payload includes actor identity, `actor_type=human`, action, reason, plan identity, and node identity.
+- [x] Audit payload includes actor identity, `actor_type=human`, action, reason, plan identity, and node identity.
 - [x] Linear Orchestration Panel renders approval buttons only when server-projected permission and action allow them.
-- [ ] Tests cover allowed actors, denied agent actors, denied unrelated actors, audit payload, UI button visibility, and Temporal dispatch after audit persistence.
+- [x] Tests cover allowed actors, denied agent actors, denied unrelated actors, audit payload, UI button visibility, and Temporal dispatch after audit persistence.
 
 ## Blocked by
 

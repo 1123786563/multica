@@ -89,6 +89,9 @@ func (a ActivitySet) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, inpu
 	if err := a.projectAnalysis(ctx, input, issue, result); err != nil {
 		return AnalyzeIssueResult{}, err
 	}
+	if err := a.projectNode(ctx, input.PlanID, "analyze", "completed", result.ReasonCode, result.RecommendedAction, 1); err != nil {
+		return AnalyzeIssueResult{}, err
+	}
 	return result, nil
 }
 
@@ -145,11 +148,24 @@ func (a ActivitySet) DispatchDaemonTask(ctx context.Context, input DispatchDaemo
 }
 
 func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeInput) (ValidateOutcomeResult, error) {
+	finish := func(result ValidateOutcomeResult) (ValidateOutcomeResult, error) {
+		status := result.Status
+		if result.ShouldRetry {
+			status = "failed"
+		}
+		if strings.TrimSpace(status) == "" {
+			status = "completed"
+		}
+		if err := a.projectNode(ctx, input.Dispatch.PlanID, "validate", status, result.ReasonCode, result.RecommendedAction, input.Dispatch.Attempt); err != nil {
+			return ValidateOutcomeResult{}, err
+		}
+		return result, nil
+	}
 	if strings.TrimSpace(input.Outcome.WorkflowID) == "" {
 		return ValidateOutcomeResult{}, fmt.Errorf("missing workflow id")
 	}
 	if input.Outcome.PlanID != input.Dispatch.PlanID || input.Outcome.TaskID != input.Dispatch.TaskID || input.Outcome.NodeID != input.Dispatch.NodeID || input.Outcome.Attempt != input.Dispatch.Attempt {
-		return ValidateOutcomeResult{
+		return finish(ValidateOutcomeResult{
 			Status:             "waiting_human",
 			ReasonCode:         "signal_mismatch",
 			RecommendedAction:  "review",
@@ -157,10 +173,10 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 			TerminalPlanStatus: "waiting_human",
 			ProjectionSummary:  input.Analysis.ProblemSummary,
 			ProjectionDetail:   "agent task outcome did not match the active orchestration node",
-		}, nil
+		})
 	}
 	if input.Outcome.Status != "completed" {
-		return ValidateOutcomeResult{
+		return finish(ValidateOutcomeResult{
 			Status:             "waiting_human",
 			ReasonCode:         "agent_task_" + input.Outcome.Status,
 			RecommendedAction:  "review",
@@ -168,48 +184,48 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 			TerminalPlanStatus: "waiting_human",
 			ProjectionSummary:  input.Analysis.ProblemSummary,
 			ProjectionDetail:   "agent task did not complete successfully",
-		}, nil
+		})
 	}
 	if strings.TrimSpace(string(input.Outcome.Result)) == "" {
-		return retryableEvidenceResult(input, "empty structured result"), nil
+		return finish(retryableEvidenceResult(input, "empty structured result"))
 	}
 	var parsed resultSchemaV1
 	if err := json.Unmarshal(input.Outcome.Result, &parsed); err != nil {
-		return retryableEvidenceResult(input, "malformed structured result"), nil
+		return finish(retryableEvidenceResult(input, "malformed structured result"))
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(input.Outcome.Result, &raw); err != nil {
-		return retryableEvidenceResult(input, "malformed structured result"), nil
+		return finish(retryableEvidenceResult(input, "malformed structured result"))
 	}
 	for _, key := range []string{"changed_files", "artifacts", "tests", "risks", "evidence"} {
 		if _, ok := raw[key]; !ok {
-			return retryableEvidenceResult(input, "structured result is missing "+key), nil
+			return finish(retryableEvidenceResult(input, "structured result is missing "+key))
 		}
 	}
 	if strings.TrimSpace(parsed.SchemaVersion) != "1" {
-		return retryableEvidenceResult(input, "unsupported structured result schema version"), nil
+		return finish(retryableEvidenceResult(input, "unsupported structured result schema version"))
 	}
 	if strings.TrimSpace(parsed.Summary) == "" || len(parsed.Evidence) == 0 {
-		return retryableEvidenceResult(input, "structured result is missing required evidence"), nil
+		return finish(retryableEvidenceResult(input, "structured result is missing required evidence"))
 	}
 	changedFiles := nonEmptyStrings(parsed.ChangedFiles)
 	if len(changedFiles) == 0 {
-		return retryableEvidenceResult(input, "structured result is missing changed files"), nil
+		return finish(retryableEvidenceResult(input, "structured result is missing changed files"))
 	}
 	parsed.ChangedFiles = changedFiles
 	for _, artifact := range parsed.Artifacts {
 		if strings.TrimSpace(artifact.Label) == "" || strings.TrimSpace(artifact.Ref) == "" {
-			return retryableEvidenceResult(input, "structured result contains incomplete artifact reference"), nil
+			return finish(retryableEvidenceResult(input, "structured result contains incomplete artifact reference"))
 		}
 	}
 	for _, evidence := range parsed.Evidence {
 		if strings.TrimSpace(evidence.Type) == "" || strings.TrimSpace(evidence.Ref) == "" {
-			return retryableEvidenceResult(input, "structured result contains incomplete evidence"), nil
+			return finish(retryableEvidenceResult(input, "structured result contains incomplete evidence"))
 		}
 	}
 	for _, test := range parsed.Tests {
 		if strings.TrimSpace(test.Name) == "" || strings.TrimSpace(test.Status) == "" {
-			return retryableEvidenceResult(input, "structured result contains incomplete test result"), nil
+			return finish(retryableEvidenceResult(input, "structured result contains incomplete test result"))
 		}
 		status := strings.ToLower(strings.TrimSpace(test.Status))
 		if status != "" && status != "passed" && status != "skipped" {
@@ -225,7 +241,7 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 				FailedTests:        failedTests,
 			}
 			attachResultSchemaDetails(&result, parsed)
-			return result, nil
+			return finish(result)
 		}
 	}
 	if len(parsed.Risks) > 0 {
@@ -241,7 +257,7 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 			Risks:              risks,
 		}
 		attachResultSchemaDetails(&result, parsed)
-		return result, nil
+		return finish(result)
 	}
 	result := ValidateOutcomeResult{
 		Status:             "completed",
@@ -253,7 +269,7 @@ func (a ActivitySet) ValidateOutcome(ctx context.Context, input ValidateOutcomeI
 		ProjectionDetail:   "structured result validated",
 	}
 	attachResultSchemaDetails(&result, parsed)
-	return result, nil
+	return finish(result)
 }
 
 func failedTestNames(tests []ResultTestRef) []string {
@@ -328,6 +344,17 @@ func (a ActivitySet) ReviewOutcome(ctx context.Context, validation ValidateOutco
 			result.SeverityLabel = "high"
 			break
 		}
+	}
+	nodeStatus := "completed"
+	reasonCode := validation.ReasonCode
+	recommendedAction := result.RecommendedAction
+	if result.HighRisk {
+		nodeStatus = "waiting_human"
+		reasonCode = "review_high_risk"
+		recommendedAction = "review"
+	}
+	if err := a.projectNode(ctx, dispatch.PlanID, "review", nodeStatus, reasonCode, recommendedAction, dispatch.Attempt); err != nil {
+		return ReviewOutcomeResult{}, err
 	}
 	return result, nil
 }
@@ -546,6 +573,68 @@ func (a ActivitySet) ProjectSignalAudit(ctx context.Context, input SignalAuditIn
 
 func (a ActivitySet) projectAnalysis(ctx context.Context, input IssueWorkflowInput, issue IssueSnapshot, analysis AnalyzeIssueResult) error {
 	return a.ProjectAnalysis(ctx, input, issue, analysis)
+}
+
+func (a ActivitySet) projectNode(ctx context.Context, planIDText, nodeKey, status, reasonCode, recommendedAction string, attempt int) error {
+	if a.DB == nil {
+		return nil
+	}
+	if strings.TrimSpace(planIDText) == "" || strings.TrimSpace(nodeKey) == "" {
+		return nil
+	}
+	planID, err := util.ParseUUID(planIDText)
+	if err != nil {
+		return err
+	}
+	if attempt <= 0 {
+		attempt = 1
+	}
+	if strings.TrimSpace(status) == "" {
+		status = "pending"
+	}
+	if strings.TrimSpace(recommendedAction) == "" {
+		recommendedAction = "none"
+	}
+	_, err = a.DB.Exec(ctx, `
+		INSERT INTO orchestration_node (
+			plan_id, workflow_node_key, title, status, reason_code,
+			recommended_action, attempt, started_at, completed_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, $6, $7,
+			CASE WHEN $4 IN ('running', 'completed', 'failed', 'waiting_human') THEN now() ELSE NULL END,
+			CASE WHEN $4 IN ('completed', 'failed', 'cancelled') THEN now() ELSE NULL END
+		)
+		ON CONFLICT (plan_id, workflow_node_key, attempt) WHERE plan_id IS NOT NULL
+		DO UPDATE SET
+			title = EXCLUDED.title,
+			status = EXCLUDED.status,
+			reason_code = EXCLUDED.reason_code,
+			recommended_action = EXCLUDED.recommended_action,
+			started_at = COALESCE(orchestration_node.started_at, EXCLUDED.started_at),
+			completed_at = CASE
+				WHEN EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN COALESCE(orchestration_node.completed_at, EXCLUDED.completed_at, now())
+				WHEN EXCLUDED.status IN ('running', 'waiting_human') THEN NULL
+				ELSE orchestration_node.completed_at
+			END,
+			updated_at = now()
+	`, planID, nodeKey, workflowNodeTitle(nodeKey), status, reasonCode, recommendedAction, attempt)
+	return err
+}
+
+func workflowNodeTitle(nodeKey string) string {
+	switch nodeKey {
+	case "analyze":
+		return "Analyze"
+	case "dispatch":
+		return "Dispatch agent task"
+	case "validate":
+		return "Validate result"
+	case "review":
+		return "Review handoff"
+	default:
+		return nodeKey
+	}
 }
 
 func (a ActivitySet) recordEvent(ctx context.Context, planID pgtype.UUID, eventType, source, message string, details map[string]any) error {
