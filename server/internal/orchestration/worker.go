@@ -22,6 +22,7 @@ type WorkerConfig struct {
 	Namespace string
 	TaskQueue string
 	RedisURL  string
+	Eino      EinoReasoningConfig
 }
 
 func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
@@ -60,7 +61,10 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 		taskSvc.EmptyClaim = service.NewEmptyClaimCache(rdb)
 	}
 	orchestrationSvc.TaskNotifier = taskSvc
-	activities := NewWorkerActivitySet(pool, queries, orchestrationSvc)
+	activities, err := NewWorkerActivitySet(ctx, pool, queries, orchestrationSvc, cfg.Eino)
+	if err != nil {
+		return err
+	}
 
 	w := worker.New(c, taskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(IssueWorkflow, workflow.RegisterOptions{Name: IssueWorkflowName})
@@ -82,11 +86,26 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 	return w.Run(worker.InterruptCh())
 }
 
-func NewWorkerActivitySet(pool service.OrchestrationDB, queries *db.Queries, orchestrationSvc *service.OrchestrationService) ActivitySet {
+func NewWorkerActivitySet(ctx context.Context, pool service.OrchestrationDB, queries *db.Queries, orchestrationSvc *service.OrchestrationService, cfg EinoReasoningConfig) (ActivitySet, error) {
+	analyzer, err := newWorkerIssueAnalyzer(ctx, cfg)
+	if err != nil {
+		return ActivitySet{}, err
+	}
 	return ActivitySet{
 		DB:            pool,
 		Queries:       queries,
 		Orchestration: orchestrationSvc,
-		Analyzer:      NewEinoIssueAnalyzer(),
+		Analyzer:      analyzer,
+	}, nil
+}
+
+func newWorkerIssueAnalyzer(ctx context.Context, cfg EinoReasoningConfig) (IssueAnalyzer, error) {
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), EinoProviderStatic) {
+		return StaticIssueAnalyzer{}, nil
 	}
+	analyzer, err := NewEinoIssueAnalyzer(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("configure Eino reasoning provider: %w", err)
+	}
+	return analyzer, nil
 }

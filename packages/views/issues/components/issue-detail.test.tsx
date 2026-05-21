@@ -609,6 +609,7 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getAllByText("signal.mismatched_rejected").length).toBeGreaterThan(0);
     expect(screen.getByText("workflow.analysis")).toBeInTheDocument();
     expect(screen.getByText("Issue analysis completed")).toBeInTheDocument();
+    expect(screen.getByText("Use the existing orchestration path")).toBeInTheDocument();
     expect(screen.getByText("Artifacts")).toBeInTheDocument();
     expect(screen.getByText("agent result evidence")).toBeInTheDocument();
     expect(screen.getByText("Implemented fix")).toBeInTheDocument();
@@ -626,6 +627,64 @@ describe("IssueDetail (shared)", () => {
     expect(await screen.findByRole("button", { name: "Start orchestration" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Start orchestration" }));
     await waitFor(() => expect(mockApiObj.startIssueOrchestration).toHaveBeenCalledWith("issue-1"));
+  });
+
+  it("keeps terminal orchestration history visible while allowing a new run", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          issue_id: "issue-1",
+          status: "completed",
+          workflow_type: "issue_mvp",
+          projection_version: 1,
+          created_at: "2026-01-20T00:00:00Z",
+          updated_at: "2026-01-20T00:00:00Z",
+          summary: { reason_code: "human_approved", recommended_action: "none" },
+          available_actions: [],
+          nodes: [],
+          events: [],
+          artifacts: [],
+        },
+      ],
+    });
+
+    renderIssueDetail();
+
+    expect(await screen.findByText("Orchestration")).toBeInTheDocument();
+    expect(screen.getByText("completed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start orchestration" })).toBeInTheDocument();
+  });
+
+  it("renders fail-closed start response body when Temporal is unavailable", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({ plans: [] });
+    mockApiObj.startIssueOrchestration.mockRejectedValueOnce({
+      status: 503,
+      body: {
+        plan: {
+          id: "plan-failed",
+          issue_id: "issue-1",
+          status: "failed",
+          workflow_type: "issue_mvp",
+          projection_version: 1,
+          created_at: "2026-01-20T00:00:00Z",
+          updated_at: "2026-01-20T00:00:00Z",
+          summary: { reason_code: "temporal_unavailable", recommended_action: "configure_temporal" },
+          available_actions: [],
+          nodes: [],
+          events: [],
+          artifacts: [],
+        },
+        reused: false,
+        available: false,
+      },
+    });
+
+    renderIssueDetail();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start orchestration" }));
+    expect(await screen.findByText("temporal_unavailable")).toBeInTheDocument();
+    expect(screen.getByText("failed")).toBeInTheDocument();
   });
 
   it("renders approval gate state with server-projected actions", async () => {

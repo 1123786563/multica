@@ -25,12 +25,6 @@ type IssueAnalyzer interface {
 
 type StaticIssueAnalyzer struct{}
 
-type EinoIssueAnalyzer struct{}
-
-func NewEinoIssueAnalyzer() EinoIssueAnalyzer {
-	return EinoIssueAnalyzer{}
-}
-
 type resultSchemaV1 struct {
 	SchemaVersion string              `json:"schema_version"`
 	Summary       string              `json:"summary"`
@@ -108,30 +102,6 @@ func (StaticIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot
 		result.Risks = append(result.Risks, "review the issue description for hidden acceptance criteria")
 	}
 	return result, nil
-}
-
-func (EinoIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
-	contextParts := []string{issue.Title, issue.Description, issue.AcceptanceText}
-	contextText := strings.TrimSpace(strings.Join(nonEmptyStrings(contextParts), "\n\n"))
-	if contextText == "" {
-		contextText = "No issue context was provided."
-	}
-	risks := []string{}
-	if strings.TrimSpace(issue.AcceptanceText) == "" {
-		risks = append(risks, "acceptance criteria are missing or implicit")
-	}
-	if issue.Priority == "urgent" || issue.Priority == "high" {
-		risks = append(risks, "high-priority issue requires narrow validation before handoff")
-	}
-	return AnalyzeIssueResult{
-		ProblemSummary:         summarizeIssue(issue),
-		ExecutionAdvice:        "Use the issue context and acceptance criteria to make a narrow code change, preserve existing contracts, and report Result Schema v1 evidence for validation.",
-		SuspectedContext:       contextText,
-		Risks:                  risks,
-		RecommendedAgentPrompt: buildAgentPrompt(issue, input),
-		ReasonCode:             "eino_analysis_ready",
-		RecommendedAction:      "none",
-	}, nil
 }
 
 func (a ActivitySet) DispatchDaemonTask(ctx context.Context, input DispatchDaemonTaskInput) (service.DispatchAgentTaskResult, error) {
@@ -540,6 +510,7 @@ func (a ActivitySet) ProjectAnalysis(ctx context.Context, input IssueWorkflowInp
 	if err := a.recordEvent(ctx, planID, "workflow.analysis", "system", analysis.ProblemSummary, map[string]any{
 		"execution_advice":         analysis.ExecutionAdvice,
 		"suspected_context":        analysis.SuspectedContext,
+		"risks":                    analysis.Risks,
 		"recommended_agent_prompt": analysis.RecommendedAgentPrompt,
 	}); err != nil {
 		return err

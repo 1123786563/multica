@@ -569,6 +569,12 @@ func (s *recordingAgentTaskOutcomeSignaler) recordedCalls() []service.AgentTaskO
 	return calls
 }
 
+type recordingAgentTaskOutcomeSignalerFunc func(context.Context, service.AgentTaskOutcomeSignalInput) error
+
+func (f recordingAgentTaskOutcomeSignalerFunc) SignalAgentTaskOutcome(ctx context.Context, input service.AgentTaskOutcomeSignalInput) error {
+	return f(ctx, input)
+}
+
 type auditCheckingApprovalSignaler struct {
 	t     *testing.T
 	mu    sync.Mutex
@@ -3065,6 +3071,95 @@ func TestWorkflowWaitingHumanOverridesTaskCompletionProjectionNode(t *testing.T)
 		return
 	}
 	t.Fatalf("snapshot missing dispatched node %s: %+v", dispatched.NodeID, snapshot.Plans[0].Nodes)
+}
+
+func TestCompleteLinkedAgentTaskDoesNotOverwriteWorkflowWaitingHumanProjection(t *testing.T) {
+	issueID := createOrchestrationTestIssue(t, "Orchestration waiting human race")
+
+	starter := &recordingWorkflowStarter{}
+	previousStarter := testHandler.OrchestrationService.Starter
+	testHandler.OrchestrationService.Starter = starter
+	previousSignaler := testHandler.TaskService.OrchestrationSignaler
+	testHandler.TaskService.OrchestrationSignaler = recordingAgentTaskOutcomeSignalerFunc(func(ctx context.Context, signal service.AgentTaskOutcomeSignalInput) error {
+		activity := orchestrationpkg.ActivitySet{DB: testPool}
+		return activity.FinalizeWorkflow(ctx, orchestrationpkg.ValidateOutcomeResult{
+			Status:             "waiting_human",
+			ReasonCode:         "tests_failed",
+			RecommendedAction:  "review",
+			NeedsHumanReview:   true,
+			TerminalPlanStatus: "waiting_human",
+			ProjectionDetail:   "structured result reported failed tests",
+			FailedTests:        []string{"go test ./..."},
+		}, orchestrationpkg.ReviewOutcomeResult{
+			Summary:           "review failed tests",
+			RecommendedAction: "review",
+		}, orchestrationpkg.SummarizeOutcomeResult{
+			Summary:  "handoff needs review",
+			TraceRef: signal.PlanID + "/" + signal.NodeID + "/" + signal.TaskID,
+		}, orchestrationpkg.IssueWorkflowInput{
+			PlanID:     signal.PlanID,
+			WorkflowID: signal.WorkflowID,
+		}, orchestrationpkg.IssueSnapshot{
+			IssueID: issueID,
+		}, orchestrationpkg.AnalyzeIssueResult{
+			ProblemSummary: "Fix failed tests",
+		}, service.DispatchAgentTaskResult{
+			PlanID:  signal.PlanID,
+			NodeID:  signal.NodeID,
+			TaskID:  signal.TaskID,
+			Attempt: signal.Attempt,
+		}, signal)
+	})
+	t.Cleanup(func() {
+		testHandler.OrchestrationService.Starter = previousStarter
+		testHandler.TaskService.OrchestrationSignaler = previousSignaler
+	})
+
+	w := httptest.NewRecorder()
+	req := withURLParam(newRequest("POST", "/api/issues/"+issueID+"/orchestration/start", nil), "id", issueID)
+	testHandler.StartIssueOrchestration(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("StartIssueOrchestration: expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var startBody struct {
+		Plan struct {
+			ID                 string `json:"id"`
+			TemporalWorkflowID string `json:"temporal_workflow_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	dispatched, err := testHandler.OrchestrationService.DispatchAgentTask(t.Context(), service.DispatchAgentTaskInput{
+		PlanID:             startBody.Plan.ID,
+		WorkflowNodeKey:    "dispatch",
+		Attempt:            1,
+		TemporalWorkflowID: startBody.Plan.TemporalWorkflowID,
+	})
+	if err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+	if _, err := testPool.Exec(t.Context(), `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, dispatched.TaskID); err != nil {
+		t.Fatalf("mark task running: %v", err)
+	}
+
+	result := []byte(`{"schema_version":"1","summary":"done","changed_files":["server/a.go"],"artifacts":[],"tests":[{"name":"go test ./...","status":"failed"}],"risks":[],"evidence":[{"type":"test","ref":"go test ./..."}]}`)
+	if _, err := testHandler.TaskService.CompleteTask(t.Context(), parseUUID(dispatched.TaskID), result, "session-1", "/tmp/work"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+
+	var nodeStatus string
+	if err := testPool.QueryRow(t.Context(), `SELECT status FROM orchestration_node WHERE id = $1`, dispatched.NodeID).Scan(&nodeStatus); err != nil {
+		t.Fatalf("load node status: %v", err)
+	}
+	if nodeStatus != "waiting_human" {
+		t.Fatalf("node status = %q, want waiting_human", nodeStatus)
+	}
 }
 
 func TestCompleteLinkedAgentTaskPublishesOrchestrationUpdated(t *testing.T) {

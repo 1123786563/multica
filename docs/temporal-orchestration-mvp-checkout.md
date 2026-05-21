@@ -16,18 +16,24 @@ Use the same Temporal profile for the API and worker:
 export TEMPORAL_HOST_PORT=127.0.0.1:7233
 export TEMPORAL_NAMESPACE=default
 export TEMPORAL_TASK_QUEUE=multica-orchestration
+export ORCHESTRATION_EINO_PROVIDER=openai-compatible
+export ORCHESTRATION_EINO_API_KEY=replace-me
+export ORCHESTRATION_EINO_MODEL=replace-me
+# Optional for OpenAI-compatible gateways; leave empty for provider default.
+export ORCHESTRATION_EINO_BASE_URL=
+export ORCHESTRATION_EINO_TIMEOUT=60s
 ```
 
 Start the Multica processes in separate terminals:
 
 ```bash
 TEMPORAL_HOST_PORT=127.0.0.1:7233 TEMPORAL_NAMESPACE=default TEMPORAL_TASK_QUEUE=multica-orchestration make server
-TEMPORAL_HOST_PORT=127.0.0.1:7233 TEMPORAL_NAMESPACE=default TEMPORAL_TASK_QUEUE=multica-orchestration make orchestration-worker
+TEMPORAL_HOST_PORT=127.0.0.1:7233 TEMPORAL_NAMESPACE=default TEMPORAL_TASK_QUEUE=multica-orchestration ORCHESTRATION_EINO_PROVIDER=openai-compatible ORCHESTRATION_EINO_API_KEY=replace-me ORCHESTRATION_EINO_MODEL=replace-me make orchestration-worker
 make daemon
 pnpm dev:web
 ```
 
-The worker command registers `IssueWorkflow` plus the fixed activity chain: load issue, analyze issue, dispatch daemon task, validate outcome, review outcome, summarize outcome, finalize workflow, and projection/audit activities.
+The worker command registers `IssueWorkflow` plus the fixed activity chain: load issue, analyze issue, dispatch daemon task, validate outcome, review outcome, summarize outcome, finalize workflow, and projection/audit activities. Production worker startup fails closed if the Eino reasoning provider is not configured; use `ORCHESTRATION_EINO_PROVIDER=static` only for explicit local mock/dev runs.
 
 ## Happy path
 

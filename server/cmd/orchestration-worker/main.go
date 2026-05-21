@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -42,9 +44,29 @@ func main() {
 		Namespace: os.Getenv("TEMPORAL_NAMESPACE"),
 		TaskQueue: os.Getenv("TEMPORAL_TASK_QUEUE"),
 		RedisURL:  os.Getenv("REDIS_URL"),
+		Eino: orchestration.EinoReasoningConfig{
+			Provider: os.Getenv("ORCHESTRATION_EINO_PROVIDER"),
+			APIKey:   os.Getenv("ORCHESTRATION_EINO_API_KEY"),
+			Model:    os.Getenv("ORCHESTRATION_EINO_MODEL"),
+			BaseURL:  os.Getenv("ORCHESTRATION_EINO_BASE_URL"),
+			Timeout:  envDuration("ORCHESTRATION_EINO_TIMEOUT", 60*time.Second),
+		},
 	}
 	if err := orchestration.Run(ctx, pool, cfg); err != nil {
 		slog.Error("orchestration worker stopped with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func envDuration(name string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		slog.Warn("invalid duration env var, using default", "name", name, "value", raw, "default", def.String(), "error", err)
+		return def
+	}
+	return d
 }

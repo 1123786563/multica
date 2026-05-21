@@ -170,6 +170,10 @@ function shortDate(date: string | null): string {
 
 type ActivityT = ReturnType<typeof useT<"issues">>["t"];
 
+function isActiveOrchestrationPlan(plan: IssueOrchestrationPlan): boolean {
+  return plan.status === "starting" || plan.status === "running" || plan.status === "waiting_human";
+}
+
 function statusLabel(status: string, t: ActivityT): string {
   if (status in STATUS_CONFIG) {
     return t(($) => $.status[status as IssueStatus]);
@@ -276,6 +280,7 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
             <div key={event.id} className="rounded-md px-2 py-1 text-[11px] text-muted-foreground">
               <div className="font-medium text-foreground">{event.type}</div>
               {event.message && <div className="line-clamp-2">{event.message}</div>}
+              <EventDetails details={event.details} />
             </div>
           ))}
         </div>
@@ -287,6 +292,7 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
             <div key={event.id} className="rounded-md px-2 py-1 text-[11px] text-muted-foreground">
               <div className="font-medium text-foreground">{event.type}</div>
               {event.message && <div className="line-clamp-2">{event.message}</div>}
+              <EventDetails details={event.details} />
             </div>
           ))}
         </div>
@@ -302,6 +308,24 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function EventDetails({ details }: { details: Record<string, unknown> }) {
+  const values = [
+    details.execution_advice,
+    details.suspected_context,
+    details.recommended_agent_prompt,
+    details.reason_code,
+    details.recommended_action,
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (values.length === 0) return null;
+  return (
+    <div className="mt-0.5 space-y-0.5">
+      {values.slice(0, 3).map((value) => (
+        <div key={value} className="line-clamp-2">{value}</div>
+      ))}
     </div>
   );
 }
@@ -350,6 +374,15 @@ function orchestrationActionReason(action: string): string {
   if (action === "retry") return "Retry requested from Issue Detail";
   if (action === "cancel") return "Cancelled from Issue Detail";
   return "Orchestration action from Issue Detail";
+}
+
+function orchestrationPlanFromError(error: unknown): IssueOrchestrationPlan | null {
+  if (!error || typeof error !== "object") return null;
+  const body = (error as { body?: unknown }).body;
+  if (!body || typeof body !== "object") return null;
+  const plan = (body as { plan?: unknown }).plan;
+  if (!plan || typeof plan !== "object") return null;
+  return plan as IssueOrchestrationPlan;
 }
 
 function formatActivity(
@@ -1093,7 +1126,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     ...issueOrchestrationOptions(wsId, id),
     enabled: !!issue,
   });
-  const activeOrchestrationPlan = orchestration?.plans[0] ?? null;
+  const orchestrationPlans = orchestration?.plans ?? [];
+  const activeOrchestrationPlan = orchestrationPlans.find(isActiveOrchestrationPlan) ?? null;
   const canStartOrchestration = !!orchestration && !activeOrchestrationPlan;
   const startOrchestration = useMutation({
     mutationFn: () => api.startIssueOrchestration(id),
@@ -1101,6 +1135,15 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       void queryClient.invalidateQueries({ queryKey: issueKeys.orchestration(wsId, id) });
     },
     onError: (error) => {
+      const failedPlan = orchestrationPlanFromError(error);
+      if (failedPlan) {
+        queryClient.setQueryData(issueKeys.orchestration(wsId, id), {
+          plans: [
+            failedPlan,
+            ...orchestrationPlans.filter((plan) => plan.id !== failedPlan.id),
+          ],
+        });
+      }
       toast.error(error instanceof Error ? error.message : "Failed to start orchestration");
     },
   });
@@ -1546,7 +1589,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         </div>}
       </div>
 
-      {activeOrchestrationPlan ? (
+      {orchestrationPlans.length > 0 ? (
         <div>
           <button
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${orchestrationOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
@@ -1555,7 +1598,27 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             Orchestration
             <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${orchestrationOpen ? "rotate-90" : ""}`} />
           </button>
-          {orchestrationOpen && <OrchestrationPanel plan={activeOrchestrationPlan} issueId={id} wsId={wsId} />}
+          {orchestrationOpen && (
+            <div className="space-y-2">
+              {orchestrationPlans.map((plan) => (
+                <OrchestrationPanel key={plan.id} plan={plan} issueId={id} wsId={wsId} />
+              ))}
+              {canStartOrchestration && (
+                <div className="pl-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={startOrchestration.isPending}
+                    onClick={() => startOrchestration.mutate()}
+                    className="h-7 text-xs"
+                  >
+                    Start orchestration
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ) : canStartOrchestration ? (
         <div className="pl-2">

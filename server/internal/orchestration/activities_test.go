@@ -148,11 +148,17 @@ func (a stubIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot
 func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 	var projected bool
 	var projectedAnalyzeNode bool
+	var projectedRisks bool
 	activity := ActivitySet{
 		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
 			lower := strings.ToLower(sql)
 			if strings.Contains(lower, "orchestration_event") {
 				projected = true
+				for _, arg := range args {
+					if raw, ok := arg.([]byte); ok && strings.Contains(string(raw), `"adapter risk"`) {
+						projectedRisks = true
+					}
+				}
 			}
 			if strings.Contains(lower, "orchestration_node") && containsArg(args, "analyze") && containsArg(args, "completed") {
 				projectedAnalyzeNode = true
@@ -182,6 +188,9 @@ func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 	}
 	if !projected {
 		t.Fatal("AnalyzeIssue should project adapter output")
+	}
+	if !projectedRisks {
+		t.Fatal("AnalyzeIssue should project analyzer risks for visible advisory policy")
 	}
 	if !projectedAnalyzeNode {
 		t.Fatal("AnalyzeIssue should project the analyze node as completed")
@@ -263,7 +272,14 @@ func containsArg(args []any, want string) bool {
 }
 
 func TestNewWorkerActivitySetInjectsProductionAnalyzer(t *testing.T) {
-	activity := NewWorkerActivitySet(nil, nil, nil)
+	activity, err := NewWorkerActivitySet(t.Context(), nil, nil, nil, EinoReasoningConfig{
+		Provider: EinoProviderOpenAICompatible,
+		APIKey:   "test-key",
+		Model:    "test-model",
+	})
+	if err != nil {
+		t.Fatalf("NewWorkerActivitySet returned error: %v", err)
+	}
 	if activity.Analyzer == nil {
 		t.Fatal("worker activity set must inject the production Eino analyzer")
 	}

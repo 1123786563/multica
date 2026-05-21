@@ -64,6 +64,22 @@ _Avoid_: workflow-side DB write, replay side effect, non-idempotent projection
 A reasoning-oriented activity implementation used for analysis, review, or summarization; it does not own workflow lifecycle or runtime execution.
 _Avoid_: coding runtime, workflow engine
 
+**Eino Reasoning Provider**:
+The worker-scoped LLM provider used by Eino reasoning activities through Eino ChatModel implementations. It is configured independently from Multica Agent Runtime providers and is used only for orchestration analysis, advisory review, and summarization. The MVP implementation starts with one OpenAI-compatible ChatModel provider configured from worker environment variables; multi-provider UI, database-backed provider selection, and workspace-scoped provider policy are later extensions.
+_Avoid_: daemon runtime provider, coding agent provider, per-Agent execution backend, workspace provider selector in MVP
+
+**Eino Fail-Closed**:
+The rule that production Eino reasoning activities do not silently fall back to static heuristics when the Eino Reasoning Provider is missing, misconfigured, unavailable, or returns malformed output. Static analysis is allowed only for tests or explicit development/mock modes; real provider failures surface as Activity failures for Temporal retry, projection, or visible orchestration failure handling.
+_Avoid_: hidden static fallback, best-effort prompt generation, pretending provider reasoning happened
+
+**Eino Structured Output Contract**:
+The strict JSON contract for Eino reasoning outputs. Analyze-issue output must parse as JSON and contain only allowed analysis fields such as problem summary, execution advice, suspected context, risks, recommended agent prompt, reason code, and recommended action. Missing required fields, empty required values, natural-language-only responses, topology instructions, node mutations, workflow decisions, or authoritative success fields are malformed provider output.
+_Avoid_: prose scraping, best-effort extraction, LLM topology patch, final success flag
+
+**Eino Risk Signal**:
+A risk surfaced by Eino reasoning that informs advisory review and Temporal Outcome Policy. High-risk, destructive, migration, or similarly unsafe concerns can route an Orchestration Run to an Approval Gate, but an Eino Risk Signal is not a final success or failure verdict.
+_Avoid_: hidden blocker, LLM-owned failure, raw provider warning
+
 **Advisory Review**:
 An Eino-generated review of evidence, risks, and suggested next action that informs policy but cannot by itself mark an Orchestration Run successful.
 _Avoid_: final verdict, LLM-owned completion
@@ -406,6 +422,11 @@ _Avoid_: workspace-wide alert, agent mention loop, unrelated member mention
 - "waiting for agent work" could mean a long-running polling Activity or a Workflow waiting on Signal; resolved: **Agent Task Signal Bridge** is the first-stage completion path.
 - "workflow tables" could mean new `workflow_*` tables or the existing `orchestration_*` tables; resolved: use **Projection Table Reuse** and extend existing orchestration tables.
 - "Eino plans" could mean dynamic workflow generation or reasoning inside a fixed workflow; resolved: MVP uses **Fixed Workflow Reasoning** only.
+- "Eino provider" could mean the same provider as Multica's daemon-backed Agent Runtime provider; resolved: **Eino Reasoning Provider** is a separate worker-scoped ChatModel provider for reasoning activities only.
+- "real Eino provider" could mean a full provider marketplace or the first concrete SDK provider; resolved: MVP uses one OpenAI-compatible **Eino Reasoning Provider** through Eino ChatModel and leaves multi-provider configuration for later.
+- "Eino unavailable" could mean use the old static analyzer to keep the run moving; resolved: **Eino Fail-Closed** prohibits hidden static fallback in production.
+- "Eino output" could mean parse whatever prose the model returns; resolved: **Eino Structured Output Contract** requires strict JSON and treats prose-only or topology-changing output as malformed.
+- "Eino risk" could mean a final workflow decision or only hidden prompt context; resolved: **Eino Risk Signal** is visible advisory input that can route high-risk work to an Approval Gate through deterministic policy.
 - "`validate_result`" could mean running tests or validating evidence; resolved: MVP uses **Deterministic Result Validation** only.
 - "`review_result` success" could mean Eino's recommendation or final workflow outcome; resolved: **Advisory Review** informs **Temporal Outcome Policy**.
 - "`complete_issue`" could mean close the Issue or hand off reviewable work; resolved: MVP uses **Review Handoff** and does not auto-done.

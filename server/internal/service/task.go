@@ -809,6 +809,7 @@ func (s *TaskService) recordOrchestrationTaskOutcome(ctx context.Context, task d
 			END,
 			updated_at = now()
 		WHERE id = $1
+			AND status NOT IN ('completed', 'failed', 'cancelled', 'waiting_human')
 	`, nodeID, nodeStatus); err != nil {
 		return fmt.Errorf("update orchestration node outcome: %w", err)
 	}

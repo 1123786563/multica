@@ -173,7 +173,15 @@ export function issueOrchestrationOptions(wsId: string, id: string) {
   return queryOptions<IssueOrchestration>({
     queryKey: issueKeys.orchestration(wsId, id),
     queryFn: () => api.getIssueOrchestration(id),
+    refetchInterval: (query) => {
+      const plans = query.state.data?.plans ?? [];
+      return plans.some((plan) => isActiveOrchestrationStatus(plan.status)) ? 1500 : false;
+    },
   });
+}
+
+function isActiveOrchestrationStatus(status: string): boolean {
+  return status === "starting" || status === "running" || status === "waiting_human";
 }
 
 export function childIssueProgressOptions(wsId: string) {

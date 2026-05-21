@@ -15,6 +15,9 @@ func TestTemporalMVPCheckoutDocCoversRepeatableValidation(t *testing.T) {
 	required := []string{
 		"temporal server start-dev",
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233",
+		"ORCHESTRATION_EINO_PROVIDER=openai-compatible",
+		"ORCHESTRATION_EINO_API_KEY=replace-me",
+		"ORCHESTRATION_EINO_MODEL=replace-me",
 		"make orchestration-worker",
 		"make server",
 		"make daemon",
@@ -34,6 +37,26 @@ func TestTemporalMVPCheckoutDocCoversRepeatableValidation(t *testing.T) {
 	for _, want := range required {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("checkout doc missing %q", want)
+		}
+	}
+}
+
+func TestSelfhostComposePassesEinoProviderConfigToWorker(t *testing.T) {
+	raw, err := os.ReadFile("../../../docker-compose.selfhost.yml")
+	if err != nil {
+		t.Fatalf("read selfhost compose: %v", err)
+	}
+	compose := string(raw)
+	required := []string{
+		"ORCHESTRATION_EINO_PROVIDER",
+		"ORCHESTRATION_EINO_API_KEY",
+		"ORCHESTRATION_EINO_MODEL",
+		"ORCHESTRATION_EINO_BASE_URL",
+		"ORCHESTRATION_EINO_TIMEOUT",
+	}
+	for _, want := range required {
+		if !strings.Contains(compose, want) {
+			t.Fatalf("selfhost orchestration worker must pass %s", want)
 		}
 	}
 }
