@@ -16,14 +16,16 @@ type ActivitySet struct {
 	DB            service.OrchestrationDB
 	Queries       *db.Queries
 	Orchestration *service.OrchestrationService
-	Analyzer      IssueAnalyzer
+	Reasoner      EinoReasoner
 }
 
-type IssueAnalyzer interface {
+type EinoReasoner interface {
 	AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error)
+	ReviewOutcome(ctx context.Context, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (ReviewOutcomeResult, error)
+	SummarizeOutcome(ctx context.Context, review ReviewOutcomeResult, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (SummarizeOutcomeResult, error)
 }
 
-type StaticIssueAnalyzer struct{}
+type StaticEinoReasoner struct{}
 
 type resultSchemaV1 struct {
 	SchemaVersion string              `json:"schema_version"`
@@ -61,11 +63,11 @@ func (a ActivitySet) LoadIssue(ctx context.Context, input IssueWorkflowInput) (I
 }
 
 func (a ActivitySet) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
-	analyzer := a.Analyzer
-	if analyzer == nil {
-		analyzer = StaticIssueAnalyzer{}
+	reasoner := a.Reasoner
+	if reasoner == nil {
+		reasoner = StaticEinoReasoner{}
 	}
-	result, err := analyzer.AnalyzeIssue(ctx, issue, input)
+	result, err := reasoner.AnalyzeIssue(ctx, issue, input)
 	if err != nil {
 		return AnalyzeIssueResult{}, err
 	}
@@ -80,16 +82,26 @@ func (a ActivitySet) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, inpu
 	if strings.TrimSpace(result.RecommendedAction) == "" {
 		result.RecommendedAction = "none"
 	}
+	result.RecommendedAgentPrompt = withResultSchemaContract(result.RecommendedAgentPrompt)
 	if err := a.projectAnalysis(ctx, input, issue, result); err != nil {
 		return AnalyzeIssueResult{}, err
 	}
 	if err := a.projectNode(ctx, input.PlanID, "analyze", "completed", result.ReasonCode, result.RecommendedAction, 1); err != nil {
 		return AnalyzeIssueResult{}, err
 	}
+	if hasEinoTrace(result.Trace) {
+		planID, err := util.ParseUUID(input.PlanID)
+		if err != nil {
+			return AnalyzeIssueResult{}, err
+		}
+		if err := a.recordArtifact(ctx, planID, "analysis_trace", "eino", "analysis trace", einoTraceData(result.Trace, safeAnalyzeIssueOutput(result))); err != nil {
+			return AnalyzeIssueResult{}, err
+		}
+	}
 	return result, nil
 }
 
-func (StaticIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
+func (StaticEinoReasoner) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
 	result := AnalyzeIssueResult{
 		ProblemSummary:         summarizeIssue(issue),
 		ExecutionAdvice:        "Dispatch the agent with a narrow fix, preserve the existing issue/task contract, and validate the result before marking the run complete.",
@@ -276,6 +288,63 @@ func nonEmptyStrings(values []string) []string {
 	return trimmed
 }
 
+func hasEinoTrace(trace EinoTrace) bool {
+	return strings.TrimSpace(trace.ReasoningProfileRef) != "" ||
+		strings.TrimSpace(trace.PromptProfileRef) != "" ||
+		strings.TrimSpace(trace.SchemaName) != "" ||
+		strings.TrimSpace(trace.SchemaVersion) != "" ||
+		strings.TrimSpace(trace.ProviderLabel) != "" ||
+		strings.TrimSpace(trace.Model) != "" ||
+		strings.TrimSpace(trace.CapabilityMode) != "" ||
+		trace.LatencyMS != 0 ||
+		trace.InputTokens != 0 ||
+		trace.OutputTokens != 0 ||
+		trace.TotalTokens != 0
+}
+
+func einoTraceData(trace EinoTrace, parsedOutput map[string]any) map[string]any {
+	return map[string]any{
+		"reasoning_profile_ref": normalizeReasoningProfileRef(trace.ReasoningProfileRef),
+		"prompt_profile_ref":    strings.TrimSpace(trace.PromptProfileRef),
+		"schema_name":           strings.TrimSpace(trace.SchemaName),
+		"schema_version":        strings.TrimSpace(trace.SchemaVersion),
+		"provider_label":        strings.TrimSpace(trace.ProviderLabel),
+		"model":                 strings.TrimSpace(trace.Model),
+		"capability_mode":       strings.TrimSpace(trace.CapabilityMode),
+		"latency_ms":            trace.LatencyMS,
+		"usage": map[string]any{
+			"input_tokens":  trace.InputTokens,
+			"output_tokens": trace.OutputTokens,
+			"total_tokens":  trace.TotalTokens,
+		},
+		"parsed_output": parsedOutput,
+	}
+}
+
+func safeAnalyzeIssueOutput(result AnalyzeIssueResult) map[string]any {
+	return map[string]any{
+		"problem_summary":    result.ProblemSummary,
+		"reason_code":        result.ReasonCode,
+		"recommended_action": result.RecommendedAction,
+	}
+}
+
+func safeReviewOutcomeOutput(result ReviewOutcomeResult) map[string]any {
+	return map[string]any{
+		"summary":            result.Summary,
+		"high_risk":          result.HighRisk,
+		"severity_label":     result.SeverityLabel,
+		"recommended_action": result.RecommendedAction,
+	}
+}
+
+func safeSummarizeOutcomeOutput(result SummarizeOutcomeResult) map[string]any {
+	return map[string]any{
+		"summary":   result.Summary,
+		"trace_ref": result.TraceRef,
+	}
+}
+
 func retryableEvidenceResult(input ValidateOutcomeInput, detail string) ValidateOutcomeResult {
 	return ValidateOutcomeResult{
 		Status:             "waiting_human",
@@ -289,6 +358,77 @@ func retryableEvidenceResult(input ValidateOutcomeInput, detail string) Validate
 }
 
 func (a ActivitySet) ReviewOutcome(ctx context.Context, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (ReviewOutcomeResult, error) {
+	reasoner := a.Reasoner
+	if reasoner == nil {
+		reasoner = StaticEinoReasoner{}
+	}
+	result, err := reasoner.ReviewOutcome(ctx, validation, analysis, issue, dispatch)
+	if err != nil {
+		return ReviewOutcomeResult{}, err
+	}
+	summary := strings.TrimSpace(strings.Join([]string{
+		analysis.ProblemSummary,
+		validation.ProjectionDetail,
+	}, " "))
+	if strings.TrimSpace(result.Summary) == "" {
+		result.Summary = summary
+	}
+	if strings.TrimSpace(result.RecommendedAction) == "" {
+		result.RecommendedAction = "review"
+	}
+	nodeStatus := "completed"
+	reasonCode := validation.ReasonCode
+	recommendedAction := result.RecommendedAction
+	if validation.NeedsHumanReview || validation.TerminalPlanStatus == "waiting_human" {
+		nodeStatus = "waiting_human"
+		if strings.TrimSpace(validation.RecommendedAction) != "" {
+			recommendedAction = validation.RecommendedAction
+		} else {
+			recommendedAction = "review"
+		}
+	}
+	if result.HighRisk {
+		nodeStatus = "waiting_human"
+		reasonCode = "review_high_risk"
+		recommendedAction = "review"
+	}
+	if err := a.projectNode(ctx, dispatch.PlanID, "review", nodeStatus, reasonCode, recommendedAction, dispatch.Attempt); err != nil {
+		return ReviewOutcomeResult{}, err
+	}
+	if hasEinoTrace(result.Trace) {
+		planID, err := util.ParseUUID(dispatch.PlanID)
+		if err != nil {
+			return ReviewOutcomeResult{}, err
+		}
+		if err := a.recordArtifact(ctx, planID, "review_trace", "eino", "review trace", einoTraceData(result.Trace, safeReviewOutcomeOutput(result))); err != nil {
+			return ReviewOutcomeResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func (a ActivitySet) SummarizeOutcome(ctx context.Context, review ReviewOutcomeResult, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (SummarizeOutcomeResult, error) {
+	reasoner := a.Reasoner
+	if reasoner == nil {
+		reasoner = StaticEinoReasoner{}
+	}
+	result, err := reasoner.SummarizeOutcome(ctx, review, validation, analysis, issue, dispatch)
+	if err != nil {
+		return SummarizeOutcomeResult{}, err
+	}
+	if hasEinoTrace(result.Trace) {
+		planID, err := util.ParseUUID(dispatch.PlanID)
+		if err != nil {
+			return SummarizeOutcomeResult{}, err
+		}
+		if err := a.recordArtifact(ctx, planID, "summary_trace", "eino", "summary trace", einoTraceData(result.Trace, safeSummarizeOutcomeOutput(result))); err != nil {
+			return SummarizeOutcomeResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func (StaticEinoReasoner) ReviewOutcome(ctx context.Context, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (ReviewOutcomeResult, error) {
 	summary := strings.TrimSpace(strings.Join([]string{
 		analysis.ProblemSummary,
 		validation.ProjectionDetail,
@@ -315,21 +455,13 @@ func (a ActivitySet) ReviewOutcome(ctx context.Context, validation ValidateOutco
 			break
 		}
 	}
-	nodeStatus := "completed"
-	reasonCode := validation.ReasonCode
-	recommendedAction := result.RecommendedAction
-	if result.HighRisk {
-		nodeStatus = "waiting_human"
-		reasonCode = "review_high_risk"
-		recommendedAction = "review"
-	}
-	if err := a.projectNode(ctx, dispatch.PlanID, "review", nodeStatus, reasonCode, recommendedAction, dispatch.Attempt); err != nil {
-		return ReviewOutcomeResult{}, err
+	if result.SeverityLabel == "" {
+		result.SeverityLabel = "low"
 	}
 	return result, nil
 }
 
-func (a ActivitySet) SummarizeOutcome(ctx context.Context, review ReviewOutcomeResult, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (SummarizeOutcomeResult, error) {
+func (StaticEinoReasoner) SummarizeOutcome(ctx context.Context, review ReviewOutcomeResult, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (SummarizeOutcomeResult, error) {
 	summary := strings.TrimSpace(strings.Join([]string{
 		analysis.ExecutionAdvice,
 		review.Summary,
@@ -542,6 +674,68 @@ func (a ActivitySet) ProjectSignalAudit(ctx context.Context, input SignalAuditIn
 	})
 }
 
+func (a ActivitySet) ProjectEinoFailure(ctx context.Context, input EinoFailureProjectionInput) error {
+	if a.DB == nil {
+		return fmt.Errorf("projection store unavailable")
+	}
+	planID, err := util.ParseUUID(input.PlanID)
+	if err != nil {
+		return err
+	}
+	reasonCode := strings.TrimSpace(input.ReasonCode)
+	if reasonCode == "" {
+		reasonCode = EinoReasonProviderUnavailable
+	}
+	action := strings.TrimSpace(input.RecommendedAction)
+	if action == "" {
+		action = recommendedActionForEinoFailure(reasonCode)
+	}
+	message := strings.TrimSpace(input.Message)
+	if message == "" {
+		message = "Eino provider failed"
+	}
+	if err := a.projectNode(ctx, input.PlanID, input.WorkflowNodeKey, "failed", reasonCode, action, input.Attempt); err != nil {
+		return err
+	}
+	if _, err := a.DB.Exec(ctx, `
+		UPDATE orchestration_plan
+		SET status = 'failed',
+			reason_code = $2,
+			recommended_action = $3,
+			sync_error = $4,
+			updated_at = now(),
+			completed_at = now()
+		WHERE id = $1 AND status NOT IN ('cancelled', 'completed')
+	`, planID, reasonCode, action, message); err != nil {
+		return err
+	}
+	if err := a.recordEvent(ctx, planID, "eino.provider_failed", "eino", message, map[string]any{
+		"workflow_node_key":     input.WorkflowNodeKey,
+		"reason_code":           reasonCode,
+		"recommended_action":    action,
+		"reasoning_profile_ref": input.ReasoningProfileRef,
+	}); err != nil {
+		return err
+	}
+	trace := map[string]any{
+		"reasoning_profile_ref": input.ReasoningProfileRef,
+		"schema_name":           input.SchemaName,
+		"schema_version":        input.SchemaVersion,
+		"provider_label":        input.ProviderLabel,
+		"model":                 input.Model,
+		"capability_mode":       input.CapabilityMode,
+		"latency_ms":            input.LatencyMS,
+		"failure": map[string]any{
+			"reason_code": reasonCode,
+			"message":     message,
+		},
+	}
+	if err := a.recordArtifact(ctx, planID, "provider_failure_trace", "eino", "Provider failure", trace); err != nil {
+		return err
+	}
+	return service.CreateOrchestrationAttention(ctx, a.DB, planID, "eino_failure:"+reasonCode, "Eino provider failure: "+message)
+}
+
 func (a ActivitySet) projectAnalysis(ctx context.Context, input IssueWorkflowInput, issue IssueSnapshot, analysis AnalyzeIssueResult) error {
 	return a.ProjectAnalysis(ctx, input, issue, analysis)
 }
@@ -684,7 +878,29 @@ func buildAgentPrompt(issue IssueSnapshot, input IssueWorkflowInput) string {
 	b.WriteString(input.PlanID)
 	b.WriteString("\n")
 	b.WriteString("Write the smallest change that satisfies the issue and keep the orchestration contract intact.")
-	return b.String()
+	return withResultSchemaContract(b.String())
+}
+
+const resultSchemaV1Contract = `Authoritative Result Schema v1 contract:
+- Return exactly one JSON object as your final assistant message, with no markdown fences and no prose.
+- The daemon validates your final assistant message only. Do not use a shell command to echo the JSON and do not use multica issue comment add to deliver it.
+- schema_version must be the string "1" exactly, not "1.0".
+- Required shape: {"schema_version":"1","summary":"...","changed_files":["path/to/file"],"artifacts":[],"tests":[{"name":"npm test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"npm test"}]}
+- changed_files must be a non-empty array of touched file paths.
+- tests must be an array of objects with name and status. Use status "passed" or "skipped" for a successful orchestration.
+- evidence must be a non-empty array of objects with type and ref. Include at least the verification command output reference.
+- artifacts may be [] if there are no separate artifacts. If present, artifacts must use label and ref exactly.
+- Do not output tests as an object like {"run":true,"passed":1}. Do not output artifacts as {"name":"...","path":"..."}.`
+
+func withResultSchemaContract(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if strings.Contains(prompt, "Authoritative Result Schema v1 contract:") {
+		return prompt
+	}
+	if prompt == "" {
+		return resultSchemaV1Contract
+	}
+	return prompt + "\n\n" + resultSchemaV1Contract
 }
 
 func textValue(v pgtype.Text) string {

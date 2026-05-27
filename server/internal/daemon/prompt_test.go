@@ -63,6 +63,20 @@ func TestBuildPromptUsesOrchestrationPromptAndResultSchemaContract(t *testing.T)
 	if !strings.Contains(out, `"schema_version":"1"`) {
 		t.Fatalf("orchestration prompt missing Result Schema v1 contract:\n%s", out)
 	}
+	for _, s := range []string{
+		"Authoritative Result Schema v1 contract:",
+		"final assistant message",
+		"Do not use a shell command to echo the JSON and do not use multica issue comment add",
+		"Do not use a shell command to echo the JSON",
+		"tests must be an array",
+		"evidence must be a non-empty array",
+		"artifacts must use label and ref exactly",
+		`Do not output tests as an object like {"run":true,"passed":1}`,
+	} {
+		if !strings.Contains(out, s) {
+			t.Fatalf("orchestration prompt missing canonical contract rule %q:\n%s", s, out)
+		}
+	}
 	if strings.Contains(out, "Start by running `multica issue get") {
 		t.Fatalf("orchestration prompt should not fall back to the generic issue prompt:\n%s", out)
 	}

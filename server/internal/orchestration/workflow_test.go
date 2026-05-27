@@ -26,6 +26,7 @@ func registerIssueWorkflowTestActivities(env *testsuite.TestWorkflowEnvironment)
 	env.RegisterActivityWithOptions(ActivitySet{}.FinalizeWorkflow, activity.RegisterOptions{Name: FinalizeWorkflowActivityName})
 	env.RegisterActivityWithOptions(ActivitySet{}.ProjectAnalysis, activity.RegisterOptions{Name: ProjectAnalysisActivityName})
 	env.RegisterActivityWithOptions(ActivitySet{}.ProjectSignalAudit, activity.RegisterOptions{Name: ProjectSignalAuditActivityName})
+	env.RegisterActivityWithOptions(ActivitySet{}.ProjectEinoFailure, activity.RegisterOptions{Name: ProjectEinoFailureActivityName})
 }
 
 func TestIssueWorkflowWaitsForOutcomeSignalAndFinalizes(t *testing.T) {
@@ -275,8 +276,8 @@ func TestIssueWorkflowRetriesEvidenceInsufficientOnceBeforeFinalizing(t *testing
 		TerminalPlanStatus: "completed",
 		ProjectionDetail:   "structured result validated",
 	}, nil).Once()
-	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(ReviewOutcomeResult{Summary: "review"}, nil).Twice()
-	env.OnActivity(SummarizeOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(SummarizeOutcomeResult{Summary: "summary"}, nil).Twice()
+	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(ReviewOutcomeResult{Summary: "review"}, nil).Once()
+	env.OnActivity(SummarizeOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(SummarizeOutcomeResult{Summary: "summary"}, nil).Once()
 	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
 		return validation.ShouldRetry &&
 			validation.Status == "failed" &&
@@ -333,6 +334,74 @@ func TestIssueWorkflowRetriesEvidenceInsufficientOnceBeforeFinalizing(t *testing
 	env.AssertExpectations(t)
 }
 
+func TestIssueWorkflowProjectsEinoFailureAfterReviewFailure(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	registerIssueWorkflowTestActivities(env)
+
+	input := IssueWorkflowInput{
+		WorkspaceID:         "workspace-1",
+		IssueID:             "issue-1",
+		PlanID:              "plan-1",
+		WorkflowID:          "workflow-1",
+		ReasoningProfileRef: "worker-default",
+	}
+
+	env.OnActivity(LoadIssueActivityName, mock.Anything, mock.Anything).Return(IssueSnapshot{
+		WorkspaceID: "workspace-1",
+		IssueID:     "issue-1",
+		Title:       "Provider failure projection",
+	}, nil)
+	env.OnActivity(AnalyzeIssueActivityName, mock.Anything, mock.Anything, mock.Anything).Return(AnalyzeIssueResult{
+		ProblemSummary:         "Provider failure projection",
+		ExecutionAdvice:        "Keep the failure visible",
+		RecommendedAgentPrompt: "Implement the failure projection",
+		ReasonCode:             "eino_analysis_ready",
+		RecommendedAction:      "none",
+	}, nil)
+	env.OnActivity(DispatchTaskActivityName, mock.Anything, mock.Anything).Return(service.DispatchAgentTaskResult{
+		PlanID:  "plan-1",
+		TaskID:  "task-2",
+		NodeID:  "node-2",
+		Attempt: 2,
+	}, nil)
+	env.OnActivity(ValidateOutcomeActivityName, mock.Anything, mock.Anything).Return(ValidateOutcomeResult{
+		Status:             "completed",
+		TerminalPlanStatus: "completed",
+	}, nil)
+	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(ReviewOutcomeResult{}, newEinoFailure(EinoReasonProviderTimeout, "provider timed out")).Times(3)
+	env.OnActivity(ProjectEinoFailureActivityName, mock.Anything, mock.MatchedBy(func(in EinoFailureProjectionInput) bool {
+		return in.WorkflowNodeKey == "review" &&
+			in.Attempt == 2 &&
+			in.ReasonCode == EinoReasonProviderTimeout &&
+			in.RecommendedAction == "retry_later" &&
+			in.ReasoningProfileRef == "worker-default"
+	})).Return(nil).Once()
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(AgentTaskOutcomeSignalName, service.AgentTaskOutcomeSignalInput{
+			WorkflowID:     "workflow-1",
+			PlanID:         "plan-1",
+			NodeID:         "node-2",
+			TaskID:         "task-2",
+			Attempt:        2,
+			OutcomeVersion: 1,
+			Status:         "completed",
+			Result:         json.RawMessage(`{"schema_version":"1","summary":"done","changed_files":["server/internal/orchestration/workflow.go"],"artifacts":[],"tests":[{"name":"go test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"go test"}]}`),
+		})
+	}, time.Second)
+
+	env.ExecuteWorkflow(IssueWorkflow, input)
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("workflow should complete with failure projection after Eino provider failure")
+	}
+	if err := env.GetWorkflowError(); err == nil {
+		t.Fatal("workflow should still fail after projecting Eino provider failure")
+	}
+	env.AssertExpectations(t)
+}
+
 func TestIssueWorkflowRetryProjectionIncludesPriorEvidenceSummary(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
@@ -368,8 +437,6 @@ func TestIssueWorkflowRetryProjectionIncludesPriorEvidenceSummary(t *testing.T) 
 		ChangedFiles:       []string{"server/a.go"},
 		Evidence:           []ResultEvidenceRef{{Type: "log", Ref: "task log"}},
 	}, nil).Once()
-	env.OnActivity(ReviewOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(ReviewOutcomeResult{Summary: "review"}, nil).Once()
-	env.OnActivity(SummarizeOutcomeActivityName, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(SummarizeOutcomeResult{Summary: "summary"}, nil).Once()
 	env.OnActivity(FinalizeWorkflowActivityName, mock.Anything, mock.MatchedBy(func(validation ValidateOutcomeResult) bool {
 		return validation.ShouldRetry &&
 			validation.TerminalPlanStatus == "running" &&

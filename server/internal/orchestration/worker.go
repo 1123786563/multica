@@ -77,6 +77,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 	w.RegisterActivityWithOptions(activities.FinalizeWorkflow, activity.RegisterOptions{Name: FinalizeWorkflowActivityName})
 	w.RegisterActivityWithOptions(activities.ProjectAnalysis, activity.RegisterOptions{Name: ProjectAnalysisActivityName})
 	w.RegisterActivityWithOptions(activities.ProjectSignalAudit, activity.RegisterOptions{Name: ProjectSignalAuditActivityName})
+	w.RegisterActivityWithOptions(activities.ProjectEinoFailure, activity.RegisterOptions{Name: ProjectEinoFailureActivityName})
 
 	slog.Info("temporal orchestration worker starting",
 		"task_queue", taskQueue,
@@ -87,7 +88,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg WorkerConfig) error {
 }
 
 func NewWorkerActivitySet(ctx context.Context, pool service.OrchestrationDB, queries *db.Queries, orchestrationSvc *service.OrchestrationService, cfg EinoReasoningConfig) (ActivitySet, error) {
-	analyzer, err := newWorkerIssueAnalyzer(ctx, cfg)
+	reasoner, err := newWorkerEinoReasoner(ctx, cfg)
 	if err != nil {
 		return ActivitySet{}, err
 	}
@@ -95,17 +96,21 @@ func NewWorkerActivitySet(ctx context.Context, pool service.OrchestrationDB, que
 		DB:            pool,
 		Queries:       queries,
 		Orchestration: orchestrationSvc,
-		Analyzer:      analyzer,
+		Reasoner:      reasoner,
 	}, nil
 }
 
-func newWorkerIssueAnalyzer(ctx context.Context, cfg EinoReasoningConfig) (IssueAnalyzer, error) {
+func newWorkerEinoReasoner(ctx context.Context, cfg EinoReasoningConfig) (EinoReasoner, error) {
+	cfg.ReasoningProfileRef = normalizeReasoningProfileRef(cfg.ReasoningProfileRef)
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), EinoProviderStatic) {
-		return StaticIssueAnalyzer{}, nil
+		if !cfg.AllowStatic {
+			return nil, fmt.Errorf("static Eino reasoning provider requires ORCHESTRATION_EINO_ALLOW_STATIC=1")
+		}
+		return StaticEinoReasoner{}, nil
 	}
-	analyzer, err := NewEinoIssueAnalyzer(ctx, cfg)
+	reasoner, err := NewEinoIssueAnalyzer(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("configure Eino reasoning provider: %w", err)
 	}
-	return analyzer, nil
+	return reasoner, nil
 }

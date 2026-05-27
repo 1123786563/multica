@@ -22,6 +22,7 @@ var (
 )
 
 const maxOrchestrationNodeAttempts = 2
+const defaultIssueReasoningProfileRef = "worker-default"
 
 type WorkflowAlreadyStartedError struct {
 	WorkflowID string
@@ -66,10 +67,11 @@ type TaskEnqueueNotifier interface {
 }
 
 type IssueWorkflowStartInput struct {
-	WorkspaceID string
-	IssueID     string
-	PlanID      string
-	WorkflowID  string
+	WorkspaceID         string
+	IssueID             string
+	PlanID              string
+	WorkflowID          string
+	ReasoningProfileRef string
 }
 
 type TemporalWorkflowStart struct {
@@ -114,21 +116,30 @@ func NewOrchestrationService(db OrchestrationDB, tx TxStarter, starter TemporalW
 	return &OrchestrationService{DB: db, Tx: tx, Starter: starter}
 }
 
+func normalizeIssueReasoningProfileRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return defaultIssueReasoningProfileRef
+	}
+	return ref
+}
+
 type OrchestrationPlan struct {
-	ID                 string                  `json:"id"`
-	IssueID            string                  `json:"issue_id"`
-	Status             string                  `json:"status"`
-	TemporalWorkflowID string                  `json:"temporal_workflow_id,omitempty"`
-	TemporalRunID      string                  `json:"temporal_run_id,omitempty"`
-	WorkflowType       string                  `json:"workflow_type"`
-	ProjectionVersion  int                     `json:"projection_version"`
-	CreatedAt          time.Time               `json:"created_at"`
-	UpdatedAt          time.Time               `json:"updated_at"`
-	Summary            OrchestrationSummary    `json:"summary"`
-	AvailableActions   []string                `json:"available_actions"`
-	Nodes              []OrchestrationNode     `json:"nodes"`
-	Events             []OrchestrationEvent    `json:"events"`
-	Artifacts          []OrchestrationArtifact `json:"artifacts"`
+	ID                  string                  `json:"id"`
+	IssueID             string                  `json:"issue_id"`
+	Status              string                  `json:"status"`
+	ReasoningProfileRef string                  `json:"reasoning_profile_ref"`
+	TemporalWorkflowID  string                  `json:"temporal_workflow_id,omitempty"`
+	TemporalRunID       string                  `json:"temporal_run_id,omitempty"`
+	WorkflowType        string                  `json:"workflow_type"`
+	ProjectionVersion   int                     `json:"projection_version"`
+	CreatedAt           time.Time               `json:"created_at"`
+	UpdatedAt           time.Time               `json:"updated_at"`
+	Summary             OrchestrationSummary    `json:"summary"`
+	AvailableActions    []string                `json:"available_actions"`
+	Nodes               []OrchestrationNode     `json:"nodes"`
+	Events              []OrchestrationEvent    `json:"events"`
+	Artifacts           []OrchestrationArtifact `json:"artifacts"`
 }
 
 type OrchestrationSummary struct {
@@ -229,6 +240,7 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 
 	workspaceIDStr := util.UUIDToString(workspaceID)
 	issueIDStr := util.UUIDToString(issueID)
+	reasoningProfileRef := normalizeIssueReasoningProfileRef("")
 
 	tx, err := s.Tx.Begin(ctx)
 	if err != nil {
@@ -273,13 +285,14 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO orchestration_plan (
 				workspace_id, issue_id, status, reason_code, recommended_action,
+				reasoning_profile_ref,
 				workflow_type, projection_version, last_synced_at, sync_error,
 				completed_at
 			)
 			VALUES ($1, $2, 'starting', '', 'none',
-				'issue_mvp', 1, now(), NULL, NULL)
+				$3, 'issue_mvp', 1, now(), NULL, NULL)
 			RETURNING id
-		`, workspaceID, issueID).Scan(&planID); err != nil {
+		`, workspaceID, issueID, reasoningProfileRef).Scan(&planID); err != nil {
 			return StartOrchestrationResult{}, err
 		}
 	}
@@ -289,9 +302,10 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 		if _, err := tx.Exec(ctx, `
 			UPDATE orchestration_plan
 			SET temporal_workflow_id = $2,
+				reasoning_profile_ref = $3,
 				updated_at = now()
 			WHERE id = $1
-		`, planID, workflowID); err != nil {
+		`, planID, workflowID, reasoningProfileRef); err != nil {
 			return StartOrchestrationResult{}, err
 		}
 	}
@@ -309,10 +323,11 @@ func (s *OrchestrationService) StartIssue(ctx context.Context, workspaceID, issu
 	}
 
 	start, err := s.Starter.StartIssueWorkflow(ctx, IssueWorkflowStartInput{
-		WorkspaceID: workspaceIDStr,
-		IssueID:     issueIDStr,
-		PlanID:      util.UUIDToString(planID),
-		WorkflowID:  workflowID,
+		WorkspaceID:         workspaceIDStr,
+		IssueID:             issueIDStr,
+		PlanID:              util.UUIDToString(planID),
+		WorkflowID:          workflowID,
+		ReasoningProfileRef: reasoningProfileRef,
 	})
 	if err != nil {
 		var alreadyStarted WorkflowAlreadyStartedError
@@ -968,6 +983,7 @@ func (s *OrchestrationService) getPlanWithActions(ctx context.Context, planID pg
 	if err := s.DB.QueryRow(ctx, `
 		SELECT id, issue_id, status, reason_code, recommended_action,
 			COALESCE(temporal_workflow_id, ''), COALESCE(temporal_run_id, ''),
+			COALESCE(reasoning_profile_ref, 'legacy/default'),
 			workflow_type, projection_version, created_at, updated_at
 		FROM orchestration_plan
 		WHERE id = $1
@@ -979,6 +995,7 @@ func (s *OrchestrationService) getPlanWithActions(ctx context.Context, planID pg
 		&plan.Summary.RecommendedAction,
 		&plan.TemporalWorkflowID,
 		&plan.TemporalRunID,
+		&plan.ReasoningProfileRef,
 		&plan.WorkflowType,
 		&plan.ProjectionVersion,
 		&plan.CreatedAt,

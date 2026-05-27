@@ -1062,6 +1062,45 @@ func TestInjectRuntimeConfigRequiresExplicitCommentPost(t *testing.T) {
 	}
 }
 
+func TestInjectRuntimeConfigOrchestrationCapturesFinalJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if _, err := InjectRuntimeConfig(dir, "claude", TaskContextForEnv{
+		IssueID:         "issue-1",
+		IsOrchestration: true,
+	}); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	s := string(data)
+
+	for _, want := range []string{
+		"triggered by a Multica orchestration workflow",
+		"final assistant message must be exactly the Result Schema v1 JSON object",
+		"daemon captures only your final assistant message",
+		"Do NOT use `multica issue comment add` to deliver the JSON",
+		"Do NOT run a shell command only to echo the JSON",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("orchestration runtime config missing %q\n---\n%s", want, s)
+		}
+	}
+	for _, banned := range []string{
+		"Post your final results as a comment",
+		"Final results MUST be delivered via `multica issue comment add`",
+		"Run `multica issue status issue-1 in_progress`",
+		"Run `multica issue comment list issue-1",
+	} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("orchestration runtime config contains assignment/comment guidance %q\n---\n%s", banned, s)
+		}
+	}
+}
+
 // TestInjectRuntimeConfigAvailableCommandsIsNeutral pins that the global
 // Available Commands section lists the three input modes neutrally for
 // every non-Codex provider on every host OS, with no "MUST pipe via stdin"

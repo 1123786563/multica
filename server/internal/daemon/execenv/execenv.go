@@ -61,6 +61,7 @@ type TaskContextForEnv struct {
 	AutopilotSource         string
 	AutopilotTriggerPayload string
 	QuickCreatePrompt       string // non-empty for quick-create tasks
+	IsOrchestration         bool   // true for Temporal orchestration dispatch tasks
 	IsSquadLeader           bool   // true when the agent is acting as a squad leader (may exit silently on no_action)
 }
 

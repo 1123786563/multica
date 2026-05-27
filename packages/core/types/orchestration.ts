@@ -38,6 +38,7 @@ export interface IssueOrchestrationPlan {
   id: string;
   issue_id: string;
   status: string;
+  reasoning_profile_ref: string;
   temporal_workflow_id?: string;
   temporal_run_id?: string;
   workflow_type: string;

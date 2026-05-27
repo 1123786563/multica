@@ -45,10 +45,23 @@ func buildOrchestrationPrompt(task Task) string {
 		fmt.Fprintf(&b, "Your assigned issue ID is: %s\n\n", task.IssueID)
 	}
 	b.WriteString(strings.TrimSpace(task.OrchestrationPrompt))
-	b.WriteString("\n\nWhen finished, return only a JSON object matching Result Schema v1, with no markdown fences or prose. Required shape:\n")
-	b.WriteString(`{"schema_version":"1","summary":"...","changed_files":[],"artifacts":[],"tests":[],"risks":[],"evidence":[]}`)
+	b.WriteString("\n\n")
+	b.WriteString(orchestrationResultSchemaContract())
 	b.WriteString("\n")
 	return b.String()
+}
+
+func orchestrationResultSchemaContract() string {
+	return `Authoritative Result Schema v1 contract:
+- Return exactly one JSON object as your final assistant message, with no markdown fences and no prose.
+- The daemon validates your final assistant message only. Do not use a shell command to echo the JSON and do not use multica issue comment add to deliver it.
+- schema_version must be the string "1" exactly, not "1.0".
+- Required shape: {"schema_version":"1","summary":"...","changed_files":["path/to/file"],"artifacts":[],"tests":[{"name":"npm test","status":"passed"}],"risks":[],"evidence":[{"type":"test","ref":"npm test"}]}
+- changed_files must be a non-empty array of touched file paths.
+- tests must be an array of objects with name and status. Use status "passed" or "skipped" for a successful orchestration.
+- evidence must be a non-empty array of objects with type and ref. Include at least the verification command output reference.
+- artifacts may be [] if there are no separate artifacts. If present, artifacts must use label and ref exactly.
+- Do not output tests as an object like {"run":true,"passed":1}. Do not output artifacts as {"name":"...","path":"..."}.`
 }
 
 // buildQuickCreatePrompt constructs a prompt for quick-create tasks. The

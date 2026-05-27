@@ -619,6 +619,83 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByText("Follow the Temporal MVP path")).toBeInTheDocument();
   });
 
+  it("renders orchestration reasoning profile and safe provider failure trace", async () => {
+    mockApiObj.getIssueOrchestration.mockResolvedValue({
+      plans: [
+        {
+          id: "plan-1",
+          issue_id: "issue-1",
+          status: "failed",
+          reasoning_profile_ref: "worker-default",
+          workflow_type: "issue_mvp",
+          projection_version: 1,
+          temporal_workflow_id: "multica/ws-1/issue/issue-1/run/plan-1",
+          temporal_run_id: "run-1",
+          created_at: "2026-01-20T00:00:00Z",
+          updated_at: "2026-01-20T00:00:00Z",
+          summary: { reason_code: "provider_timeout", recommended_action: "retry_later" },
+          available_actions: [],
+          nodes: [
+            {
+              id: "node-1",
+              node_key: "review",
+              workflow_node_key: "review",
+              title: "Review handoff",
+              status: "failed",
+              reason_code: "provider_timeout",
+              recommended_action: "retry_later",
+              available_actions: [],
+              attempt: 1,
+            },
+          ],
+          events: [
+            {
+              id: "event-1",
+              type: "eino.provider_failed",
+              source: "eino",
+              message: "Provider timed out",
+              details: { reason_code: "provider_timeout", reasoning_profile_ref: "worker-default" },
+            },
+          ],
+          artifacts: [
+            {
+              id: "artifact-1",
+              type: "provider_failure_trace",
+              source: "eino",
+              label: "Provider failure",
+              data: {
+                reasoning_profile_ref: "worker-default",
+                schema_name: "multica_review_outcome",
+                schema_version: "1",
+                provider_label: "openai-compatible",
+                model: "test-model",
+                capability_mode: "json_schema",
+                latency_ms: 1500,
+                usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+                failure: {
+                  reason_code: "provider_timeout",
+                  message: "Provider timed out",
+                },
+                raw_prompt: "must not render",
+                raw_response: "must not render",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    renderIssueDetail();
+
+    expect(await screen.findByText("worker-default")).toBeInTheDocument();
+    expect(screen.getAllByText(/Provider timed out/i).length).toBeGreaterThan(0);
+    expect(screen.getByText("openai-compatible")).toBeInTheDocument();
+    expect(screen.getByText("test-model")).toBeInTheDocument();
+    expect(screen.getByText("multica_review_outcome")).toBeInTheDocument();
+    expect(screen.queryByText(/raw_prompt/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/raw_response/i)).not.toBeInTheDocument();
+  });
+
   it("lets users start orchestration when no plan exists", async () => {
     mockApiObj.getIssueOrchestration.mockResolvedValue({ plans: [] });
 

@@ -225,6 +225,7 @@ const IssueOrchestrationPlanSchema = z.object({
   id: z.string(),
   issue_id: z.string(),
   status: z.string(),
+  reasoning_profile_ref: z.string().default("legacy/default"),
   temporal_workflow_id: z.string().optional(),
   temporal_run_id: z.string().optional(),
   workflow_type: z.string().default("issue_mvp"),

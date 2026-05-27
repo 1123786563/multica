@@ -13,9 +13,13 @@ import (
 
 type captureArtifactDB struct {
 	onArtifact func(sql string, args ...any)
+	sqls       []string
+	args       [][]any
 }
 
 func (m *captureArtifactDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	m.sqls = append(m.sqls, sql)
+	m.args = append(m.args, args)
 	if m.onArtifact != nil {
 		m.onArtifact(sql, args...)
 	}
@@ -136,13 +140,256 @@ func TestFinalizeWorkflowNeverAutoClosesIssue(t *testing.T) {
 	}
 }
 
-type stubIssueAnalyzer struct {
-	result AnalyzeIssueResult
-	err    error
+func TestProjectEinoFailureRecordsVisibleSafeTrace(t *testing.T) {
+	var executedSQL []string
+	var executedArgs [][]any
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			executedSQL = append(executedSQL, sql)
+			executedArgs = append(executedArgs, args)
+		}},
+	}
+
+	err := activity.ProjectEinoFailure(t.Context(), EinoFailureProjectionInput{
+		PlanID:              "00000000-0000-0000-0000-000000000001",
+		WorkflowNodeKey:     "review",
+		Attempt:             2,
+		ReasonCode:          EinoReasonProviderTimeout,
+		RecommendedAction:   "retry_later",
+		Message:             "provider timed out",
+		ReasoningProfileRef: "worker-default",
+		SchemaName:          "multica_review_outcome",
+		SchemaVersion:       "1",
+		ProviderLabel:       "openai-compatible",
+		Model:               "configured-model",
+		CapabilityMode:      "json_schema",
+		LatencyMS:           1500,
+	})
+	if err != nil {
+		t.Fatalf("ProjectEinoFailure returned error: %v", err)
+	}
+
+	var sawNode, sawPlan, sawEvent, sawTrace bool
+	for i, sql := range executedSQL {
+		lower := strings.ToLower(sql)
+		args := executedArgs[i]
+		if strings.Contains(lower, "orchestration_node") && containsArg(args, "review") && containsArg(args, "failed") && containsIntArg(args, 2) {
+			sawNode = true
+		}
+		if strings.Contains(lower, "update orchestration_plan") &&
+			containsArg(args, EinoReasonProviderTimeout) &&
+			containsArg(args, "retry_later") {
+			sawPlan = true
+		}
+		if strings.Contains(lower, "orchestration_event") && containsArg(args, "eino.provider_failed") {
+			sawEvent = true
+		}
+		if strings.Contains(lower, "orchestration_artifact") && containsArg(args, "provider_failure_trace") {
+			for _, arg := range args {
+				raw, ok := arg.([]byte)
+				if !ok {
+					continue
+				}
+				var trace map[string]any
+				if err := json.Unmarshal(raw, &trace); err != nil {
+					t.Fatalf("trace artifact data is not json: %v", err)
+				}
+				failure, _ := trace["failure"].(map[string]any)
+				if trace["reasoning_profile_ref"] == "worker-default" &&
+					trace["schema_name"] == "multica_review_outcome" &&
+					trace["provider_label"] == "openai-compatible" &&
+					failure["reason_code"] == EinoReasonProviderTimeout &&
+					trace["raw_prompt"] == nil &&
+					trace["raw_response"] == nil {
+					sawTrace = true
+				}
+			}
+		}
+	}
+	if !sawNode || !sawPlan || !sawEvent || !sawTrace {
+		t.Fatalf("ProjectEinoFailure missing projection parts: node=%v plan=%v event=%v trace=%v sql=%v args=%v", sawNode, sawPlan, sawEvent, sawTrace, executedSQL, executedArgs)
+	}
 }
 
-func (a stubIssueAnalyzer) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
-	return a.result, a.err
+func TestAnalyzeIssueProjectsSafeProviderTrace(t *testing.T) {
+	activity := ActivitySet{
+		DB: &captureArtifactDB{},
+		Reasoner: stubEinoReasoner{
+			trace: testEinoTrace("multica_analyze_issue"),
+			analyzeResult: AnalyzeIssueResult{
+				ProblemSummary:         "Fix issue",
+				ExecutionAdvice:        "Inspect focused files",
+				SuspectedContext:       "server/internal/orchestration",
+				RecommendedAgentPrompt: "Fix the issue",
+				ReasonCode:             "eino_analysis_ready",
+				RecommendedAction:      "none",
+			},
+		},
+	}
+	result, err := activity.AnalyzeIssue(t.Context(), IssueSnapshot{Title: "Fix issue"}, IssueWorkflowInput{
+		PlanID:              "00000000-0000-0000-0000-000000000001",
+		ReasoningProfileRef: "worker-default",
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeIssue returned error: %v", err)
+	}
+	if result.Trace.SchemaName != "multica_analyze_issue" {
+		t.Fatalf("AnalyzeIssue result missing trace: %+v", result.Trace)
+	}
+	trace := traceArtifactData(t, activity.DB.(*captureArtifactDB), "analysis_trace")
+	assertSafeTrace(t, trace, "multica_analyze_issue")
+	parsed, _ := trace["parsed_output"].(map[string]any)
+	if parsed["problem_summary"] != "Fix issue" {
+		t.Fatalf("analysis trace parsed output missing safe summary: %+v", parsed)
+	}
+}
+
+func TestReviewOutcomeProjectsSafeProviderTrace(t *testing.T) {
+	activity := ActivitySet{
+		DB: &captureArtifactDB{},
+		Reasoner: stubEinoReasoner{
+			trace: testEinoTrace("multica_review_outcome"),
+			reviewResult: ReviewOutcomeResult{
+				Summary:           "Review is clean",
+				SeverityLabel:     "low",
+				RecommendedAction: "accept",
+			},
+		},
+	}
+	result, err := activity.ReviewOutcome(t.Context(), ValidateOutcomeResult{
+		Status:             "completed",
+		TerminalPlanStatus: "completed",
+	}, AnalyzeIssueResult{ProblemSummary: "Fix issue"}, IssueSnapshot{}, service.DispatchAgentTaskResult{
+		PlanID:  "00000000-0000-0000-0000-000000000001",
+		NodeID:  "00000000-0000-0000-0000-000000000002",
+		TaskID:  "00000000-0000-0000-0000-000000000003",
+		Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("ReviewOutcome returned error: %v", err)
+	}
+	if result.Trace.SchemaName != "multica_review_outcome" {
+		t.Fatalf("ReviewOutcome result missing trace: %+v", result.Trace)
+	}
+	trace := traceArtifactData(t, activity.DB.(*captureArtifactDB), "review_trace")
+	assertSafeTrace(t, trace, "multica_review_outcome")
+	parsed, _ := trace["parsed_output"].(map[string]any)
+	if parsed["summary"] != "Review is clean" {
+		t.Fatalf("review trace parsed output missing safe summary: %+v", parsed)
+	}
+}
+
+func TestSummarizeOutcomeProjectsSafeProviderTrace(t *testing.T) {
+	activity := ActivitySet{
+		DB: &captureArtifactDB{},
+		Reasoner: stubEinoReasoner{
+			trace: testEinoTrace("multica_summarize_outcome"),
+			summaryResult: SummarizeOutcomeResult{
+				Summary:  "Ready for review",
+				TraceRef: "plan/node/task",
+			},
+		},
+	}
+	result, err := activity.SummarizeOutcome(t.Context(), ReviewOutcomeResult{}, ValidateOutcomeResult{}, AnalyzeIssueResult{}, IssueSnapshot{}, service.DispatchAgentTaskResult{
+		PlanID:  "00000000-0000-0000-0000-000000000001",
+		NodeID:  "00000000-0000-0000-0000-000000000002",
+		TaskID:  "00000000-0000-0000-0000-000000000003",
+		Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("SummarizeOutcome returned error: %v", err)
+	}
+	if result.Trace.SchemaName != "multica_summarize_outcome" {
+		t.Fatalf("SummarizeOutcome result missing trace: %+v", result.Trace)
+	}
+	trace := traceArtifactData(t, activity.DB.(*captureArtifactDB), "summary_trace")
+	assertSafeTrace(t, trace, "multica_summarize_outcome")
+	parsed, _ := trace["parsed_output"].(map[string]any)
+	if parsed["summary"] != "Ready for review" || parsed["trace_ref"] != "plan/node/task" {
+		t.Fatalf("summary trace parsed output missing safe values: %+v", parsed)
+	}
+}
+
+func testEinoTrace(schemaName string) EinoTrace {
+	return EinoTrace{
+		ReasoningProfileRef: "worker-default",
+		PromptProfileRef:    strings.TrimPrefix(schemaName, "multica_") + "/v1",
+		SchemaName:          schemaName,
+		SchemaVersion:       "1",
+		ProviderLabel:       "openai-compatible",
+		Model:               "test-model",
+		CapabilityMode:      "json_schema",
+		LatencyMS:           12,
+		InputTokens:         10,
+		OutputTokens:        20,
+		TotalTokens:         30,
+	}
+}
+
+func traceArtifactData(t *testing.T, db *captureArtifactDB, artifactType string) map[string]any {
+	t.Helper()
+	var data map[string]any
+	for _, args := range db.args {
+		if !containsArg(args, artifactType) {
+			continue
+		}
+		for _, arg := range args {
+			raw, ok := arg.([]byte)
+			if !ok {
+				continue
+			}
+			var decoded map[string]any
+			if json.Unmarshal(raw, &decoded) == nil {
+				data = decoded
+			}
+		}
+	}
+	if data == nil {
+		t.Fatalf("missing %s artifact data", artifactType)
+	}
+	return data
+}
+
+func assertSafeTrace(t *testing.T, trace map[string]any, schemaName string) {
+	t.Helper()
+	if trace["reasoning_profile_ref"] != "worker-default" ||
+		trace["schema_name"] != schemaName ||
+		trace["provider_label"] != "openai-compatible" ||
+		trace["model"] != "test-model" ||
+		trace["capability_mode"] != "json_schema" {
+		t.Fatalf("trace metadata mismatch: %+v", trace)
+	}
+	if trace["raw_prompt"] != nil || trace["raw_response"] != nil || trace["api_key"] != nil || trace["authorization"] != nil {
+		t.Fatalf("trace contains unsafe raw/provider secret fields: %+v", trace)
+	}
+}
+
+type stubEinoReasoner struct {
+	analyzeResult AnalyzeIssueResult
+	analyzeErr    error
+	reviewResult  ReviewOutcomeResult
+	reviewErr     error
+	summaryResult SummarizeOutcomeResult
+	summaryErr    error
+	trace         EinoTrace
+}
+
+func (r stubEinoReasoner) AnalyzeIssue(ctx context.Context, issue IssueSnapshot, input IssueWorkflowInput) (AnalyzeIssueResult, error) {
+	result := r.analyzeResult
+	result.Trace = r.trace
+	return result, r.analyzeErr
+}
+
+func (r stubEinoReasoner) ReviewOutcome(ctx context.Context, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (ReviewOutcomeResult, error) {
+	result := r.reviewResult
+	result.Trace = r.trace
+	return result, r.reviewErr
+}
+
+func (r stubEinoReasoner) SummarizeOutcome(ctx context.Context, review ReviewOutcomeResult, validation ValidateOutcomeResult, analysis AnalyzeIssueResult, issue IssueSnapshot, dispatch service.DispatchAgentTaskResult) (SummarizeOutcomeResult, error) {
+	result := r.summaryResult
+	result.Trace = r.trace
+	return result, r.summaryErr
 }
 
 func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
@@ -164,7 +411,7 @@ func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 				projectedAnalyzeNode = true
 			}
 		}},
-		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
+		Reasoner: stubEinoReasoner{analyzeResult: AnalyzeIssueResult{
 			ProblemSummary:         "Adapter summary",
 			ExecutionAdvice:        "Adapter advice",
 			SuspectedContext:       "Adapter context",
@@ -183,8 +430,13 @@ func TestAnalyzeIssueUsesInjectedAnalyzerAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnalyzeIssue returned error: %v", err)
 	}
-	if result.ProblemSummary != "Adapter summary" || result.RecommendedAgentPrompt != "Adapter prompt" {
+	if result.ProblemSummary != "Adapter summary" || !strings.Contains(result.RecommendedAgentPrompt, "Adapter prompt") {
 		t.Fatalf("AnalyzeIssue did not use injected analyzer adapter: %+v", result)
+	}
+	if !strings.Contains(result.RecommendedAgentPrompt, "Authoritative Result Schema v1 contract:") ||
+		!strings.Contains(result.RecommendedAgentPrompt, `"evidence":[{"type":"test","ref":"npm test"}]`) ||
+		!strings.Contains(result.RecommendedAgentPrompt, "tests must be an array") {
+		t.Fatalf("AnalyzeIssue should append the canonical Result Schema v1 contract: %s", result.RecommendedAgentPrompt)
 	}
 	if !projected {
 		t.Fatal("AnalyzeIssue should project adapter output")
@@ -262,9 +514,95 @@ func TestReviewOutcomeProjectsReviewNodeState(t *testing.T) {
 	}
 }
 
+func TestReviewOutcomeUsesInjectedReasoner(t *testing.T) {
+	activity := ActivitySet{
+		DB: &captureArtifactDB{},
+		Reasoner: stubEinoReasoner{reviewResult: ReviewOutcomeResult{
+			Summary:           "provider review",
+			SeverityLabel:     "low",
+			RecommendedAction: "accept",
+		}},
+	}
+	result, err := activity.ReviewOutcome(t.Context(), ValidateOutcomeResult{
+		Status: "completed",
+	}, AnalyzeIssueResult{ProblemSummary: "Fix issue"}, IssueSnapshot{}, service.DispatchAgentTaskResult{
+		PlanID:  "00000000-0000-0000-0000-000000000001",
+		NodeID:  "00000000-0000-0000-0000-000000000002",
+		TaskID:  "00000000-0000-0000-0000-000000000003",
+		Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("ReviewOutcome returned error: %v", err)
+	}
+	if result.Summary != "provider review" || result.RecommendedAction != "accept" {
+		t.Fatalf("ReviewOutcome did not use injected reasoner: %+v", result)
+	}
+}
+
+func TestReviewOutcomeDoesNotProjectAcceptWhenValidationNeedsHumanReview(t *testing.T) {
+	var projectedAction string
+	activity := ActivitySet{
+		DB: &captureArtifactDB{onArtifact: func(sql string, args ...any) {
+			if strings.Contains(strings.ToLower(sql), "orchestration_node") && containsArg(args, "review") {
+				if len(args) >= 6 {
+					projectedAction, _ = args[5].(string)
+				}
+			}
+		}},
+		Reasoner: stubEinoReasoner{reviewResult: ReviewOutcomeResult{
+			Summary:           "provider says clean",
+			SeverityLabel:     "low",
+			RecommendedAction: "accept",
+		}},
+	}
+	_, err := activity.ReviewOutcome(t.Context(), ValidateOutcomeResult{
+		Status:             "waiting_human",
+		ReasonCode:         "tests_failed",
+		RecommendedAction:  "review",
+		NeedsHumanReview:   true,
+		TerminalPlanStatus: "waiting_human",
+	}, AnalyzeIssueResult{ProblemSummary: "Fix issue"}, IssueSnapshot{}, service.DispatchAgentTaskResult{
+		PlanID:  "00000000-0000-0000-0000-000000000001",
+		NodeID:  "00000000-0000-0000-0000-000000000002",
+		TaskID:  "00000000-0000-0000-0000-000000000003",
+		Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("ReviewOutcome returned error: %v", err)
+	}
+	if projectedAction != "review" {
+		t.Fatalf("review projection action = %q, want review", projectedAction)
+	}
+}
+
+func TestSummarizeOutcomeUsesInjectedReasoner(t *testing.T) {
+	activity := ActivitySet{
+		Reasoner: stubEinoReasoner{summaryResult: SummarizeOutcomeResult{
+			Summary:  "provider summary",
+			TraceRef: "provider/trace/ref",
+		}},
+	}
+	result, err := activity.SummarizeOutcome(t.Context(), ReviewOutcomeResult{}, ValidateOutcomeResult{}, AnalyzeIssueResult{}, IssueSnapshot{}, service.DispatchAgentTaskResult{})
+	if err != nil {
+		t.Fatalf("SummarizeOutcome returned error: %v", err)
+	}
+	if result.Summary != "provider summary" || result.TraceRef != "provider/trace/ref" {
+		t.Fatalf("SummarizeOutcome did not use injected reasoner: %+v", result)
+	}
+}
+
 func containsArg(args []any, want string) bool {
 	for _, arg := range args {
 		if s, ok := arg.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIntArg(args []any, want int) bool {
+	for _, arg := range args {
+		if v, ok := arg.(int); ok && v == want {
 			return true
 		}
 	}
@@ -280,18 +618,18 @@ func TestNewWorkerActivitySetInjectsProductionAnalyzer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorkerActivitySet returned error: %v", err)
 	}
-	if activity.Analyzer == nil {
-		t.Fatal("worker activity set must inject the production Eino analyzer")
+	if activity.Reasoner == nil {
+		t.Fatal("worker activity set must inject the production Eino reasoner")
 	}
-	if _, ok := activity.Analyzer.(StaticIssueAnalyzer); ok {
-		t.Fatal("worker activity set must not use StaticIssueAnalyzer in the production path")
+	if _, ok := activity.Reasoner.(StaticEinoReasoner); ok {
+		t.Fatal("worker activity set must not use StaticEinoReasoner in the production path")
 	}
 }
 
 func TestAnalyzeIssueRejectsMalformedAnalyzerOutput(t *testing.T) {
 	activity := ActivitySet{
 		DB: &captureArtifactDB{},
-		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
+		Reasoner: stubEinoReasoner{analyzeResult: AnalyzeIssueResult{
 			ProblemSummary: "Adapter summary",
 		}},
 	}
@@ -317,7 +655,7 @@ func TestProjectionWritesUseIdempotentInserts(t *testing.T) {
 				artifactSQL = sql
 			}
 		}},
-		Analyzer: stubIssueAnalyzer{result: AnalyzeIssueResult{
+		Reasoner: stubEinoReasoner{analyzeResult: AnalyzeIssueResult{
 			ProblemSummary:         "Adapter summary",
 			ExecutionAdvice:        "Adapter advice",
 			SuspectedContext:       "Adapter context",

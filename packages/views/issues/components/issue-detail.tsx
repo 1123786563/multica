@@ -188,6 +188,19 @@ function priorityLabel(priority: string, t: ActivityT): string {
   return priority;
 }
 
+const ORCHESTRATION_REASON_LABELS: Record<string, string> = {
+  provider_incompatible: "Provider configuration is incompatible",
+  provider_auth_failed: "Provider authentication failed",
+  provider_timeout: "Provider timed out",
+  provider_rate_limited: "Provider rate limited the request",
+  provider_unavailable: "Provider is unavailable",
+  eino_output_malformed: "Provider returned malformed structured output",
+};
+
+function formatOrchestrationReasonLabel(code: string): string {
+  return ORCHESTRATION_REASON_LABELS[code] ?? code;
+}
+
 function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationPlan; issueId: string; wsId: string }) {
   const queryClient = useQueryClient();
   const approvalAction = useMutation({
@@ -218,7 +231,7 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
     <div className="space-y-2 pl-2">
       <div className="flex items-center justify-between gap-2 rounded-md bg-muted/35 px-2 py-1.5 text-xs">
         <span className="font-medium">{plan.status}</span>
-        <span className="truncate text-muted-foreground">{plan.summary.reason_code || plan.workflow_type}</span>
+        <span className="truncate text-muted-foreground">{formatOrchestrationReasonLabel(plan.summary.reason_code || plan.workflow_type)}</span>
         {plan.available_actions.length > 0 && (
           <span className="flex shrink-0 items-center gap-1">
             {plan.available_actions.map((action) => (
@@ -236,6 +249,7 @@ function OrchestrationPanel({ plan, issueId, wsId }: { plan: IssueOrchestrationP
         )}
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+        <span>Profile: <span>{plan.reasoning_profile_ref}</span></span>
         <span>Action: {plan.summary.recommended_action}</span>
         <span>Events: {plan.events.length}</span>
         <span>Artifacts: {plan.artifacts.length}</span>
@@ -334,6 +348,17 @@ function ArtifactDetails({ data }: { data: Record<string, unknown> }) {
   const summary = typeof data.summary === "string" ? data.summary : "";
   const prompt = typeof data.prompt === "string" ? data.prompt : "";
   const traceRef = typeof data.trace_ref === "string" ? data.trace_ref : "";
+  const providerLabel = typeof data.provider_label === "string" ? data.provider_label : "";
+  const model = typeof data.model === "string" ? data.model : "";
+  const schemaName = typeof data.schema_name === "string" ? data.schema_name : "";
+  const latencyMs = typeof data.latency_ms === "number" ? data.latency_ms : null;
+  const usage = isRecord(data.usage) ? data.usage : null;
+  const inputTokens = typeof usage?.input_tokens === "number" ? usage.input_tokens : null;
+  const outputTokens = typeof usage?.output_tokens === "number" ? usage.output_tokens : null;
+  const totalTokens = typeof usage?.total_tokens === "number" ? usage.total_tokens : null;
+  const failure = isRecord(data.failure) ? data.failure : null;
+  const failureReason = typeof failure?.reason_code === "string" ? formatOrchestrationReasonLabel(failure.reason_code) : "";
+  const failureMessage = typeof failure?.message === "string" ? failure.message : "";
   const changedFiles = Array.isArray(data.changed_files)
     ? data.changed_files.filter((value): value is string => typeof value === "string")
     : [];
@@ -351,6 +376,23 @@ function ArtifactDetails({ data }: { data: Record<string, unknown> }) {
       {summary && <div className="line-clamp-2">{summary}</div>}
       {prompt && <div className="line-clamp-2">{prompt}</div>}
       {traceRef && <div className="truncate font-mono text-[10px]">{traceRef}</div>}
+      {failureReason && <div className="line-clamp-2">{failureReason}</div>}
+      {failureMessage && failureMessage !== failureReason && <div className="line-clamp-2">{failureMessage}</div>}
+      {(providerLabel || model || schemaName) && (
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[10px]">
+          {providerLabel && <span>{providerLabel}</span>}
+          {model && <span>{model}</span>}
+          {schemaName && <span>{schemaName}</span>}
+        </div>
+      )}
+      {latencyMs !== null && <div className="font-mono text-[10px]">{latencyMs}ms</div>}
+      {(inputTokens !== null || outputTokens !== null || totalTokens !== null) && (
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[10px]">
+          {inputTokens !== null && <span>in {inputTokens}</span>}
+          {outputTokens !== null && <span>out {outputTokens}</span>}
+          {totalTokens !== null && <span>total {totalTokens}</span>}
+        </div>
+      )}
       {changedFiles.length > 0 && (
         <div className="space-y-0.5">
           {changedFiles.slice(0, 3).map((file) => (
@@ -367,6 +409,10 @@ function ArtifactDetails({ data }: { data: Record<string, unknown> }) {
       )}
     </div>
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function orchestrationActionReason(action: string): string {

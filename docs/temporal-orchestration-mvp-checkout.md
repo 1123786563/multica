@@ -22,18 +22,21 @@ export ORCHESTRATION_EINO_MODEL=replace-me
 # Optional for OpenAI-compatible gateways; leave empty for provider default.
 export ORCHESTRATION_EINO_BASE_URL=
 export ORCHESTRATION_EINO_TIMEOUT=60s
+export ORCHESTRATION_EINO_PROFILE_REF=worker-default
+# Static provider is disabled by default; set to 1 only for explicit local mock/dev runs.
+export ORCHESTRATION_EINO_ALLOW_STATIC=0
 ```
 
 Start the Multica processes in separate terminals:
 
 ```bash
 TEMPORAL_HOST_PORT=127.0.0.1:7233 TEMPORAL_NAMESPACE=default TEMPORAL_TASK_QUEUE=multica-orchestration make server
-TEMPORAL_HOST_PORT=127.0.0.1:7233 TEMPORAL_NAMESPACE=default TEMPORAL_TASK_QUEUE=multica-orchestration ORCHESTRATION_EINO_PROVIDER=openai-compatible ORCHESTRATION_EINO_API_KEY=replace-me ORCHESTRATION_EINO_MODEL=replace-me make orchestration-worker
+TEMPORAL_HOST_PORT=127.0.0.1:7233 TEMPORAL_NAMESPACE=default TEMPORAL_TASK_QUEUE=multica-orchestration ORCHESTRATION_EINO_PROVIDER=openai-compatible ORCHESTRATION_EINO_API_KEY=replace-me ORCHESTRATION_EINO_MODEL=replace-me ORCHESTRATION_EINO_PROFILE_REF=worker-default make orchestration-worker
 make daemon
 pnpm dev:web
 ```
 
-The worker command registers `IssueWorkflow` plus the fixed activity chain: load issue, analyze issue, dispatch daemon task, validate outcome, review outcome, summarize outcome, finalize workflow, and projection/audit activities. Production worker startup fails closed if the Eino reasoning provider is not configured; use `ORCHESTRATION_EINO_PROVIDER=static` only for explicit local mock/dev runs.
+The worker command registers `IssueWorkflow` plus the fixed activity chain: load issue, analyze issue, dispatch daemon task, validate outcome, review outcome, summarize outcome, finalize workflow, and projection/audit activities. Production worker startup fails closed if the Eino reasoning provider is not configured; use `ORCHESTRATION_EINO_PROVIDER=static` only with `ORCHESTRATION_EINO_ALLOW_STATIC=1` for explicit local mock/dev runs. The MVP binds orchestration runs to `ORCHESTRATION_EINO_PROFILE_REF=worker-default` unless a worker profile is explicitly provided.
 
 ## Happy path
 
@@ -88,13 +91,13 @@ Backend workflow and activity checks:
 cd server && go test -count=1 ./internal/orchestration
 ```
 
-AnalyzeIssue live provider smoke test:
+Eino live provider smoke test:
 
 ```bash
-cd server && set -a; source ../.env; set +a; ORCHESTRATION_EINO_LIVE_TEST=1 go test -count=1 ./internal/orchestration -run TestEinoIssueAnalyzerLiveProviderSmoke -v
+cd server && set -a; source ../.env; set +a; ORCHESTRATION_EINO_LIVE_TEST=1 go test -count=1 ./internal/orchestration -run TestEinoReasonerLiveProviderSmoke -v
 ```
 
-This smoke test only verifies AnalyzeIssue against the real Eino OpenAI-compatible ChatModel provider path. It does not start Temporal, connect to the database, create an Issue, dispatch an Agent Task, or verify `ReviewOutcome` / `SummarizeOutcome` with a live provider. Without `ORCHESTRATION_EINO_LIVE_TEST=1`, the live provider test is skipped and no external provider call is made.
+This smoke test verifies AnalyzeIssue, ReviewOutcome, and SummarizeOutcome against the real worker-scoped Eino OpenAI-compatible ChatModel provider path using a synthetic fixture. It does not start Temporal, connect to the database, create an Issue, dispatch an Agent Task, or verify browser UI. Without `ORCHESTRATION_EINO_LIVE_TEST=1`, the live provider test is skipped and no external provider call is made.
 
 Backend API and DB-backed orchestration checks:
 
@@ -134,7 +137,7 @@ For a completed checkout, paste the exact commands and outcomes here:
 
 - `make -n orchestration-worker`: passed; target resolves to env check, Postgres setup, and `cd server && go run ./cmd/orchestration-worker`.
 - `cd server && go test -count=1 ./internal/orchestration ./internal/service`: passed.
-- `cd server && set -a; source ../.env; set +a; ORCHESTRATION_EINO_LIVE_TEST=1 go test -count=1 ./internal/orchestration -run TestEinoIssueAnalyzerLiveProviderSmoke -v`: passed against the real provider configured in local `.env`.
+- `cd server && set -a; source ../.env; set +a; ORCHESTRATION_EINO_LIVE_TEST=1 go test -count=1 ./internal/orchestration -run TestEinoReasonerLiveProviderSmoke -v`: passed against the real provider configured in local `.env`.
 - `cd server && go test -count=1 ./internal/handler -run 'Test(StartIssueOrchestration|CompleteLinkedAgentTask|ApproveOrchestration|CancelOrchestration|FinalizeWorkflow.*Attention)'`: passed.
 - `pnpm --filter @multica/core exec vitest run api/schema.test.ts`: passed, 21 tests.
 - `pnpm --filter @multica/views exec vitest run issues/components/issue-detail.test.tsx`: passed, 19 tests.

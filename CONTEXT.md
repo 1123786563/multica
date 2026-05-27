@@ -65,28 +65,80 @@ A reasoning-oriented activity implementation used for analysis, review, or summa
 _Avoid_: coding runtime, workflow engine
 
 **Eino Reasoning Provider**:
-The worker-scoped LLM provider used by Eino reasoning activities through Eino ChatModel implementations. It is configured independently from Multica Agent Runtime providers and is used only for orchestration analysis, advisory review, and summarization. The MVP implementation starts with one OpenAI-compatible ChatModel provider configured from worker environment variables; multi-provider UI, database-backed provider selection, and workspace-scoped provider policy are later extensions.
-_Avoid_: daemon runtime provider, coding agent provider, per-Agent execution backend, workspace provider selector in MVP
+The worker-scoped LLM provider used by Eino reasoning activities through Eino ChatModel implementations. It is configured independently from Multica Agent Runtime providers and is used only for orchestration analysis, advisory review, and summarization. The MVP implementation starts with one OpenAI-compatible ChatModel provider configured from worker environment variables and requires strict structured output support; multi-provider UI, database-backed provider selection, and workspace-scoped provider policy are later extensions.
+_Avoid_: daemon runtime provider, coding agent provider, per-Agent execution backend, workspace provider selector in MVP, prompt-only JSON fallback, full provider registry in MVP
+
+**Worker-Scoped Eino Configuration**:
+The MVP configuration boundary where the orchestration worker reads Eino provider credentials, model, base URL, and timeout from its own environment through a lightweight provider factory rather than from workspace settings, the API server, or agent runtime configuration; production worker startup fails fast when the required Eino provider configuration is missing or incompatible.
+_Avoid_: workspace Eino selector, API-owned Eino secret, agent runtime provider reuse, database-backed provider registry, first-run provider discovery failure
+
+**Eino Secret Ownership**:
+The boundary that Eino provider credentials belong to the orchestration worker deployment; future workspace policy may select or constrain reasoning profiles but does not make the API server or workspace database the provider secret owner by default.
+_Avoid_: workspace-owned Eino API key by default, API server secret broker, agent runtime secret reuse
+
+**Eino Workspace Policy**:
+A future policy layer that may allow, disable, or constrain Eino reasoning profiles, human-gate requirements, context-sending rules, and audit retention without directly editing orchestration prompt text.
+_Avoid_: workspace free-form prompt patch, unversioned prompt customization, policy-owned provider secret
+
+**Eino Prompt Profile**:
+A versioned and testable prompt contract for Eino reasoning nodes that may be selected by policy in the future but is not freely edited per workspace.
+_Avoid_: free-form prompt override, untested prompt patch, schema-detached prompt variant
+
+**Eino Context Boundary**:
+The default data-sending boundary where Eino reasoning receives issue snapshots, acceptance criteria, minimal orchestration context, and structured evidence summaries rather than repository file contents, raw Agent Task logs, full patches, raw diffs, daemon execution transcripts, or provider-requested context expansion.
+_Avoid_: repo-content reasoning provider, raw log upload, raw diff review, hidden second execution channel, dynamic context request in MVP
+
+**Production Eino Reasoning Path**:
+The production orchestration path where analysis, advisory review, and summarization all use the configured Eino Reasoning Provider rather than static heuristics, and none of the three reasoning nodes are skipped on the successful production path.
+_Avoid_: analyze-only provider integration, partial Eino integration, hidden local review fallback, skip summary on provider failure, production static provider
 
 **Eino Fail-Closed**:
-The rule that production Eino reasoning activities do not silently fall back to static heuristics when the Eino Reasoning Provider is missing, misconfigured, unavailable, or returns malformed output. Static analysis is allowed only for tests or explicit development/mock modes; real provider failures surface as Activity failures for Temporal retry, projection, or visible orchestration failure handling.
-_Avoid_: hidden static fallback, best-effort prompt generation, pretending provider reasoning happened
+The rule that production Eino reasoning activities do not silently fall back to static heuristics when the Eino Reasoning Provider is missing, misconfigured, unavailable, or returns malformed output. Static analysis is allowed only for tests or explicitly guarded development/mock modes; provider and structured-output failures are infrastructure or contract failures that surface as retryable Activity failures and visible run failure after retry exhaustion, not as Approval Gate concerns.
+_Avoid_: hidden static fallback, best-effort prompt generation, pretending provider reasoning happened, approve provider failure
+
+**Eino Activity Retry Boundary**:
+The reliability boundary where Eino provider timeouts and transient failures are retried by Temporal Activity policy, with provider call timeout configured on the worker and no hidden SDK-wrapper retry loop or automatic whole-run restart after Activity retry exhaustion.
+_Avoid_: hidden provider retry, shared activity timeout for network reasoning, approval for provider retry exhaustion, automatic run restart for provider failure
+
+**Eino Failure Projection**:
+The visible Multica Projection of an exhausted Eino provider or structured-output failure, including failed node state, failure event, safe provider trace, and Issue-relevant human attention without treating the failure as an Approval Gate or introducing a separate operator audience in the MVP.
+_Avoid_: Temporal-history-only provider failure, invisible reasoning failure, approval gate for provider outage, workspace-wide provider outage mention
+
+**Eino Failure Class**:
+The stable reason-code classification of Eino reasoning failures where provider or adapter capability/configuration failures are `provider_incompatible`, auth failures use `provider_auth_failed`, transient timeout/rate-limit/server failures use codes such as `provider_timeout`, `provider_rate_limited`, or `provider_unavailable`, and single-response strict schema violations are `eino_output_malformed`.
+_Avoid_: one generic provider error, treating malformed output as human approval, hiding capability mismatch, retry-later for auth failure
 
 **Eino Structured Output Contract**:
-The strict JSON contract for Eino reasoning outputs. Analyze-issue output must parse as JSON and contain only allowed analysis fields such as problem summary, execution advice, suspected context, risks, recommended agent prompt, reason code, and recommended action. Missing required fields, empty required values, natural-language-only responses, topology instructions, node mutations, workflow decisions, or authoritative success fields are malformed provider output.
-_Avoid_: prose scraping, best-effort extraction, LLM topology patch, final success flag
+The strict JSON contract for Eino reasoning outputs. Each Eino Reasoning Node has its own strict schema; missing required fields, empty required values, natural-language-only responses, topology instructions, node mutations, workflow decisions, or authoritative success fields are malformed provider output.
+_Avoid_: prose scraping, best-effort extraction, LLM topology patch, final success flag, shared node_type schema
+
+**Eino Provider Capability**:
+The requirement that a provider adapter must enforce the same strict Eino Structured Output Contract, whether through native JSON Schema, tool calling, or equivalent validation, and providers that only support best-effort prose or weak JSON mode are incompatible.
+_Avoid_: weak JSON mode as compatible, provider-specific schema relaxation, best-effort adapter
+
+**Eino Provider Trace**:
+The persisted audit record for an Eino Reasoning Node stored as orchestration artifact evidence containing parsed structured output, historical-safe reasoning profile metadata, and raw usage counters without cost calculation, not full raw prompts, raw responses, API keys, or secret-bearing request details. It intentionally repeats safe profile metadata from the run binding for audit export and historical explanation.
+_Avoid_: raw provider transcript, prompt archive, secret-bearing provider log, runtime usage rollup, current-env-only explanation
+
+**Eino Reasoning Profile Binding**:
+The rule that an Orchestration Run binds its Eino reasoning profile reference in Temporal workflow input at run start and projects it at plan level for visibility, starting with a single default profile reference but no profile registry, so later provider, model, or prompt profile changes affect only new runs and not later nodes in an existing run; existing historical plans may be backfilled with `legacy/default` for read compatibility, while new traces carry full metadata.
+_Avoid_: per-node latest profile lookup, DB-only profile binding, missing default profile ref, provider-model string as profile identity, mixed-profile run, retroactive provider change, fallback to default profile, resume old run with replacement profile, worker-identity-bound reasoning, schema-breaking historical plan migration
 
 **Eino Risk Signal**:
 A risk surfaced by Eino reasoning that informs advisory review and Temporal Outcome Policy. High-risk, destructive, migration, or similarly unsafe concerns can route an Orchestration Run to an Approval Gate, but an Eino Risk Signal is not a final success or failure verdict.
 _Avoid_: hidden blocker, LLM-owned failure, raw provider warning
 
 **Advisory Review**:
-An Eino-generated review of evidence, risks, and suggested next action that informs policy but cannot by itself mark an Orchestration Run successful.
-_Avoid_: final verdict, LLM-owned completion
+An Eino-generated review of evidence, risks, and suggested next action that informs policy but cannot by itself mark an Orchestration Run successful. Its recommended action is explanatory; Temporal Outcome Policy may consume narrow structured risk signals but not advisory final-status fields.
+_Avoid_: final verdict, LLM-owned completion, review-owned terminal status
+
+**Eino Review Invocation Boundary**:
+The rule that advisory review and summarization run only after deterministic validation reaches a handoff or human-gate path, not during automatic evidence-repair retries.
+_Avoid_: review every retry, LLM review for malformed evidence, provider-gated auto retry
 
 **Temporal Outcome Policy**:
-The deterministic workflow policy that combines validation outcomes, Eino advisory review, risk rules, approval state, and retry budget to decide complete, approval, retry, or failure.
-_Avoid_: Eino final decision, client-side workflow outcome
+The deterministic workflow policy that combines validation outcomes, Eino advisory review, risk rules, approval state, and retry budget to decide complete, approval, retry, or failure. Eino review may add risk signals but cannot weaken deterministic validation risks such as failed tests, non-empty result risks, destructive concerns, unverifiable evidence, or retry exhaustion.
+_Avoid_: Eino final decision, client-side workflow outcome, LLM downgrade of deterministic risk
 
 **Fixed Workflow Reasoning**:
 The MVP rule that Eino reasons inside a fixed Temporal workflow and may produce prompts, risk summaries, reviews, and final summaries, but may not create, remove, reorder, or branch workflow nodes.
@@ -117,16 +169,16 @@ Temporal retry and replay recover workflow progress, while Multica preserves pro
 _Avoid_: restart whole run, erase evidence
 
 **Decision Panel**:
-The primary observability surface for an Orchestration Run. The MVP renders a linear node list with status, reason, recommended action, latest summary, attempts, evidence count, Agent Task link, and expandable events or evidence detail.
-_Avoid_: event-dump-first UI, opaque top-line status, DAG-first UI
+The primary observability surface for an Orchestration Run. The MVP renders a linear node list with status, human-readable reason text, stable reason code detail, recommended action, latest summary, attempts, evidence count, Agent Task link, reasoning profile reference, parsed Eino guidance, and safe Eino trace metadata without defaulting to full prompt transcripts.
+_Avoid_: event-dump-first UI, opaque top-line status, DAG-first UI, raw Go error as primary UI text, full prompt transcript by default, secret-bearing trace display
 
 **Linear Orchestration Panel**:
 The MVP Issue Detail panel shape for orchestration: a fixed-order node list plus expandable events and evidence, aligned with the fixed workflow chain. It does not render a DAG, graph canvas, standalone orchestration page, or workflow designer until branch, parallel, or loop workflows are introduced.
 _Avoid_: graph canvas in MVP, workflow designer, premature DAG visualization
 
 **Kernel Test Strategy**:
-The first testing strategy prioritizes Temporal workflow/activity tests, projection consistency tests, Agent Task bridge tests, and frontend contract tests before adding minimal end-to-end coverage.
-_Avoid_: E2E-first validation, UI-only confidence
+The first testing strategy prioritizes Temporal workflow/activity tests, projection consistency tests, Agent Task bridge tests, frontend contract tests, and explicit synthetic-fixture live-provider smoke coverage for all production Eino Reasoning Nodes before adding minimal end-to-end coverage.
+_Avoid_: E2E-first validation, UI-only confidence, analyze-only provider smoke test, live smoke as full workflow E2E
 
 **Node State**:
 The orchestration-specific status of a node, independent from the linked Agent Task status. Node State expresses kernel concepts such as pending, ready, dispatched, running, waiting for approval, succeeded, failed, skipped, and cancelled.
@@ -149,8 +201,8 @@ The MVP validation activity that checks Agent Task outcome schema and evidence f
 _Avoid_: daemon test runner, LLM validation
 
 **Evidence Contract**:
-The minimum structured outcome an Agent Task must provide for kernel verification: summary, changed files, artifacts, tests, and risks. The kernel may parse this from Agent Task result JSON and attach it to node evidence.
-_Avoid_: prose-only completion, unverifiable output
+The minimum structured outcome an Agent Task must provide for kernel verification: summary, changed files, artifacts, tests, and risks. The kernel may parse this from Agent Task result JSON and attach it to node evidence; Eino reasoning output cannot substitute for Agent Task result evidence, and future richer review should consume structured evidence summaries rather than raw diffs or logs.
+_Avoid_: prose-only completion, unverifiable output, LLM-generated execution evidence, raw diff as review input
 
 **Node Evidence**:
 Structured evidence persisted for an orchestration node, separate from the raw Agent Task result. Node Evidence is queried by verification, recovery, and observability surfaces and remains available across retries.
@@ -296,6 +348,7 @@ _Avoid_: workspace-wide alert, agent mention loop, unrelated member mention
 - The **Temporal Workflow Execution** is the source of truth for an **Orchestration Run**
 - The **Explicit Temporal Profile** keeps Temporal infrastructure and the **Orchestration Worker** outside default API/dev startup
 - The **Multica Projection** makes Temporal workflow progress visible through Issue Detail, API responses, comments, and notifications
+- The orchestration read API exposes safe **Eino Provider Trace** metadata and **Eino Reasoning Profile Binding** information without raw prompts, raw responses, or secrets
 - **Projection Table Reuse** keeps existing orchestration API, Agent Task links, and Decision Panel contracts aligned while Temporal replaces lifecycle ownership
 - The **Kernel Execution Boundary** keeps orchestration lifecycle in Temporal while runtime execution stays in the daemon-backed Agent Task lifecycle
 - An **Orchestration Run** belongs to an Issue in the initial kernel scope
@@ -322,6 +375,7 @@ _Avoid_: workspace-wide alert, agent mention loop, unrelated member mention
 - **Advisory Review** may recommend a next action, but **Temporal Outcome Policy** decides the Orchestration Run outcome
 - An **Evidence Contract** gives Hard Check Verification and the Decision Panel stable data instead of relying only on free-form agent output
 - **Node Evidence** records the evidence extracted from Agent Task outcomes for a specific Orchestration Run and node
+- An **Eino Provider Trace** is a kind of projected orchestration artifact evidence, not a separate read model
 - An Issue can have at most one **Active Run** at a time
 - **Run Workflow Identity** gives every run a stable Temporal Workflow ID derived from its projection `plan_id`
 - **Run State** describes orchestration lifecycle while Issue status continues to describe product workflow

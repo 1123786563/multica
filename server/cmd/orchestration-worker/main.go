@@ -45,17 +45,27 @@ func main() {
 		TaskQueue: os.Getenv("TEMPORAL_TASK_QUEUE"),
 		RedisURL:  os.Getenv("REDIS_URL"),
 		Eino: orchestration.EinoReasoningConfig{
-			Provider: os.Getenv("ORCHESTRATION_EINO_PROVIDER"),
-			APIKey:   os.Getenv("ORCHESTRATION_EINO_API_KEY"),
-			Model:    os.Getenv("ORCHESTRATION_EINO_MODEL"),
-			BaseURL:  os.Getenv("ORCHESTRATION_EINO_BASE_URL"),
-			Timeout:  envDuration("ORCHESTRATION_EINO_TIMEOUT", 60*time.Second),
+			Provider:            os.Getenv("ORCHESTRATION_EINO_PROVIDER"),
+			APIKey:              os.Getenv("ORCHESTRATION_EINO_API_KEY"),
+			Model:               os.Getenv("ORCHESTRATION_EINO_MODEL"),
+			BaseURL:             os.Getenv("ORCHESTRATION_EINO_BASE_URL"),
+			Timeout:             envDuration("ORCHESTRATION_EINO_TIMEOUT", 60*time.Second),
+			AllowStatic:         os.Getenv("ORCHESTRATION_EINO_ALLOW_STATIC") == "1",
+			ReasoningProfileRef: envString("ORCHESTRATION_EINO_PROFILE_REF", orchestration.DefaultReasoningProfileRef),
 		},
 	}
 	if err := orchestration.Run(ctx, pool, cfg); err != nil {
 		slog.Error("orchestration worker stopped with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func envString(name, def string) string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	return raw
 }
 
 func envDuration(name string, def time.Duration) time.Duration {

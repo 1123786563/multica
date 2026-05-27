@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ApiClient } from "./client";
 import { parseWithFallback } from "./schema";
+import { IssueOrchestrationSchema } from "./schemas";
 
 // Helper: stub fetch with a single JSON response. Status defaults to 200.
 function stubFetchJson(body: unknown, status = 200) {
@@ -148,6 +149,79 @@ describe("ApiClient schema fallback", () => {
       expect(res.plans[0]?.nodes).toEqual([]);
       expect(res.plans[0]?.events).toEqual([]);
       expect(res.plans[0]?.artifacts).toEqual([]);
+    });
+
+    it("defaults missing orchestration reasoning profile ref for historical plans", () => {
+      const parsed = IssueOrchestrationSchema.parse({
+        plans: [
+          {
+            id: "plan-1",
+            issue_id: "issue-1",
+            status: "completed",
+            workflow_type: "issue_mvp",
+            projection_version: 1,
+            created_at: "2026-05-26T00:00:00Z",
+            updated_at: "2026-05-26T00:00:00Z",
+            summary: { reason_code: "", recommended_action: "none" },
+            available_actions: [],
+            nodes: [],
+            events: [],
+            artifacts: [],
+          },
+        ],
+      });
+
+      expect(parsed.plans[0]?.reasoning_profile_ref).toBe("legacy/default");
+    });
+
+    it("preserves safe Eino provider trace metadata on orchestration artifacts", () => {
+      const parsed = IssueOrchestrationSchema.parse({
+        plans: [
+          {
+            id: "plan-1",
+            issue_id: "issue-1",
+            status: "failed",
+            reasoning_profile_ref: "worker-default",
+            workflow_type: "issue_mvp",
+            projection_version: 1,
+            created_at: "2026-05-26T00:00:00Z",
+            updated_at: "2026-05-26T00:00:00Z",
+            summary: {
+              reason_code: "provider_timeout",
+              recommended_action: "retry_later",
+            },
+            available_actions: [],
+            nodes: [],
+            events: [],
+            artifacts: [
+              {
+                id: "artifact-1",
+                type: "provider_failure_trace",
+                source: "eino",
+                label: "Provider failure",
+                data: {
+                  reasoning_profile_ref: "worker-default",
+                  schema_name: "multica_review_outcome",
+                  schema_version: "1",
+                  provider_label: "openai-compatible",
+                  model: "test-model",
+                  latency_ms: 1500,
+                  usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+                  failure: {
+                    reason_code: "provider_timeout",
+                    message: "Provider timed out",
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(parsed.plans[0]?.artifacts[0]?.data).toMatchObject({
+        reasoning_profile_ref: "worker-default",
+        schema_name: "multica_review_outcome",
+      });
     });
   });
 

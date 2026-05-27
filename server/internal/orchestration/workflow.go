@@ -1,9 +1,11 @@
 package orchestration
 
 import (
+	"errors"
 	"strings"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/multica-ai/multica/server/internal/service"
@@ -22,14 +24,16 @@ const (
 	FinalizeWorkflowActivityName   = "orchestration.finalize_workflow"
 	ProjectAnalysisActivityName    = "orchestration.project_analysis"
 	ProjectSignalAuditActivityName = "orchestration.project_signal_audit"
+	ProjectEinoFailureActivityName = "orchestration.project_eino_failure"
 	maxNodeAttempts                = 2
 )
 
 type IssueWorkflowInput struct {
-	WorkspaceID string
-	IssueID     string
-	PlanID      string
-	WorkflowID  string
+	WorkspaceID         string
+	IssueID             string
+	PlanID              string
+	WorkflowID          string
+	ReasoningProfileRef string
 }
 
 type IssueSnapshot struct {
@@ -52,6 +56,7 @@ type AnalyzeIssueResult struct {
 	RecommendedAgentPrompt string
 	ReasonCode             string
 	RecommendedAction      string
+	Trace                  EinoTrace
 }
 
 type ResultArtifactRef struct {
@@ -96,6 +101,22 @@ type SignalAuditInput struct {
 	Outcome          service.AgentTaskOutcomeSignalInput
 }
 
+type EinoFailureProjectionInput struct {
+	PlanID              string
+	WorkflowNodeKey     string
+	Attempt             int
+	ReasonCode          string
+	RecommendedAction   string
+	Message             string
+	ReasoningProfileRef string
+	SchemaName          string
+	SchemaVersion       string
+	ProviderLabel       string
+	Model               string
+	CapabilityMode      string
+	LatencyMS           int64
+}
+
 type ValidateOutcomeResult struct {
 	Status               string
 	ReasonCode           string
@@ -123,18 +144,20 @@ type ReviewOutcomeResult struct {
 	Evidence          []string
 	Risks             []string
 	RecommendedAction string
+	Trace             EinoTrace
 }
 
 type SummarizeOutcomeResult struct {
 	Summary  string
 	TraceRef string
+	Trace    EinoTrace
 }
 
 func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
-	ao := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
-	}
-	ctx = workflow.WithActivityOptions(ctx, ao)
+	input.ReasoningProfileRef = normalizeReasoningProfileRef(input.ReasoningProfileRef)
+
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	einoCtx := workflow.WithActivityOptions(ctx, einoActivityOptions())
 
 	var issue IssueSnapshot
 	if err := workflow.ExecuteActivity(ctx, LoadIssueActivityName, input).Get(ctx, &issue); err != nil {
@@ -142,8 +165,8 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 	}
 
 	var analysis AnalyzeIssueResult
-	if err := workflow.ExecuteActivity(ctx, AnalyzeIssueActivityName, issue, input).Get(ctx, &analysis); err != nil {
-		return err
+	if err := workflow.ExecuteActivity(einoCtx, AnalyzeIssueActivityName, issue, input).Get(ctx, &analysis); err != nil {
+		return projectEinoFailureAndReturn(ctx, input, "analyze", 1, "multica_analyze_issue", err)
 	}
 
 	outcomeCh := workflow.GetSignalChannel(ctx, AgentTaskOutcomeSignalName)
@@ -181,26 +204,25 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 			validation.TerminalPlanStatus = "waiting_human"
 			validation.RecommendedAction = "review"
 		}
-
-		var review ReviewOutcomeResult
-		if err := workflow.ExecuteActivity(ctx, ReviewOutcomeActivityName, validation, analysis, issue, dispatch).Get(ctx, &review); err != nil {
-			return err
-		}
-		validation = applyOutcomePolicy(validation, review)
-
-		var summary SummarizeOutcomeResult
-		if err := workflow.ExecuteActivity(ctx, SummarizeOutcomeActivityName, review, validation, analysis, issue, dispatch).Get(ctx, &summary); err != nil {
-			return err
-		}
-
 		if validation.ShouldRetry && attempt < maxNodeAttempts {
 			validation.Status = "failed"
 			validation.TerminalPlanStatus = "running"
 			validation.PriorEvidenceSummary = buildPriorEvidenceSummary(validation)
-			if err := workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil); err != nil {
+			if err := workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, ReviewOutcomeResult{}, SummarizeOutcomeResult{}, input, issue, analysis, dispatch, outcome).Get(ctx, nil); err != nil {
 				return err
 			}
 			continue
+		}
+
+		var review ReviewOutcomeResult
+		if err := workflow.ExecuteActivity(einoCtx, ReviewOutcomeActivityName, validation, analysis, issue, dispatch).Get(ctx, &review); err != nil {
+			return projectEinoFailureAndReturn(ctx, input, "review", dispatch.Attempt, "multica_review_outcome", err)
+		}
+		validation = applyOutcomePolicy(validation, review)
+
+		var summary SummarizeOutcomeResult
+		if err := workflow.ExecuteActivity(einoCtx, SummarizeOutcomeActivityName, review, validation, analysis, issue, dispatch).Get(ctx, &summary); err != nil {
+			return projectEinoFailureAndReturn(ctx, input, "summary", dispatch.Attempt, "multica_summarize_outcome", err)
 		}
 
 		if validation.NeedsHumanReview || validation.TerminalPlanStatus == "waiting_human" {
@@ -246,6 +268,82 @@ func IssueWorkflow(ctx workflow.Context, input IssueWorkflowInput) error {
 		return workflow.ExecuteActivity(ctx, FinalizeWorkflowActivityName, validation, review, summary, input, issue, analysis, dispatch, outcome).Get(ctx, nil)
 	}
 	return nil
+}
+
+func defaultActivityOptions() workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		StartToCloseTimeout: 2 * time.Minute,
+	}
+}
+
+func einoActivityOptions() workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		StartToCloseTimeout: 90 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    2 * time.Second,
+			BackoffCoefficient: 2,
+			MaximumInterval:    20 * time.Second,
+			MaximumAttempts:    3,
+		},
+	}
+}
+
+func projectEinoFailureAndReturn(ctx workflow.Context, input IssueWorkflowInput, nodeKey string, attempt int, schemaName string, originalErr error) error {
+	failure, ok := einoFailureFromError(originalErr)
+	if !ok {
+		return originalErr
+	}
+	if attempt <= 0 {
+		attempt = 1
+	}
+	action := recommendedActionForEinoFailure(failure.ReasonCode)
+	projection := EinoFailureProjectionInput{
+		PlanID:              input.PlanID,
+		WorkflowNodeKey:     nodeKey,
+		Attempt:             attempt,
+		ReasonCode:          failure.ReasonCode,
+		RecommendedAction:   action,
+		Message:             failure.Message,
+		ReasoningProfileRef: normalizeReasoningProfileRef(input.ReasoningProfileRef),
+		SchemaName:          schemaName,
+		SchemaVersion:       "1",
+		ProviderLabel:       EinoProviderOpenAICompatible,
+		CapabilityMode:      "json_schema",
+	}
+	if err := workflow.ExecuteActivity(ctx, ProjectEinoFailureActivityName, projection).Get(ctx, nil); err != nil {
+		return err
+	}
+	return originalErr
+}
+
+func einoFailureFromError(err error) (EinoFailureDetails, bool) {
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) {
+		return EinoFailureDetails{}, false
+	}
+	reasonCode := strings.TrimPrefix(appErr.Type(), einoFailureErrorTypePrefix)
+	if reasonCode == appErr.Type() || strings.TrimSpace(reasonCode) == "" {
+		return EinoFailureDetails{}, false
+	}
+	details := EinoFailureDetails{
+		ReasonCode: reasonCode,
+		Message:    appErr.Message(),
+	}
+	if appErr.HasDetails() {
+		var decoded EinoFailureDetails
+		if decodeErr := appErr.Details(&decoded); decodeErr == nil {
+			if strings.TrimSpace(decoded.ReasonCode) != "" {
+				details.ReasonCode = strings.TrimSpace(decoded.ReasonCode)
+			}
+			if strings.TrimSpace(decoded.Message) != "" {
+				details.Message = strings.TrimSpace(decoded.Message)
+			}
+		}
+	}
+	if strings.TrimSpace(details.Message) == "" {
+		details.Message = appErr.Error()
+	}
+	return details, true
 }
 
 func buildPriorEvidenceSummary(validation ValidateOutcomeResult) string {

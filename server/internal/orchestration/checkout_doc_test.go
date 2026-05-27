@@ -18,9 +18,11 @@ func TestTemporalMVPCheckoutDocCoversRepeatableValidation(t *testing.T) {
 		"ORCHESTRATION_EINO_PROVIDER=openai-compatible",
 		"ORCHESTRATION_EINO_API_KEY=replace-me",
 		"ORCHESTRATION_EINO_MODEL=replace-me",
+		"ORCHESTRATION_EINO_PROFILE_REF=worker-default",
+		"ORCHESTRATION_EINO_ALLOW_STATIC=0",
 		"ORCHESTRATION_EINO_LIVE_TEST=1",
-		"TestEinoIssueAnalyzerLiveProviderSmoke",
-		"This smoke test only verifies AnalyzeIssue",
+		"TestEinoReasonerLiveProviderSmoke",
+		"AnalyzeIssue, ReviewOutcome, and SummarizeOutcome",
 		"make orchestration-worker",
 		"make server",
 		"make daemon",
@@ -56,6 +58,8 @@ func TestSelfhostComposePassesEinoProviderConfigToWorker(t *testing.T) {
 		"ORCHESTRATION_EINO_MODEL",
 		"ORCHESTRATION_EINO_BASE_URL",
 		"ORCHESTRATION_EINO_TIMEOUT",
+		"ORCHESTRATION_EINO_PROFILE_REF",
+		"ORCHESTRATION_EINO_ALLOW_STATIC",
 	}
 	for _, want := range required {
 		if !strings.Contains(compose, want) {
@@ -71,5 +75,8 @@ func TestWorkerRegistersSignalAuditProjectionActivity(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "ProjectSignalAuditActivityName") {
 		t.Fatal("orchestration worker must register the signal audit projection activity used by the workflow")
+	}
+	if !strings.Contains(string(raw), "ProjectEinoFailureActivityName") {
+		t.Fatal("orchestration worker must register the Eino failure projection activity used by the workflow")
 	}
 }

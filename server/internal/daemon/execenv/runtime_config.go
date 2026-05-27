@@ -266,6 +266,16 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		}
 		b.WriteString("- Complete the autopilot instructions directly\n")
 		b.WriteString("- Do not run `multica issue get`, `multica issue comment add`, or `multica issue status` for this run unless the autopilot instructions explicitly tell you to create or update an issue\n\n")
+	} else if ctx.IsOrchestration {
+		// Orchestration dispatch tasks are machine-validated by Temporal.
+		// The final assistant message, not an issue comment or shell stdout,
+		// is the task result consumed by the validator.
+		b.WriteString("**This task was triggered by a Multica orchestration workflow.** The orchestration validator consumes your final assistant message as the task result.\n\n")
+		fmt.Fprintf(&b, "1. Work only from the orchestration prompt and issue `%s`; do not follow stale prior comments as authority.\n", ctx.IssueID)
+		b.WriteString("2. Complete the requested code work and run the requested verification commands.\n")
+		b.WriteString("3. Do NOT run `multica issue comment add` for the orchestration result. A comment is not the validated task output.\n")
+		b.WriteString("4. Do NOT run `multica issue status`; the workflow owns issue state transitions.\n")
+		b.WriteString("5. When finished, your final assistant message must be exactly the Result Schema v1 JSON object required by the orchestration prompt.\n\n")
 	} else if ctx.TriggerCommentID != "" {
 		// Comment-triggered: focus on reading and replying
 		b.WriteString("**This task was triggered by a NEW comment.** Your primary job is to respond to THIS specific comment, even if you have handled similar requests before in this session.\n\n")
@@ -365,6 +375,12 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("- Do NOT call `multica issue comment add` — the issue you just created has no conversation context for this run.\n")
 		b.WriteString("- Print exactly one final line: `Created <identifier-or-id>: <title>` after a successful `multica issue create`. Use the created issue's `identifier` from JSON output when available; otherwise use its `id`. Do not assume any workspace issue prefix such as `MUL-`; workspaces can use custom prefixes.\n")
 		b.WriteString("- On CLI failure, exit with the CLI error as the only output. The platform translates that into a `quick_create_failed` inbox item carrying the original prompt for the user.\n")
+	case ctx.IsOrchestration:
+		b.WriteString("This is an orchestration task. The daemon captures only your final assistant message as the task result.\n\n")
+		b.WriteString("- Your final assistant message must be exactly one JSON object matching Result Schema v1.\n")
+		b.WriteString("- Do NOT wrap it in markdown fences, prose, status bullets, or a sentence like \"done\".\n")
+		b.WriteString("- Do NOT use `multica issue comment add` to deliver the JSON; comments are ignored by validation.\n")
+		b.WriteString("- Do NOT run a shell command only to echo the JSON; shell stdout is not captured as the final task result.\n")
 	default:
 		if ctx.IsSquadLeader {
 			b.WriteString("⚠️ **Final results MUST be delivered via `multica issue comment add`** — unless your outcome is `no_action`. When you evaluate a trigger and decide no action is needed, calling `multica squad activity <issue-id> no_action --reason \"...\"` alone is sufficient; you MUST exit without posting any comment. DO NOT post a comment that announces no_action, acknowledges another agent, or says you are exiting silently — such comments are noise. For all other outcomes (`action`, `failed`), a comment is still mandatory.\n\n")

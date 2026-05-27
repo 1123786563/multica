@@ -1,0 +1,33 @@
+这是一个用于验证 Multica 真实代码编排链路的复杂任务。请不要修改仓库文件，不要提交代码，不要运行单元测试。
+
+目标：验证你作为 daemon 执行端，能否在 orchestration 调度下完成一个多步骤代码理解任务，并返回结构化证据。
+
+请按以下步骤执行：
+1. 先执行 `multica repo checkout /Users/wuyongjun/trea/multica` 检出仓库。
+2. 依次读取 CLAUDE.md、server/internal/orchestration/workflow.go、server/internal/orchestration/activities.go、server/internal/daemon/prompt.go。
+3. 在 workflow.go 中定位 IssueWorkflow 入口函数，梳理 workflow 如何创建、如何分发 agent task。
+4. 在 activities.go 中定位 ValidateOutcome 等关键 activity，理解 outcome signal 和 validation 逻辑。
+5. 在 prompt.go 中理解 daemon 如何接收和解析 prompt 并执行任务。
+6. 构建完整调用链路图。
+7. 严格禁止执行 go test、pnpm test、vitest、playwright 等任何测试命令。
+8. 不修改任何文件，不执行 git commit。
+9. 最终输出必须是纯 JSON 对象（Result Schema v1），不含 markdown code block 标记，不含前后导文本。
+
+最终输出要求：你的回复必须是且仅是一个合规的 JSON 对象，符合 Result Schema v1 格式，不能包含 ```json 或 ``` 等 markdown 标记，不能包含任何前导或后导文本。JSON 格式如下：
+{
+  "schema_version": "1",
+  "summary": "[中文分析总结，包含关键代码路径和结论]",
+  "changed_files": [],
+  "artifacts": [],
+  "tests": [{"name": "static-code-path-analysis", "status": "skipped"}],
+  "risks": [],
+  "evidence": [
+    {"type": "file-check", "ref": "workflow.go - 具体函数名和行号"},
+    {"type": "file-check", "ref": "activities.go - 具体函数名和行号"},
+    {"type": "file-check", "ref": "prompt.go - 具体函数名和行号"}
+  ]
+}
+
+在 summary 中包含：完整的代码调用链路描述、每个关键节点的函数签名、以及结论（链路是否可被真实 daemon task 执行）。
+在 evidence 中列出所有实际读取的文件和定位到的关键代码位置。
+changed_files 必须为空数组。

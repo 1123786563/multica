@@ -16,6 +16,7 @@ describe("issueOrchestrationOptions", () => {
           id: "plan-1",
           issue_id: "issue-1",
           status: "running",
+          reasoning_profile_ref: "worker-default",
           workflow_type: "issue_mvp",
           projection_version: 1,
           created_at: "",

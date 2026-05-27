@@ -229,6 +229,8 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 	if ctx.TriggerCommentID != "" {
 		b.WriteString("**Trigger:** Comment Reply\n")
 		b.WriteString("**Triggering comment ID:** `" + ctx.TriggerCommentID + "`\n\n")
+	} else if ctx.IsOrchestration {
+		b.WriteString("**Trigger:** Orchestration Dispatch\n\n")
 	} else {
 		b.WriteString("**Trigger:** New Assignment\n\n")
 	}
